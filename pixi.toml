@@ -1,0 +1,23 @@
+[workspace]
+channels = [
+  "https://prefix.dev/meta-forge",
+  "conda-forge",
+]
+name = "rl_comm"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+integrate-test = "python tests/integrate_tests/run_tests.py"
+
+[dependencies]
+pytorch = "*"
+
+[pypi-dependencies]
+rl_comm = { path = ".", editable = true }
+
+[feature.dev.dependencies]
+pytest = "*"
+
+[environments]
+dev = { features = ["dev"] }
