@@ -8,7 +8,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import DeviceMesh, Replicate, Shard, distribute_tensor, DTensor
 from torch.distributed.tensor.placement_types import _StridedShard
 
-from rl_comm.communication_utils_2 import (
+from rl_comm.communication_utils import (
     gather_broadcast_communicate,
     get_p2p_map,
     get_shard_tensor_shape,
