@@ -111,7 +111,7 @@ def run_test_communication(
 @pytest.mark.parametrize(
     "source_mesh_shape, target_mesh_shape",
     [
-        ((2, 2, 2, 4), (2, 4, 2, 2)),
+        ((2, 2, 2, 2), (2, 4, 2, 4))
     ],
 )
 def test_communication_cpu(source_mesh_shape: Tuple, target_mesh_shape: Tuple):

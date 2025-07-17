@@ -87,7 +87,24 @@ def get_p2p_map(
 
     dtensor_source = distribute_tensor(middle_tensor, source_mesh, source_placements)
     local_shard = dtensor_source.to_local()
-    local_shard.copy_(torch.full_like(local_shard, rank))
+    
+    # Create tensor with rank and coordinates encoded as single values
+    # Use dynamic base calculation to support arbitrary dimensions
+    encoded_tensor = torch.zeros_like(local_shard)
+    
+    # Calculate the maximum coordinate in any dimension to determine encoding base
+    # Use middle_tensor_shape to ensure consistent base across all ranks
+    max_coord = max(middle_tensor_shape) if middle_tensor_shape else 1
+    base = max_coord + 1  # Base should be larger than any coordinate
+    
+    for idx in itertools.product(*[range(dim) for dim in local_shard.shape]):
+        # Encode rank and coordinates into single value using dynamic base
+        encoded_value = rank
+        for i, coord in enumerate(idx):
+            encoded_value = encoded_value * base + coord
+        encoded_tensor[idx] = encoded_value
+    
+    local_shard.copy_(encoded_tensor)
     full_tensor_restored = dtensor_source.full_tensor()
     if rank < source_world_size:
         print(f"Rank {rank} full_tensor_restored: {full_tensor_restored}")
@@ -116,44 +133,94 @@ def get_p2p_map(
 
     # dist.broadcast(full_tensor_restored, src=0)
 
-    forward_map = defaultdict(list)
-    reverse_map = defaultdict(list)
+    def make_nested_defaultdict():
+        return defaultdict(list)
+    
+    forward_map = defaultdict(make_nested_defaultdict)
+    reverse_map = defaultdict(make_nested_defaultdict)
 
     if rank >= source_world_size:
         dtensor_target = distribute_tensor(
             full_tensor_restored, target_mesh, target_placements, src_data_rank=None
         )
-        print(f"Rank {rank-source_world_size} dtensor_target: {dtensor_target}")
+        print(f"Rank {rank-source_world_size} dtensor_target: {dtensor_target._local_tensor}")
         local_target_shard = dtensor_target.to_local()
-        flat_tensor = local_target_shard.flatten()
-        for i in range(flat_tensor.numel()):
-            source_device = int(flat_tensor[i].item())
-            forward_map[source_device].append(rank)
-            reverse_map[rank].append(source_device)
+        
+        # Calculate the same base used for encoding
+        # Use middle_tensor_shape to ensure consistent base across all ranks
+        max_coord = max(middle_tensor_shape) if middle_tensor_shape else 1
+        base = max_coord + 1
+        
+        # Iterate through all indices in the local shard
+        for target_idx in itertools.product(*[range(dim) for dim in local_target_shard.shape]):
+            encoded_value = int(local_target_shard[target_idx].item())
+            
+            # Decode the rank and source indices from the encoded value
+            # Extract coordinates in reverse order
+            source_indices = []
+            temp = encoded_value
+            for _ in range(len(target_idx)):
+                coord = temp % base
+                source_indices.append(coord)
+                temp = temp // base
+            
+            # The remaining value is the source rank
+            source_rank = temp
+            
+            # Reverse the indices list since we extracted them in reverse order
+            source_indices.reverse()
+            source_idx = tuple(source_indices)
+            
+            # Build forward_map: source_rank -> {source_idx: [target_ranks]}
+            target_rank = rank
+            forward_map[source_rank][source_idx].append(target_rank)
+            
+            # Build reverse_map: target_rank -> {target_idx: [(source_rank, source_idx)]}
+            reverse_map[target_rank][target_idx].append((source_rank, source_idx))
     dist.barrier()
+
+    # Convert defaultdict to regular dict for serialization
+    forward_map_regular = {}
+    for k, v in forward_map.items():
+        forward_map_regular[k] = dict(v)
+    
+    reverse_map_regular = {}
+    for k, v in reverse_map.items():
+        reverse_map_regular[k] = dict(v)
 
     all_forward_maps = [None] * (source_world_size + target_world_size)
     all_reverse_maps = [None] * (source_world_size + target_world_size)
 
-    dist.all_gather_object(all_forward_maps, forward_map, group=None)
-    dist.all_gather_object(all_reverse_maps, reverse_map, group=None)
+    dist.all_gather_object(all_forward_maps, forward_map_regular, group=None)
+    dist.all_gather_object(all_reverse_maps, reverse_map_regular, group=None)
 
-    merged_forward_map = defaultdict(list)
-    merged_reverse_map = defaultdict(list)
+    merged_forward_map = defaultdict(make_nested_defaultdict)
+    merged_reverse_map = defaultdict(make_nested_defaultdict)
 
     for rank_reverse_map in all_reverse_maps:
         if rank_reverse_map is not None:
-            for target_rank, source_devices in rank_reverse_map.items():
-                merged_reverse_map[target_rank].extend(source_devices)
+            for target_rank, target_idx_map in rank_reverse_map.items():
+                for target_idx, source_info_list in target_idx_map.items():
+                    merged_reverse_map[target_rank][target_idx].extend(source_info_list)
 
     for rank_forward_map in all_forward_maps:
         if rank_forward_map is not None:
-            for source_device, target_ranks in rank_forward_map.items():
-                merged_forward_map[source_device].extend(target_ranks)
+            for source_rank, source_idx_map in rank_forward_map.items():
+                for source_idx, target_ranks in source_idx_map.items():
+                    merged_forward_map[source_rank][source_idx].extend(target_ranks)
 
+    # Convert nested defaultdict to regular dict
+    final_forward_map = {}
+    for source_rank, source_idx_map in merged_forward_map.items():
+        final_forward_map[source_rank] = dict(source_idx_map)
+    
+    final_reverse_map = {}
+    for target_rank, target_idx_map in merged_reverse_map.items():
+        final_reverse_map[target_rank] = dict(target_idx_map)
+    
     return (
-        dict(merged_forward_map),
-        dict(merged_reverse_map),
+        final_forward_map,
+        final_reverse_map,
         source_num_slicers,
         target_num_slicers,
     )
@@ -201,8 +268,8 @@ def gather_broadcast_communicate(
 
 def p2p_communicate(
     rank: int,
-    forward_map: Dict[int, List[int]],
-    reverse_map: Dict[int, List[List[int]]],
+    forward_map: Dict[int, Dict[Tuple, List[int]]],
+    reverse_map: Dict[int, Dict[Tuple, List[Tuple[int, Tuple]]]],
     local_tensor: torch.Tensor,
     source_num_slicers: List[int],
     target_num_slicers: List[int],
@@ -210,53 +277,94 @@ def p2p_communicate(
     device: str = "cpu",
 ) -> Optional[torch.Tensor]:
     
-    received_tensors = {}
     send_reqs = []
     recv_reqs = []
+    received_data = {}
 
+    # Send data to target ranks based on forward_map
     if rank in forward_map:
+        # Get all possible slice tuples for this local tensor
         slicer_tuples = get_slicer_tuples(local_tensor.shape, source_num_slicers)
-        for i, target_rank in enumerate(forward_map[rank]):
-            slice_index = i % len(slicer_tuples)
-            chunk_to_send = local_tensor[slicer_tuples[slice_index]]
-            if target_rank == rank:
-                received_tensors[target_rank] = chunk_to_send
-            else:
-                req = dist.isend(tensor=chunk_to_send.contiguous(), dst=target_rank)
-                send_reqs.append(req)
+        
+        for source_idx, target_ranks in forward_map[rank].items():
+            # source_idx is like (0,0,1,2), etc. Convert to linear index for slicer_tuples
+            # Calculate linear index from multi-dimensional index
+            linear_idx = 0
+            multiplier = 1
+            for i in reversed(range(len(source_idx))):
+                linear_idx += source_idx[i] * multiplier
+                multiplier *= source_num_slicers[i]
+            
+            slice_tuple = slicer_tuples[linear_idx]
+            data_to_send = local_tensor[slice_tuple]
+            
+            for target_rank in target_ranks:
+                if target_rank == rank:
+                    # Store locally if sending to self
+                    received_data[(rank, source_idx)] = data_to_send
+                else:
+                    # Send to other ranks
+                    req = dist.isend(tensor=data_to_send.contiguous(), dst=target_rank)
+                    send_reqs.append(req)
 
+    # Receive data from source ranks based on reverse_map
+    recv_buffers = {}
     if rank in reverse_map:
-        expected_chunk_shape = [
-            target_tensor_shape[dim] // num_slices
-            for dim, num_slices in enumerate(target_num_slicers)
-        ]
-        for source_rank in reverse_map[rank]:
-            if source_rank != rank:
-                recv_buffer = torch.empty(expected_chunk_shape, device=device)
-                req = dist.irecv(tensor=recv_buffer, src=source_rank)
-                recv_reqs.append(req)
-                received_tensors[source_rank] = recv_buffer
+        # Calculate the size of each chunk being received based on target slicing
+        chunk_shape = []
+        for dim, num_slices in enumerate(target_num_slicers):
+            if num_slices > 1:
+                chunk_shape.append(target_tensor_shape[dim] // num_slices)
+            else:
+                chunk_shape.append(target_tensor_shape[dim])
+        chunk_shape = tuple(chunk_shape)
+        
+        for target_idx, source_info_list in reverse_map[rank].items():
+            for source_rank, source_idx in source_info_list:
+                if source_rank != rank:
+                    # The receive buffer should match the actual chunk size being sent
+                    recv_buffer = torch.empty(chunk_shape, dtype=local_tensor.dtype if local_tensor is not None else torch.float32, device=device)
+                    req = dist.irecv(tensor=recv_buffer, src=source_rank)
+                    recv_reqs.append(req)
+                    recv_buffers[(target_idx, source_rank, source_idx)] = recv_buffer
 
-    # Wait for all operations to complete
+    # Wait for all sends to complete
     for req in send_reqs:
         req.wait()
-    for req in recv_reqs:
-        req.wait()
 
+    # Wait for all receives and assemble final tensor
+    final_tensor = None
     if rank in reverse_map:
-        final_tensor = torch.empty(
-            target_tensor_shape,
-            dtype=received_tensors[reverse_map[rank][0]].dtype,
-            device=received_tensors[reverse_map[rank][0]].device,
-        )
+        final_tensor = torch.empty(target_tensor_shape, dtype=local_tensor.dtype if local_tensor is not None else torch.float32, device=device)
+        
+        # Wait for all receives to complete
+        for req in recv_reqs:
+            req.wait()
+        
+        # Assemble received chunks into final tensor
+        for target_idx, source_info_list in reverse_map[rank].items():
+            for source_rank, source_idx in source_info_list:
+                if source_rank != rank:
+                    recv_buffer = recv_buffers[(target_idx, source_rank, source_idx)]
+                elif (source_rank, source_idx) in received_data:
+                    # Handle local data (self-sends)
+                    recv_buffer = received_data[(source_rank, source_idx)]
+                else:
+                    continue
+                
+                # Convert target_idx to actual slice coordinates
+                # target_idx is like (i, j), convert to slice ranges
+                slice_ranges = []
+                for dim, coord in enumerate(target_idx):
+                    if target_num_slicers[dim] > 1:
+                        slice_size = target_tensor_shape[dim] // target_num_slicers[dim]
+                        start = coord * slice_size
+                        end = start + slice_size
+                        slice_ranges.append(slice(start, end))
+                    else:
+                        slice_ranges.append(slice(None))
+                
+                slice_tuple = tuple(slice_ranges)
+                final_tensor[slice_tuple] = recv_buffer
 
-        slicer_tuples = get_slicer_tuples(
-            target_tensor_shape, target_num_slicers
-        )
-        for i, source_device in enumerate(reverse_map[rank]):
-            slice_tuple = slicer_tuples[i]
-            final_tensor[slice_tuple] = received_tensors[source_device]
-
-        return final_tensor
-
-    return None
+    return final_tensor
