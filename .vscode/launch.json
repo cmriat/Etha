@@ -10,14 +10,26 @@
             "request": "launch",
             "module": "torch.distributed.run",
             "args":[
-                "--nproc_per_node=16",
-                "/home/jingyi/rl_comm/tests/integrate_tests/test_integrate_p2p.py",
+                "--nproc_per_node=24",
+                "tests/integrate_tests/test_integrate_p2p_cpu.py",
             ],
             "console": "integratedTerminal",
             "justMyCode": true,
             "env": {
-                "TEST_CASE_JSON": "{\"name\": \"test_transfer_general_case\", \"source_mesh\": [1, 2, 2, 1, 2], \"target_mesh\": [1, 4, 1, 1, 2]}"
+                "TEST_CASE_JSON": "{\"name\": \"test_transfer_general_case\", \"source_mesh\": [1, 2, 2, 1, 2], \"target_mesh\": [1, 4, 1, 2, 2]}"
             }
+        },
+                {
+            "name": "Python: dev_test",
+            "type": "python",
+            "request": "launch",
+            "module": "torch.distributed.run",
+            "args":[
+                "--nproc_per_node=6",
+                "src/rl_comm/p2p_map_new.py",
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
         },
     ]
 }
