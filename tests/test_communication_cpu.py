@@ -36,10 +36,10 @@ def run_test_communication(
         ),
     )
 
-    # source_specs = [Replicate(), _StridedShard(1, split_factor=2), Replicate(), Shard(1)]
-    # target_specs = [Replicate(), _StridedShard(1, split_factor=2), Replicate(), Shard(1)]
-    source_specs = [Replicate(), Shard(0), Replicate(), Shard(1)]
-    target_specs = [Replicate(), Shard(0), Replicate(), Shard(1)]
+    source_specs = [Replicate(), _StridedShard(1, split_factor=2), Replicate(), Shard(1)]
+    target_specs = [Replicate(), _StridedShard(1, split_factor=2), Replicate(), Shard(1)]
+    # source_specs = [Replicate(), Shard(0), Replicate(), Shard(1)]
+    # target_specs = [Replicate(), Shard(0), Replicate(), Shard(1)]
     # Dummy tensor shape
     torch.manual_seed(0)
     shape = (64, 64)

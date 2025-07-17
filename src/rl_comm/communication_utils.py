@@ -50,7 +50,7 @@ def get_p2p_map(
     source_world_size: int,
     target_world_size: int,
     device: str = "cpu",
-) -> Tuple[Dict[int, List[int]], Dict[int, List[List[int]]], List[int], List[int]]:
+) -> Tuple[Dict[int, Dict[Tuple, List[int]]], Dict[int, Dict[Tuple, List[Tuple[int, Tuple]]]], List[int], List[int]]:
 
     source_tensor_ndim = max(
         (placement.dim for placement in source_placements if isinstance(placement, Shard)),
@@ -75,7 +75,8 @@ def get_p2p_map(
         math.lcm(source_shard_shape[i], target_shard_shape[i])
         for i in range(len(source_shard_shape))
     )
-    middle_tensor = torch.zeros(middle_tensor_shape, device=device)
+    # Always use CPU for mapping computation regardless of actual communication device
+    middle_tensor = torch.zeros(middle_tensor_shape, device="cpu")
     source_num_slicers = []
     target_num_slicers = []
     for o, m, t in zip(source_shard_shape, middle_tensor_shape, target_shard_shape):
@@ -100,14 +101,12 @@ def get_p2p_map(
     for idx in itertools.product(*[range(dim) for dim in local_shard.shape]):
         # Encode rank and coordinates into single value using dynamic base
         encoded_value = rank
-        for i, coord in enumerate(idx):
+        for coord in idx:
             encoded_value = encoded_value * base + coord
         encoded_tensor[idx] = encoded_value
     
     local_shard.copy_(encoded_tensor)
     full_tensor_restored = dtensor_source.full_tensor()
-    if rank < source_world_size:
-        print(f"Rank {rank} full_tensor_restored: {full_tensor_restored}")
     dist.barrier()
     if rank < source_world_size:
         # Source ranks send to target ranks
@@ -123,15 +122,10 @@ def get_p2p_map(
             req.wait()
     else:
         # Target ranks receive from source ranks
-        full_tensor_restored = torch.empty(middle_tensor_shape, device=device)
+        full_tensor_restored = torch.empty(middle_tensor_shape, device="cpu")
         source_rank = (rank - source_world_size) % source_world_size
         req = dist.irecv(full_tensor_restored, src=source_rank)
         req.wait()
-    # if rank >= source_world_size:
-    #     # Target ranks receive the full tensor
-    #     full_tensor_restored = torch.empty(middle_tensor_shape, device=device)
-
-    # dist.broadcast(full_tensor_restored, src=0)
 
     def make_nested_defaultdict():
         return defaultdict(list)
@@ -143,7 +137,6 @@ def get_p2p_map(
         dtensor_target = distribute_tensor(
             full_tensor_restored, target_mesh, target_placements, src_data_rank=None
         )
-        print(f"Rank {rank-source_world_size} dtensor_target: {dtensor_target._local_tensor}")
         local_target_shard = dtensor_target.to_local()
         
         # Calculate the same base used for encoding
