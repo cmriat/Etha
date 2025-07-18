@@ -44,7 +44,7 @@ def get_slicer_tuples(tensor_shape: torch.Tensor, source_num_slicers: List[int])
 def get_p2p_map(
     source_mesh: DeviceMesh,
     source_placements: Tuple[Placement, ...],
-    target_mesh: DeviceMesh, # TODO: optimize redistribute
+    target_mesh: DeviceMesh,
     target_placements: Tuple[Placement, ...],
     rank: int,
     source_world_size: int,
