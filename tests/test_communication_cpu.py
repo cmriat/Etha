@@ -36,10 +36,8 @@ def run_test_communication(
         ),
     )
 
-    source_specs = [Replicate(), _StridedShard(1, split_factor=2), Replicate(), Shard(1)]
+    source_specs = [Replicate(), Replicate(), Shard(0), Shard(1)]
     target_specs = [Replicate(), _StridedShard(1, split_factor=2), Replicate(), Shard(1)]
-    # source_specs = [Replicate(), Shard(0), Replicate(), Shard(1)]
-    # target_specs = [Replicate(), Shard(0), Replicate(), Shard(1)]
     # Dummy tensor shape
     torch.manual_seed(0)
     shape = (64, 64)
@@ -47,6 +45,7 @@ def run_test_communication(
 
     is_in_source = rank < source_world_size
     local_tensor = None
+    source_dist_tensor = None
     if is_in_source:
         source_dist_tensor = distribute_tensor(origin_tensor, source_mesh, source_specs)
         local_tensor = source_dist_tensor.to_local()
@@ -89,7 +88,7 @@ def run_test_communication(
         source_specs,
         target_mesh,
         target_specs,
-        local_tensor,
+        source_dist_tensor,
         origin_tensor,
         source_world_size,
         device,
@@ -100,7 +99,7 @@ def run_test_communication(
         assert torch.allclose(full_p2p_result, origin_tensor)
         # Assert results are close (due to potential floating point differences in distributed ops)
         if p2p_result is not None and gather_broadcast_result is not None:
-            assert torch.allclose(p2p_result, gather_broadcast_result)
+            assert torch.allclose(p2p_result, gather_broadcast_result.to_local())
         elif p2p_result is None and gather_broadcast_result is None:
             pass  # Both are None, which is expected if rank is not in target mesh
         else:

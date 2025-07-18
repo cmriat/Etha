@@ -44,7 +44,7 @@ def get_slicer_tuples(tensor_shape: torch.Tensor, source_num_slicers: List[int])
 def get_p2p_map(
     source_mesh: DeviceMesh,
     source_placements: Tuple[Placement, ...],
-    target_mesh: DeviceMesh,
+    target_mesh: DeviceMesh, # TODO: optimize redistribute
     target_placements: Tuple[Placement, ...],
     rank: int,
     source_world_size: int,
@@ -76,7 +76,7 @@ def get_p2p_map(
         for i in range(len(source_shard_shape))
     )
     # Always use CPU for mapping computation regardless of actual communication device
-    middle_tensor = torch.zeros(middle_tensor_shape, device="cpu")
+    middle_tensor = torch.zeros(middle_tensor_shape, device=device)
     source_num_slicers = []
     target_num_slicers = []
     for o, m, t in zip(source_shard_shape, middle_tensor_shape, target_shard_shape):
@@ -122,7 +122,7 @@ def get_p2p_map(
             req.wait()
     else:
         # Target ranks receive from source ranks
-        full_tensor_restored = torch.empty(middle_tensor_shape, device="cpu")
+        full_tensor_restored = torch.empty(middle_tensor_shape, device=device)
         source_rank = (rank - source_world_size) % source_world_size
         req = dist.irecv(full_tensor_restored, src=source_rank)
         req.wait()
@@ -220,11 +220,9 @@ def get_p2p_map(
 
 def gather_broadcast_communicate(
     rank: int,
-    source_mesh: DeviceMesh,
-    source_specs: Tuple[Placement, ...],
     target_mesh: DeviceMesh,
     target_specs: Tuple[Placement, ...],
-    local_tensor: torch.Tensor,
+    local_tensor: DTensor,
     origin_tensor: torch.Tensor,
     source_world_size: int,
     device: str,
@@ -235,8 +233,7 @@ def gather_broadcast_communicate(
     gathered_tensor = None
     # 1. Gather the full tensor. After this, every rank in source_mesh has a full copy.
     if rank < source_world_size:
-        source_dtensor = DTensor.from_local(local_tensor, source_mesh, source_specs)
-        gathered_tensor = source_dtensor.full_tensor()
+        gathered_tensor = local_tensor.full_tensor()
 
     # 2. Broadcast the full tensor from a single source (rank 0) to all other ranks.
     # Ranks outside the source_mesh need a placeholder tensor to receive the data.
@@ -254,8 +251,7 @@ def gather_broadcast_communicate(
     # 3. Distribute the now-local full tensor on target ranks.
     received_tensor = None
     if rank >= source_world_size:
-        target_dtensor = distribute_tensor(gathered_tensor, target_mesh, target_specs)
-        received_tensor = target_dtensor.to_local()
+        received_tensor = distribute_tensor(gathered_tensor, target_mesh, target_specs)
 
     return received_tensor
 
