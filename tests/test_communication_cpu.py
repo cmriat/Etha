@@ -8,7 +8,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import DeviceMesh, Replicate, Shard, distribute_tensor, DTensor
 from torch.distributed.tensor.placement_types import _StridedShard
 
-from rl_comm.communication_utils import (
+from rl_comm import (
     gather_broadcast_communicate,
     get_p2p_map,
     get_shard_tensor_shape,
@@ -44,11 +44,9 @@ def run_test_communication(
     origin_tensor = torch.randn(shape, device=device)
 
     is_in_source = rank < source_world_size
-    local_tensor = None
     source_dist_tensor = None
     if is_in_source:
         source_dist_tensor = distribute_tensor(origin_tensor, source_mesh, source_specs)
-        local_tensor = source_dist_tensor.to_local()
 
     target_local_shape = get_shard_tensor_shape(
         origin_tensor.shape, target_mesh, target_specs
@@ -60,9 +58,6 @@ def run_test_communication(
         source_specs,
         target_mesh,
         target_specs,
-        rank,
-        source_world_size,
-        target_world_size,
         device,
     )
     if rank == 0:
@@ -71,10 +66,9 @@ def run_test_communication(
         print(f"Source Num Slicers: {source_num_slicers}")
         print(f"Target Num Slicers: {target_num_slicers}")
     p2p_result = p2p_communicate(
-        rank,
         forward_map,
         reverse_map,
-        local_tensor,
+        source_dist_tensor,
         source_num_slicers,
         target_num_slicers,
         target_local_shape,
@@ -83,9 +77,6 @@ def run_test_communication(
 
     # Test Gather-Broadcast Method
     gather_broadcast_result = gather_broadcast_communicate(
-        rank,
-        source_mesh,
-        source_specs,
         target_mesh,
         target_specs,
         source_dist_tensor,
