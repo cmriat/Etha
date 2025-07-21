@@ -259,19 +259,20 @@ def p2p_communicate(
     rank: int,
     forward_map: Dict[int, Dict[Tuple, List[int]]],
     reverse_map: Dict[int, Dict[Tuple, List[Tuple[int, Tuple]]]],
-    local_tensor: torch.Tensor,
+    local_tensor: DTensor,
     source_num_slicers: List[int],
     target_num_slicers: List[int],
     target_tensor_shape: torch.Size,
     device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
 ) -> Optional[torch.Tensor]:
     
     send_reqs = []
     recv_reqs = []
     received_data = {}
-
     # Send data to target ranks based on forward_map
     if rank in forward_map:
+        local_tensor = local_tensor.to_local()
         # Get all possible slice tuples for this local tensor
         slicer_tuples = get_slicer_tuples(local_tensor.shape, source_num_slicers)
         
@@ -312,7 +313,7 @@ def p2p_communicate(
             for source_rank, source_idx in source_info_list:
                 if source_rank != rank:
                     # The receive buffer should match the actual chunk size being sent
-                    recv_buffer = torch.empty(chunk_shape, dtype=local_tensor.dtype if local_tensor is not None else torch.float32, device=device)
+                    recv_buffer = torch.empty(chunk_shape, dtype=dtype, device=device)
                     req = dist.irecv(tensor=recv_buffer, src=source_rank)
                     recv_reqs.append(req)
                     recv_buffers[(target_idx, source_rank, source_idx)] = recv_buffer
@@ -324,7 +325,7 @@ def p2p_communicate(
     # Wait for all receives and assemble final tensor
     final_tensor = None
     if rank in reverse_map:
-        final_tensor = torch.empty(target_tensor_shape, dtype=local_tensor.dtype if local_tensor is not None else torch.float32, device=device)
+        final_tensor = torch.empty(target_tensor_shape, dtype=dtype, device=device)
         
         # Wait for all receives to complete
         for req in recv_reqs:
