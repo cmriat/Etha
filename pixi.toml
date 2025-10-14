@@ -24,6 +24,7 @@ pandas = "*"
 jupyterlab = "*"
 pytest = "*"
 ruff = "*"
+pre-commit = ">=4.3.0,<5"
 
 [pypi-dependencies]
 rockstar = { path = ".", editable = true }

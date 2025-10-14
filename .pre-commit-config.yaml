@@ -1,0 +1,22 @@
+repos:
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  # Ruff version.
+  rev: v0.12.11
+  hooks:
+    # Run the linter.
+    - id: ruff-check
+      types_or: [ python, pyi ]
+      args: [--no-fix]
+      stages: [manual]
+    - id: ruff-check
+      types_or: [ python, pyi ]
+      args: [--fix]
+    # Run the formatter.
+    - id: ruff-format
+      types_or: [ python, pyi ]
+
+- repo: https://github.com/kynan/nbstripout
+  rev: 0.8.1
+  hooks:
+    - id: nbstripout
+      args: ['--drop-empty-cells', '--strip-init-cells', '--extra-keys= metadata.celltoolbar metadata.kernelspec metadata.language_info.codemirror_mode.version metadata.language_info.pygments_lexer metadata.language_info.version metadata.toc metadata.notify_time metadata.varInspector cell.metadata.heading_collapsed cell.metadata.hidden cell.metadata.code_folding cell.metadata.tags cell.metadata.init_cell']
