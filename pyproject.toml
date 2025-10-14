@@ -13,7 +13,7 @@ exclude = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/susser_tod"]
+packages = ["src/rockstar"]
 
 [tool.ruff]
 line-length = 120

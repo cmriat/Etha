@@ -10,12 +10,18 @@ version = "0.1.0"
 
 [tasks]
 
+[tasks.submit]
+cmd = "kjobctl create slurm --first-node-ip -- --chdir $PIXI_PROJECT_ROOT --output $PIXI_PROJECT_ROOT/jobs-%j-%N.out --error $PIXI_PROJECT_ROOT/jobs-%j-%N.err {{ script }}"
+args = ["script"]
+
 [system-requirements]
 cuda = "12.9"
 
 [dependencies]
 cuda = "12.9.*"
 pytorch = "*"
+ucx = {version = "*", channel = "conda-forge"}
+nvshmem4py = "0.1.2.*"
 
 [feature.dev.dependencies]
 matplotlib = "*"
@@ -24,7 +30,7 @@ pandas = "*"
 jupyterlab = "*"
 pytest = "*"
 ruff = "*"
-pre-commit = ">=4.3.0,<5"
+pre-commit = "*"
 
 [pypi-dependencies]
 rockstar = { path = ".", editable = true }
