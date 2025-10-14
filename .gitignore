@@ -10,3 +10,5 @@ results
 
 *.err
 *.out
+
+*.ruff_cache/
