@@ -1,18 +1,20 @@
-import math
+"""Test communication methods on CPU."""
+
 import os
+import math
 from typing import Tuple
 
-import pytest
 import torch
+import pytest
 import torch.distributed as dist
-from torch.distributed._tensor import DeviceMesh, Replicate, Shard, distribute_tensor, DTensor
+from torch.distributed._tensor import Shard, DTensor, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
 
-from rl_comm import (
-    gather_broadcast_communicate,
+from rockstar import (
     get_p2p_map,
-    get_shard_tensor_shape,
     p2p_communicate,
+    get_shard_tensor_shape,
+    gather_broadcast_communicate,
 )
 
 
@@ -31,9 +33,7 @@ def run_test_communication(
     source_mesh = DeviceMesh(device, torch.arange(source_world_size).view(source_mesh_shape))
     target_mesh = DeviceMesh(
         device,
-        torch.arange(source_world_size, source_world_size + target_world_size).view(
-            target_mesh_shape
-        ),
+        torch.arange(source_world_size, source_world_size + target_world_size).view(target_mesh_shape),
     )
 
     source_specs = [Replicate(), Replicate(), Shard(0), Shard(1)]
@@ -48,9 +48,7 @@ def run_test_communication(
     if is_in_source:
         source_dist_tensor = distribute_tensor(origin_tensor, source_mesh, source_specs)
 
-    target_local_shape = get_shard_tensor_shape(
-        origin_tensor.shape, target_mesh, target_specs
-    )
+    target_local_shape = get_shard_tensor_shape(origin_tensor.shape, target_mesh, target_specs)
 
     # Test P2P Map Method
     forward_map, reverse_map, source_num_slicers, target_num_slicers = get_p2p_map(
@@ -94,15 +92,16 @@ def run_test_communication(
         elif p2p_result is None and gather_broadcast_result is None:
             pass  # Both are None, which is expected if rank is not in target mesh
         else:
-            assert False, f"One result is None, the other is not. P2P: {p2p_result}, Gather-Broadcast: {gather_broadcast_result}"
+            raise RuntimeError(
+                f"One result is None, the other is not. P2P: {p2p_result}, Gather-Broadcast: {gather_broadcast_result}"
+            )
 
     dist.destroy_process_group()
 
+
 @pytest.mark.parametrize(
     "source_mesh_shape, target_mesh_shape",
-    [
-        ((2, 2, 2, 2), (2, 4, 2, 4))
-    ],
+    [((2, 2, 2, 2), (2, 4, 2, 4))],
 )
 def test_communication_cpu(source_mesh_shape: Tuple, target_mesh_shape: Tuple):
     source_world_size = math.prod(source_mesh_shape)
@@ -110,8 +109,8 @@ def test_communication_cpu(source_mesh_shape: Tuple, target_mesh_shape: Tuple):
     world_size = source_world_size + target_world_size
     device = "cpu"
 
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "29500"
 
     # Use torch.multiprocessing.spawn to run the test in multiple processes
     # This is a common pattern for testing distributed PyTorch applications
