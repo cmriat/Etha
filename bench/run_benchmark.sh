@@ -1,5 +1,5 @@
 #!/bin/zsh
-#SBATCH --job-name=rockstar_benchmark
+#SBATCH --job-name=etha_benchmark
 #SBATCH --gpus-per-task=nvidia.com/gpu:8
 #SBATCH --nodes=2
 #SBATCH --ntasks=2

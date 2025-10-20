@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import torch.distributed as dist
 from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 
-from rockstar import (
+from etha import (
     get_p2p_map,
     p2p_communicate,
     get_shard_tensor_shape,

@@ -4,7 +4,7 @@ channels = [
   "https://prefix.dev/meta-forge",
   "conda-forge",
 ]
-name = "rockstar"
+name = "etha"
 platforms = ["linux-64"]
 version = "0.1.0"
 
@@ -22,6 +22,7 @@ cuda = "12.9.*"
 pytorch = "*"
 ucx = {version = "*", channel = "conda-forge"}
 nvshmem4py = "0.1.2.*"
+pyzmq = ">=27.1.0,<28"
 
 [feature.dev.dependencies]
 matplotlib = "*"
@@ -33,7 +34,7 @@ ruff = "*"
 pre-commit = "*"
 
 [pypi-dependencies]
-rockstar = { path = ".", editable = true }
+etha = { path = ".", editable = true }
 
 [environments]
 dev = { features = ["dev"], solve-group = "default" }

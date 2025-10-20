@@ -1,7 +1,7 @@
 [project]
-name = "rockstar"
+name = "etha"
 version = "0.0.1"
-description = "rockstar"
+description = "etha"
 
 [build-system]
 build-backend = "hatchling.build"
@@ -13,7 +13,7 @@ exclude = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rockstar"]
+packages = ["src/etha"]
 
 [tool.ruff]
 line-length = 120
