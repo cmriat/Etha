@@ -42,7 +42,9 @@ select = [
   # import rules
   "TID251",
   # docstring
-  "D"
+  "D",
+  # pyupgrade - modernize Python code
+  "UP"
 ]
 ignore = [
   # mutable defaults
