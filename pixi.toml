@@ -23,6 +23,9 @@ pytorch = "*"
 ucx = {version = "*", channel = "conda-forge"}
 nvshmem4py = "0.1.2.*"
 pyzmq = ">=27.1.0,<28"
+python-lmdb = ">=1.7.5,<2"
+msgspec = ">=0.19.0,<0.20"
+universal_pathlib = ">=0.3.4,<0.4"
 
 [feature.dev.dependencies]
 matplotlib = "*"

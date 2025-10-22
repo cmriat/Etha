@@ -8,7 +8,11 @@ __pycache__
 
 results
 
+dev/
+
 *.err
 *.out
 
 *.ruff_cache/
+
+.pytest_cache/

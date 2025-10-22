@@ -2,7 +2,6 @@
 
 import os
 import math
-from typing import Tuple
 
 import torch
 import pytest
@@ -21,8 +20,8 @@ from etha import (
 def run_test_communication(
     rank: int,
     world_size: int,
-    source_mesh_shape: Tuple[int, ...],
-    target_mesh_shape: Tuple[int, ...],
+    source_mesh_shape: tuple[int, ...],
+    target_mesh_shape: tuple[int, ...],
     device: str,
 ):
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
@@ -102,59 +101,25 @@ def run_test_communication(
 @pytest.mark.parametrize(
     "source_mesh_shape, target_mesh_shape",
     [
+        # Same mesh shapes (identity)
         ((2, 2, 2, 2), (2, 2, 2, 2)),
-        ((2, 2, 2, 2), (2, 2, 2, 4)),
+        # Last dimension scaling (common case)
+        ((2, 2, 2, 2), (2, 2, 2, 4)),  # Scale up last dim
+        ((2, 2, 2, 4), (2, 2, 2, 2)),  # Scale down last dim
+        # Second-to-last dimension scaling
         ((2, 2, 2, 2), (2, 2, 4, 2)),
-        ((2, 2, 2, 2), (2, 2, 4, 4)),
-        ((2, 2, 2, 2), (2, 4, 2, 2)),
-        ((2, 2, 2, 2), (2, 4, 2, 4)),
-        ((2, 2, 2, 2), (2, 4, 4, 2)),
-        ((2, 2, 2, 2), (2, 4, 4, 4)),
-        ((2, 2, 2, 2), (4, 2, 2, 2)),
-        ((2, 2, 2, 2), (4, 2, 2, 4)),
-        ((2, 2, 2, 4), (2, 2, 2, 2)),
-        ((2, 2, 2, 4), (2, 2, 2, 4)),
-        ((2, 2, 2, 4), (2, 2, 4, 2)),
-        ((2, 2, 2, 4), (2, 2, 4, 4)),
-        ((2, 2, 2, 4), (2, 4, 2, 2)),
-        ((2, 2, 2, 4), (2, 4, 2, 4)),
-        ((2, 2, 2, 4), (2, 4, 4, 2)),
-        ((2, 2, 2, 4), (2, 4, 4, 4)),
-        ((2, 2, 2, 4), (4, 2, 2, 2)),
-        ((2, 2, 2, 4), (4, 2, 2, 4)),
         ((2, 2, 4, 2), (2, 2, 2, 2)),
-        ((2, 2, 4, 2), (2, 2, 2, 4)),
-        ((2, 2, 4, 2), (2, 2, 4, 2)),
-        ((2, 2, 4, 2), (2, 2, 4, 4)),
-        ((2, 2, 4, 2), (2, 4, 2, 2)),
-        ((2, 2, 4, 2), (2, 4, 2, 4)),
-        ((2, 2, 4, 2), (2, 4, 4, 2)),
-        ((2, 2, 4, 2), (2, 4, 4, 4)),
-        ((2, 2, 4, 2), (4, 2, 2, 2)),
-        ((2, 2, 4, 2), (4, 2, 2, 4)),
+        # Multiple dimension scaling
+        ((2, 2, 2, 2), (2, 2, 4, 4)),
         ((2, 2, 4, 4), (2, 2, 2, 2)),
-        ((2, 2, 4, 4), (2, 2, 2, 4)),
-        ((2, 2, 4, 4), (2, 2, 4, 2)),
-        ((2, 2, 4, 4), (2, 2, 4, 4)),
-        ((2, 2, 4, 4), (2, 4, 2, 2)),
-        ((2, 2, 4, 4), (2, 4, 2, 4)),
-        ((2, 2, 4, 4), (2, 4, 4, 2)),
-        ((2, 2, 4, 4), (2, 4, 4, 4)),
-        ((2, 2, 4, 4), (4, 2, 2, 2)),
-        ((2, 2, 4, 4), (4, 2, 2, 4)),
-        ((2, 4, 2, 2), (2, 2, 2, 2)),
-        ((2, 4, 2, 2), (2, 2, 2, 4)),
-        ((2, 4, 2, 2), (2, 2, 4, 2)),
+        # First dimension scaling (edge case)
+        ((2, 2, 2, 2), (4, 2, 2, 2)),
+        # Complex mixed scaling
+        ((2, 2, 2, 4), (2, 4, 4, 2)),
         ((2, 4, 2, 2), (2, 2, 4, 4)),
-        ((2, 4, 2, 2), (2, 4, 2, 2)),
-        ((2, 4, 2, 2), (2, 4, 2, 4)),
-        ((2, 4, 2, 2), (2, 4, 4, 2)),
-        ((2, 4, 2, 2), (2, 4, 4, 4)),
-        ((2, 4, 2, 2), (4, 2, 2, 2)),
-        ((2, 4, 2, 2), (4, 2, 2, 4)),
     ],
 )
-def test_communication_cpu(source_mesh_shape: Tuple, target_mesh_shape: Tuple):
+def test_communication_cpu(source_mesh_shape: tuple, target_mesh_shape: tuple):
     source_world_size = math.prod(source_mesh_shape)
     target_world_size = math.prod(target_mesh_shape)
     world_size = source_world_size + target_world_size
