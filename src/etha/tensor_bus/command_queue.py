@@ -6,19 +6,12 @@ import lmdb
 import msgspec
 from upath import UPath
 
-from .messages import Message
+from .commands import Message
 
 
 # TODO: really, could be improved, 1. limited buffer, maybe circular queue 2. single writer multiple reader optimization
 class CommandQueue:
-    """LMDB based command queue.
-
-    Features:
-    - Monotonic increasing ID as key (FIFO guarantee)
-    - LMDB transaction ensures atomicity
-    - Simple, reliable, no extra synchronization needed
-    - Supports all Message types (via tagged union)
-    """
+    """LMDB based command queue."""
 
     # Class-level encoder/decoder for performance (reuse instances)
     _encoder = msgspec.msgpack.Encoder()
