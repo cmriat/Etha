@@ -1,12 +1,14 @@
+"""Communication utilities for Etha."""
+
 import itertools
-from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
-from torch.distributed._tensor import DTensor, DeviceMesh, Shard, distribute_tensor
+from torch.distributed._tensor import Shard, DTensor, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
-def get_shard_shape(device_mesh: Tuple[int, ...], placements: Tuple[Placement, ...], tensor_ndim: int) -> List[int]:
+
+def get_shard_shape(device_mesh: tuple[int, ...], placements: tuple[Placement, ...], tensor_ndim: int) -> list[int]:
     """Calculate shard shape from device mesh and placements."""
     shard_shape = [1] * tensor_ndim
     for i, placement in enumerate(placements):
@@ -14,7 +16,10 @@ def get_shard_shape(device_mesh: Tuple[int, ...], placements: Tuple[Placement, .
             shard_shape[placement.dim] *= device_mesh[i]
     return shard_shape
 
-def get_shard_tensor_shape(origin_full_shape: torch.Size, target_device_mesh: DeviceMesh, placements: Tuple[Placement, ...]) -> torch.Size:
+
+def get_shard_tensor_shape(
+    origin_full_shape: torch.Size, target_device_mesh: DeviceMesh, placements: tuple[Placement, ...]
+) -> torch.Size:
     target_shard_shape = list(origin_full_shape)
     for i, placement in enumerate(placements):
         if isinstance(placement, Shard):
@@ -28,28 +33,26 @@ def get_shard_tensor_shape(origin_full_shape: torch.Size, target_device_mesh: De
             target_shard_shape[placement.dim] //= mesh_dim_size
     return torch.Size(target_shard_shape)
 
-def get_slicer_tuples(tensor_shape: torch.Tensor, source_num_slicers: List[int]) -> List[Tuple[slice, ...]]:
+
+def get_slicer_tuples(tensor_shape: torch.Tensor, source_num_slicers: list[int]) -> list[tuple[slice, ...]]:
     slicers_per_dim = []
     for dim, num_slices in enumerate(source_num_slicers):
         dim_size = tensor_shape[dim]
         slice_size = dim_size // num_slices
-        slicers_per_dim.append(
-            [slice(i * slice_size, (i + 1) * slice_size) for i in range(num_slices)]
-        )
+        slicers_per_dim.append([slice(i * slice_size, (i + 1) * slice_size) for i in range(num_slices)])
 
     return list(itertools.product(*slicers_per_dim))
-    
+
+
 def gather_broadcast_communicate(
     target_mesh: DeviceMesh,
-    target_specs: Tuple[Placement, ...],
+    target_specs: tuple[Placement, ...],
     local_tensor: DTensor,
     origin_tensor: torch.Tensor,
     source_world_size: int,
     device: str,
 ):
-    """
-    Performs data redistribution using the Gather-Broadcast method.
-    """
+    """Performs data redistribution using the Gather-Broadcast method."""
     rank = dist.get_rank()
     gathered_tensor = None
     # 1. Gather the full tensor. After this, every rank in source_mesh has a full copy.
@@ -59,9 +62,7 @@ def gather_broadcast_communicate(
     # 2. Broadcast the full tensor from a single source (rank 0) to all other ranks.
     # Ranks outside the source_mesh need a placeholder tensor to receive the data.
     if rank >= source_world_size:
-        gathered_tensor = torch.empty(
-            origin_tensor.shape, dtype=origin_tensor.dtype, device=device
-        )
+        gathered_tensor = torch.empty(origin_tensor.shape, dtype=origin_tensor.dtype, device=device)
 
     # Rank 0 broadcasts to the default process group (all ranks).
     dist.broadcast(gathered_tensor, src=0)
@@ -76,16 +77,17 @@ def gather_broadcast_communicate(
 
     return received_tensor
 
+
 def p2p_communicate(
-    forward_map: Dict[int, Dict[Tuple, List[int]]],
-    reverse_map: Dict[int, Dict[Tuple, List[Tuple[int, Tuple]]]],
+    forward_map: dict[int, dict[tuple, list[int]]],
+    reverse_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
     local_tensor: DTensor,
-    source_num_slicers: List[int],
-    target_num_slicers: List[int],
+    source_num_slicers: list[int],
+    target_num_slicers: list[int],
     target_tensor_shape: torch.Size,
     device: str = "cpu",
     dtype: torch.dtype = torch.float32,
-) -> Optional[torch.Tensor]:
+) -> torch.Tensor | None:
     rank = dist.get_rank()
     send_reqs = []
     recv_reqs = []
@@ -95,7 +97,7 @@ def p2p_communicate(
         local_tensor = local_tensor.to_local()
         # Get all possible slice tuples for this local tensor
         slicer_tuples = get_slicer_tuples(local_tensor.shape, source_num_slicers)
-        
+
         for source_idx, target_ranks in forward_map[rank].items():
             # source_idx is like (0,0,1,2), etc. Convert to linear index for slicer_tuples
             # Calculate linear index from multi-dimensional index
@@ -104,10 +106,10 @@ def p2p_communicate(
             for i in reversed(range(len(source_idx))):
                 linear_idx += source_idx[i] * multiplier
                 multiplier *= source_num_slicers[i]
-            
+
             slice_tuple = slicer_tuples[linear_idx]
             data_to_send = local_tensor[slice_tuple]
-            
+
             for target_rank in target_ranks:
                 if target_rank == rank:
                     # Store locally if sending to self
@@ -128,7 +130,7 @@ def p2p_communicate(
             else:
                 chunk_shape.append(target_tensor_shape[dim])
         chunk_shape = tuple(chunk_shape)
-        
+
         for target_idx, source_info_list in reverse_map[rank].items():
             for source_rank, source_idx in source_info_list:
                 if source_rank != rank:
@@ -146,11 +148,11 @@ def p2p_communicate(
     final_tensor = None
     if rank in reverse_map:
         final_tensor = torch.empty(target_tensor_shape, dtype=dtype, device=device)
-        
+
         # Wait for all receives to complete
         for req in recv_reqs:
             req.wait()
-        
+
         # Assemble received chunks into final tensor
         for target_idx, source_info_list in reverse_map[rank].items():
             for source_rank, source_idx in source_info_list:
@@ -161,7 +163,7 @@ def p2p_communicate(
                     recv_buffer = received_data[(source_rank, source_idx)]
                 else:
                     continue
-                
+
                 # Convert target_idx to actual slice coordinates
                 # target_idx is like (i, j), convert to slice ranges
                 slice_ranges = []
@@ -173,7 +175,7 @@ def p2p_communicate(
                         slice_ranges.append(slice(start, end))
                     else:
                         slice_ranges.append(slice(None))
-                
+
                 slice_tuple = tuple(slice_ranges)
                 final_tensor[slice_tuple] = recv_buffer
 

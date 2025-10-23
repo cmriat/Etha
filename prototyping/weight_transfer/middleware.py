@@ -1,13 +1,16 @@
+"""Middleware for weight transfer."""
+
 import os
 import time
 from multiprocessing.reduction import ForkingPickler
 
 import torch
 import torch.distributed as dist
-
 from common import queue_path, load_tensor_payload
+
+from etha.tensor_bus.messages import Ready, FinishTransfer, RegisterTensor, Stop_Inference
 from etha.tensor_bus.command_queue import CommandQueue
-from etha.tensor_bus.messages import Ready, Stop_Inference, FinishTransfer, RegisterTensor
+
 
 def init_store(rank: int, world_size: int) -> dist.TCPStore:
     master_addr = os.environ.get("MASTER_ADDR", "localhost")
@@ -20,6 +23,7 @@ def init_store(rank: int, world_size: int) -> dist.TCPStore:
     )
     return store
 
+
 def transfer(rank: int, tensor: torch.Tensor, target_rank: int):
     time.sleep(2)
     if rank < 4:
@@ -28,6 +32,7 @@ def transfer(rank: int, tensor: torch.Tensor, target_rank: int):
         torch.distributed.recv(tensor, target_rank)
     if rank == 0:
         print(f"[middleware rank={rank}] tensor={tensor} transferred")
+
 
 def main():
     rank = int(os.environ["LOCAL_RANK"])
@@ -41,13 +46,13 @@ def main():
     world_size = dist.get_world_size()
     store = init_store(rank, world_size)
     pstore = dist.PrefixStore("weight/", store)
-    
-    queue_send = CommandQueue(queue_path(rank, 'send'))
-    queue_recv = CommandQueue(queue_path(rank, 'recv'))
+
+    queue_send = CommandQueue(queue_path(rank, "send"))
+    queue_recv = CommandQueue(queue_path(rank, "recv"))
 
     if is_train:
         tensor_id = f"weight_{rank}"
-        queue_send.enqueue(FinishTransfer(tensor_id=tensor_id,timestamp=time.time()))
+        queue_send.enqueue(FinishTransfer(tensor_id=tensor_id, timestamp=time.time()))
 
     tensors = {}
     while True:
@@ -67,7 +72,7 @@ def main():
                     pstore.wait([f"rank{target_rank}_ready"])
                     pstore.delete_key(f"rank{target_rank}_ready")
                 transfer(rank, tensors[command.tensor_id], target_rank)
-                queue_send.enqueue(FinishTransfer(tensor_id=command.tensor_id,timestamp=time.time()))
+                queue_send.enqueue(FinishTransfer(tensor_id=command.tensor_id, timestamp=time.time()))
             elif isinstance(command, RegisterTensor):
                 tensors[command.tensor_id] = ForkingPickler.loads(load_tensor_payload(command.tensor_id))
             else:
@@ -75,5 +80,7 @@ def main():
                 break
 
     dist.destroy_process_group()
+
+
 if __name__ == "__main__":
     main()

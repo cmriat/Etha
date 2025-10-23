@@ -1,11 +1,16 @@
-import lmdb
+"""Common utilities for weight transfer."""
+
 from contextlib import contextmanager
 
-QUEUE_ROOT = 'prototyping/weight_transfer/dbs'
-STORAGE_ROOT = 'prototyping/weight_transfer/dbs/storage.lmdb'
+import lmdb
 
-def queue_path(rank: int, direction: str = 'send') -> str:
+QUEUE_ROOT = "prototyping/weight_transfer/dbs"
+STORAGE_ROOT = "prototyping/weight_transfer/dbs/storage.lmdb"
+
+
+def queue_path(rank: int, direction: str = "send") -> str:
     return f"{QUEUE_ROOT}/{rank}_{direction}.lmdb"
+
 
 @contextmanager
 def open_storage_env():

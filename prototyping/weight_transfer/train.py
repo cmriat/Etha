@@ -1,16 +1,15 @@
+"""Trainer for weight transfer."""
+
 import os
 import time
-
 from multiprocessing.reduction import ForkingPickler
 
 import torch
 import torch.distributed as dist
 from common import queue_path, store_tensor_payload
 
-
-from etha.tensor_bus.command_queue import CommandQueue
 from etha.tensor_bus.messages import Ready, FinishTransfer, RegisterTensor
-
+from etha.tensor_bus.command_queue import CommandQueue
 
 
 class Trainer:
@@ -32,15 +31,17 @@ def main():
     torch.cuda.set_device(rank)
     dist.init_process_group(backend="nccl")
 
-    queue_send = CommandQueue(queue_path(rank, 'recv'))
-    queue_recv = CommandQueue(queue_path(rank, 'send'))
+    queue_send = CommandQueue(queue_path(rank, "recv"))
+    queue_recv = CommandQueue(queue_path(rank, "send"))
     trainer = Trainer(rank)
 
     payload = ForkingPickler.dumps(trainer.param)
     tensor_id = f"weight_{rank}"
     store_tensor_payload(tensor_id, payload)
-    queue_send.enqueue(RegisterTensor(tensor_id=tensor_id,storage_key=tensor_id, writer_pid=os.getpid(),timestamp=time.time()))
-    
+    queue_send.enqueue(
+        RegisterTensor(tensor_id=tensor_id, storage_key=tensor_id, writer_pid=os.getpid(), timestamp=time.time())
+    )
+
     for step in range(100):
         trainer.forward_backward()
 
@@ -51,7 +52,7 @@ def main():
 
         trainer.optimizer_step(step)
 
-        queue_send.enqueue(Ready(tensor_id=tensor_id,timestamp=time.time()))
+        queue_send.enqueue(Ready(tensor_id=tensor_id, timestamp=time.time()))
 
     dist.destroy_process_group()
 
