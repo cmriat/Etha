@@ -1,21 +1,30 @@
 """Tensor Bus."""
 
-from .messages import (
+from .agent import TensorBusAgent
+from .state import PairState
+from .client import PairHandler, TensorBusClient
+from .commands import (
     Send,
-    Command,
     Message,
     Receive,
     Register,
+    BaseCommand,
+    RegisterPair,
     RegisterTensor,
 )
 from .command_queue import CommandQueue
 
 __all__ = [
-    "Command",
+    "BaseCommand",
     "Message",
     "Send",
     "Receive",
     "Register",
     "RegisterTensor",
+    "RegisterPair",
+    "PairState",
     "CommandQueue",
+    "TensorBusAgent",
+    "TensorBusClient",
+    "PairHandler",
 ]

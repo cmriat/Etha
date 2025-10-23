@@ -6,7 +6,7 @@ import tempfile
 
 import pytest
 
-from etha.tensor_bus.messages import Send, Receive, Register
+from etha.tensor_bus.commands import Send, Receive, Register
 from etha.tensor_bus.command_queue import CommandQueue
 
 
