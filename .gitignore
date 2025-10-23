@@ -16,3 +16,6 @@ dev/
 *.ruff_cache/
 
 .pytest_cache/
+
+dbs
+logs
