@@ -1,9 +1,11 @@
 """LMDB-based Command Queue for Tensor Bus."""
 
 import struct
+import hashlib
 
 import lmdb
 import msgspec
+import posix_ipc
 from upath import UPath
 
 from .commands import Message
@@ -33,12 +35,21 @@ class CommandQueue:
         # Initialize head/tail pointers
         self._init_pointers()
 
+        # POSIX semaphore used to notify waiting consumers.
+        sem_name = self._make_semaphore_name()
+        self._sem = posix_ipc.Semaphore(sem_name, flags=posix_ipc.O_CREAT, initial_value=0)
+
     def _init_pointers(self):
         """Initialize queue head/tail pointers."""
         with self.env.begin(write=True, db=self.queue_db) as txn:
             if txn.get(b"__head__") is None:
                 txn.put(b"__head__", struct.pack("Q", 0))  # Read pointer
                 txn.put(b"__tail__", struct.pack("Q", 0))  # Write pointer
+
+    def _make_semaphore_name(self) -> str:
+        digest = hashlib.sha1(str(self.lmdb_path).encode("utf-8")).hexdigest()
+        # POSIX semaphore names must start with slash and be short.
+        return f"/cmdq_{digest[:20]}"
 
     def enqueue(self, msg: Message) -> int:
         """Enqueue a message.
@@ -61,49 +72,22 @@ class CommandQueue:
             # Increment tail
             txn.put(b"__tail__", struct.pack("Q", tail + 1))
 
+            self._sem.release()
             return tail
 
-    def dequeue(self) -> Message | None:
+    def dequeue(self, *, block: bool = False, timeout: float | None = None) -> Message | None:
         """Dequeue a message.
 
         Returns:
             Message object (auto-detected type), or None if queue is empty
         """
-        with self.env.begin(write=True, db=self.queue_db) as txn:
-            # Get head and tail
-            head_bytes = txn.get(b"__head__")
-            tail_bytes = txn.get(b"__tail__")
+        try:
+            if block:
+                self._sem.acquire(timeout=timeout)
+        except posix_ipc.BusyError:
+            return None
 
-            head = struct.unpack("Q", head_bytes)[0]
-            tail = struct.unpack("Q", tail_bytes)[0]
-
-            # Check if empty
-            if head >= tail:
-                return None
-
-            # Read command
-            key = struct.pack("Q", head)
-            cmd_data = txn.get(key)
-
-            if cmd_data is None:
-                # Data corrupted, skip
-                txn.put(b"__head__", struct.pack("Q", head + 1))
-                return None
-
-            try:
-                cmd = self._decoder.decode(cmd_data)
-            except msgspec.DecodeError:
-                # Data corrupted, skip
-                txn.put(b"__head__", struct.pack("Q", head + 1))
-                return None
-
-            # Delete command (save space)
-            txn.delete(key)
-
-            # Increment head
-            txn.put(b"__head__", struct.pack("Q", head + 1))
-
-            return cmd
+        return self._try_dequeue_once()
 
     def dequeue_batch(self, max_count: int = 32) -> list[Message]:
         """Batch dequeue (improve throughput).
@@ -192,8 +176,47 @@ class CommandQueue:
                 if not key.startswith(b"__"):
                     txn.delete(key)
 
+        # Drain semaphore count
+        while True:
+            try:
+                self._sem.acquire(timeout=0)
+            except posix_ipc.BusyError:
+                break
+
+    def _try_dequeue_once(self) -> Message | None:
+        with self.env.begin(write=True, db=self.queue_db) as txn:
+            head_bytes = txn.get(b"__head__")
+            tail_bytes = txn.get(b"__tail__")
+
+            head = struct.unpack("Q", head_bytes)[0]
+            tail = struct.unpack("Q", tail_bytes)[0]
+
+            if head >= tail:
+                return None
+
+            key = struct.pack("Q", head)
+            cmd_data = txn.get(key)
+            if cmd_data is None:
+                txn.put(b"__head__", struct.pack("Q", head + 1))
+                return None
+
+            try:
+                cmd = self._decoder.decode(cmd_data)
+            except msgspec.DecodeError:
+                txn.put(b"__head__", struct.pack("Q", head + 1))
+                return None
+
+            txn.delete(key)
+            txn.put(b"__head__", struct.pack("Q", head + 1))
+            return cmd
+
     def close(self):
         """Close queue."""
+        self._sem.close()
+        try:
+            self._sem.unlink()
+        except posix_ipc.ExistentialError:
+            pass
         if self.env is not None:
             self.env.close()
             self.env = None
