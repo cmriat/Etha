@@ -2,13 +2,15 @@
 
 import os
 import time
+import threading
 from multiprocessing.reduction import ForkingPickler
 
 import torch
+import posix_ipc
 import torch.distributed as dist
 from common import queue_path, load_tensor_payload
 
-from etha.tensor_bus.messages import Ready, FinishTransfer, RegisterTensor, Stop_Inference
+from etha.tensor_bus.commands import Ready, RegisterTensor, Stop_Inference
 from etha.tensor_bus.command_queue import CommandQueue
 
 
@@ -50,36 +52,58 @@ def main():
     queue_send = CommandQueue(queue_path(rank, "send"))
     queue_recv = CommandQueue(queue_path(rank, "recv"))
 
+    finish_sem = posix_ipc.Semaphore(f"/weight_{rank}", flags=posix_ipc.O_CREAT, initial_value=0)
     if is_train:
-        tensor_id = f"weight_{rank}"
-        queue_send.enqueue(FinishTransfer(tensor_id=tensor_id, timestamp=time.time()))
+        finish_sem.release()
 
     tensors = {}
-    while True:
-        if queue_recv.size() == 0:
-            if is_inference:
-                if pstore.check([f"rank{rank}_stop"]):
-                    pstore.delete_key(f"rank{rank}_stop")
+    stop_flag = threading.Event()
+
+    def monitor_peer_ready():
+        target_key = f"rank{target_rank}_ready"
+        while True:
+            if pstore.check([target_key]):
+                if not stop_flag.is_set():
                     queue_send.enqueue(Stop_Inference(timestamp=time.time()))
+                    stop_flag.set()
+                time.sleep(0.1)
             else:
-                time.sleep(0.005)
-        else:
-            command = queue_recv.dequeue()
+                time.sleep(0.1)
+
+    monitor_thread = None
+    if is_inference:
+        monitor_thread = threading.Thread(target=monitor_peer_ready, daemon=True)
+        monitor_thread.start()
+
+    try:
+        while True:
+            command = queue_recv.dequeue(block=True)
+
             if isinstance(command, Ready):
                 pstore.set(f"rank{rank}_ready", "1")
-                if is_train:
-                    pstore.set(f"rank{target_rank}_stop", "1")
-                    pstore.wait([f"rank{target_rank}_ready"])
-                    pstore.delete_key(f"rank{target_rank}_ready")
+                pstore.wait([f"rank{target_rank}_ready"])
+                pstore.delete_key(f"rank{target_rank}_ready")
+
                 transfer(rank, tensors[command.tensor_id], target_rank)
-                queue_send.enqueue(FinishTransfer(tensor_id=command.tensor_id, timestamp=time.time()))
+                finish_sem.release()
+
+                if is_inference:
+                    stop_flag.clear()
+
             elif isinstance(command, RegisterTensor):
-                tensors[command.tensor_id] = ForkingPickler.loads(load_tensor_payload(command.tensor_id))
+                tensors[command.tensor_id] = ForkingPickler.loads(load_tensor_payload(command.storage_key))
             else:
                 raise ValueError(f"[middleware rank={rank}] unknown command {command}")
-                break
 
-    dist.destroy_process_group()
+    finally:
+        if monitor_thread is not None:
+            monitor_thread.join(timeout=1.0)
+        dist.destroy_process_group()
+        finish_sem.close()
+        try:
+            finish_sem.unlink()
+        except posix_ipc.ExistentialError:
+            pass
 
 
 if __name__ == "__main__":

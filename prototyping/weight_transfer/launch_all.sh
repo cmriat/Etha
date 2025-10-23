@@ -1,6 +1,6 @@
 #!/bin/bash
-
-mkdir -p logs
+mkdir -p prototyping/weight_transfer/logs
+mkdir -p prototyping/weight_transfer/dbs
 
 echo "Starting all processes..."
 rm prototyping/weight_transfer/dbs/* -rf

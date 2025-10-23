@@ -70,4 +70,14 @@ class RegisterPair(BaseCommand):
     remote_name: str
 
 
-Message = Send | Receive | Register | RegisterTensor | RegisterPair
+class Stop_Inference(BaseCommand):
+    """Stop inference command."""
+
+
+class Ready(BaseCommand):
+    """Ready command."""
+
+    tensor_id: str
+
+
+Message = Send | Receive | Register | RegisterTensor | RegisterPair | Stop_Inference | Ready

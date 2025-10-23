@@ -45,14 +45,15 @@ correct physical device.
 2. **Training loop**  
    The trainer bumps the tensor (`+1.0`) during every optimizer step.
    Once a fresh value is ready it enqueues `Ready`, signalling the
-   middleware that a transfer may begin.
+   middleware that a transfer may begin, and then waits on a per-rank
+   POSIX semaphore that will be released when the transfer finishes.
 
 3. **Middleware orchestration**  
    - The sending middleware rank requests the peer rank to pause
      inference by updating keys in `TCPStore`.
    - The receiving middleware rank relays a `Stop_Inference` command via
-     its queue and waits until the inference worker acknowledges the
-     pause.
+     its queue, after which the inference engine enqueues `Ready` and
+     blocks on its semaphore until the transfer completes.
 
 4. **Weight transfer**  
    With both sides ready, the paired middleware ranks call
@@ -60,8 +61,10 @@ correct physical device.
    GPUs.
 
 5. **Resume inference**  
-   After the transfer completes the middleware notifies the inference
-   worker, which prints the updated value.  Seeing the number increase by
+   After the transfer completes the middleware releases the per-rank
+   semaphores for both the trainer and inference worker. Once their
+   respective `acquire()` calls return, each engine resumes work and the
+   inference side prints the updated value. Seeing the number increase by
    one confirms the round-trip succeeded.
 
 ## Notes

@@ -5,10 +5,11 @@ import time
 from multiprocessing.reduction import ForkingPickler
 
 import torch
+import posix_ipc
 import torch.distributed as dist
 from common import queue_path, store_tensor_payload
 
-from etha.tensor_bus.messages import Ready, FinishTransfer, RegisterTensor, Stop_Inference
+from etha.tensor_bus.commands import Ready, RegisterTensor, Stop_Inference
 from etha.tensor_bus.command_queue import CommandQueue
 
 
@@ -18,9 +19,12 @@ class InferenceEngine:
         self.param = torch.tensor([rank - 4], dtype=torch.float32, device="cuda")
 
     def step(self):
-        time.sleep(2.0)
+        time.sleep(2)
         if self.rank == 4:
             print(f"[inference rank={self.rank}] step value={self.param}")
+
+    def stop(self):
+        time.sleep(2)
 
 
 def main():
@@ -33,27 +37,36 @@ def main():
     engine = InferenceEngine(rank)
 
     payload = ForkingPickler.dumps(engine.param)
-    tensor_id = f"weight_recv_{rank}"
-    store_tensor_payload(tensor_id, payload)
+    tensor_id = f"weight_{rank}"
+    store_key = "recv_" + tensor_id
+    store_tensor_payload(store_key, payload)
     queue_send.enqueue(
-        RegisterTensor(tensor_id=tensor_id, storage_key=tensor_id, writer_pid=os.getpid(), timestamp=time.time())
+        RegisterTensor(tensor_id=tensor_id, storage_key=store_key, writer_pid=os.getpid(), timestamp=time.time())
     )
 
-    while True:
-        if queue_recv.size() == 0:
-            engine.step()
-        else:
-            command = queue_recv.dequeue()
+    finish_sem = posix_ipc.Semaphore(f"/weight_{rank}", flags=posix_ipc.O_CREAT, initial_value=0)
+
+    try:
+        while True:
+            command = queue_recv.dequeue(block=False)
+            if command is None:
+                engine.step()
+                continue
+
             if isinstance(command, Stop_Inference):
-                time.sleep(2.0)
+                engine.stop()
                 queue_send.enqueue(Ready(tensor_id=tensor_id, timestamp=time.time()))
-            elif isinstance(command, FinishTransfer):
-                time.sleep(2.0)
+                finish_sem.acquire()
             else:
                 raise ValueError(f"[inference rank={rank}] unknown command {command}")
-                break
 
-    dist.destroy_process_group()
+    finally:
+        dist.destroy_process_group()
+        finish_sem.close()
+        try:
+            finish_sem.unlink()
+        except posix_ipc.ExistentialError:
+            pass
 
 
 if __name__ == "__main__":
