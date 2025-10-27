@@ -14,6 +14,8 @@ from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
 
+TIME_INTERVAL = 0.001  # 1ms
+
 
 class TensorBusAgent:
     """Tensor Bus Agent.
@@ -78,6 +80,10 @@ class TensorBusAgent:
             self.state_db = self.state_env.open_db(b"pair_state")
             logger.info(f"Daemon {rank}: State LMDB initialized at {lmdb_state_path}")
 
+            # Write initial heartbeat (for connection validation)
+            self._update_heartbeat()
+            logger.info(f"Daemon {rank}: Initial heartbeat written")
+
         # Pair registry
         self.pairs = {}
 
@@ -88,13 +94,16 @@ class TensorBusAgent:
         logger.info(f"Daemon {self.rank}: Starting main loop")
 
         while True:
+            # Update heartbeat (for connection validation)
+            self._update_heartbeat()
+
             if self.command_queue.size() != 0:
                 msg = self.command_queue.dequeue()
 
                 if msg is not None:
                     self._handle_command(msg)
 
-            time.sleep(0.001)  # 1ms polling interval
+            time.sleep(TIME_INTERVAL)  # 1ms polling interval
 
     def _handle_command(self, command):
         """Dispatch command to appropriate handler."""
@@ -147,7 +156,7 @@ class TensorBusAgent:
             local_ranks = self._scan_peer_ranks(pair_name, local_name)
             if len(local_ranks) < expected_local:
                 logger.debug(f"Daemon {self.rank}: Local peer progress: {len(local_ranks)}/{expected_local}")
-                time.sleep(0.1)
+                time.sleep(TIME_INTERVAL)
 
         logger.info(f"Daemon {self.rank}: Local peer complete: {local_ranks}")
 
@@ -156,13 +165,9 @@ class TensorBusAgent:
 
         # First, wait for remote peer to write expected_world_size
         remote_expected_key = f"pair:{pair_name}:{remote_name}:expected_world_size"
-        expected_remote = None
-        while expected_remote is None:
-            if self.store.check([remote_expected_key]):
-                expected_remote = int(self.store.get(remote_expected_key).decode())
-                logger.debug(f"Daemon {self.rank}: Remote peer '{remote_name}' expects {expected_remote} ranks")
-            else:
-                time.sleep(0.1)
+
+        expected_remote = int(self.store.get(remote_expected_key).decode())
+        logger.debug(f"Daemon {self.rank}: Remote peer '{remote_name}' expects {expected_remote} ranks")
 
         # Then, wait for all remote ranks to register
         remote_ranks = []
@@ -170,7 +175,7 @@ class TensorBusAgent:
             remote_ranks = self._scan_peer_ranks(pair_name, remote_name)
             if len(remote_ranks) < expected_remote:
                 logger.debug(f"Daemon {self.rank}: Remote peer progress: {len(remote_ranks)}/{expected_remote}")
-                time.sleep(0.1)
+                time.sleep(TIME_INTERVAL)
 
         logger.info(f"Daemon {self.rank}: Remote peer '{remote_name}' complete: {remote_ranks}")
 
@@ -237,6 +242,17 @@ class TensorBusAgent:
     def _handle_receive(self, msg: Receive):
         """Handle Receive command (future implementation)."""
         logger.warning(f"Daemon {self.rank}: Receive for pair '{msg.pair_name}' not implemented yet")
+
+    def _update_heartbeat(self):
+        """Update heartbeat timestamp in State LMDB.
+
+        This allows Workers to verify the Agent is alive and responsive.
+        Called on startup and every main loop iteration.
+        """
+        logger.debug(f"Daemon {self.rank}: Updating heartbeat timestamp")
+        if self.state_env and self.state_db:
+            with self.state_env.begin(write=True, db=self.state_db) as txn:
+                txn.put(b"agent:heartbeat", str(time.time()).encode())
 
     def close(self):
         """Cleanup resources."""

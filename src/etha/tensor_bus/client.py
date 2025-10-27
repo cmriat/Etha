@@ -26,11 +26,20 @@ class TensorBusClient:
         self,
         lmdb_command_queue_path: str | None = None,
         agent_state_lmdb_path: str | None = None,
+        connection_timeout: float = 30.0,
     ):
-        # CommandQueue will handle its own env var fallback
-        self.command_queue = CommandQueue(lmdb_command_queue_path)
+        """Initialize TensorBusClient.
 
-        # Get state path from argument or environment variable
+        Args:
+            lmdb_command_queue_path: Path to Agent's CommandQueue LMDB
+            agent_state_lmdb_path: Path to Agent's State LMDB
+            connection_timeout: Max time to wait for Agent connection (seconds)
+
+        Raises:
+            ValueError: If agent_state_lmdb_path is not provided
+            ConnectionError: If Agent is not found or not responding
+        """
+        # Step 1: Connection to agent
         if agent_state_lmdb_path is None:
             agent_state_lmdb_path = os.environ.get("TENSOR_BUS_STATE_PATH")
         if agent_state_lmdb_path is None:
@@ -40,20 +49,14 @@ class TensorBusClient:
             )
 
         self.agent_state_lmdb_path = agent_state_lmdb_path
-        self.handlers = {}  # pair_name -> PairHandler
+        self.handlers: dict[str, PairHandler] = {}
 
-        # Open state LMDB once for reuse
-        self.state_env = lmdb.open(
-            self.agent_state_lmdb_path,
-            readonly=True,
-            lock=False,
-            subdir=False,
-            max_dbs=2,  # Must match Agent's max_dbs
-        )
-        self.state_db = self.state_env.open_db(b"pair_state")
+        self.state_env = None
+        self.state_db = None
+        self._connect_agent(agent_state_lmdb_path, timeout=connection_timeout)
 
-        logger.info(f"TensorBusClient: Initialized with CommandQueue at {self.command_queue.lmdb_path}")
-        logger.info(f"TensorBusClient: State LMDB path: {agent_state_lmdb_path}")
+        # Step 2: Initialize CommandQueue
+        self.command_queue = CommandQueue(lmdb_command_queue_path)
 
     def register_pair(
         self,
@@ -91,7 +94,6 @@ class TensorBusClient:
         )
         self.command_queue.enqueue(msg)
 
-        # Wait for Agent to process
         logger.debug(f"TensorBusClient: Waiting for pair '{pair_name}' to match")
 
         # TODO: fix busy wait by using a notification mechanism
@@ -165,6 +167,75 @@ class TensorBusClient:
             pass
 
         # TODO: Return CommHandle
+
+    def _connect_agent(self, path: str, timeout: float):
+        """Connect to Agent.
+
+        Args:
+            path: Path to Agent's State LMDB
+            timeout: Maximum time to wait (seconds)
+
+        Raises:
+            ConnectionError: Agent not found or not responding
+        """
+        deadline = time.time() + timeout
+
+        # Step 1: Wait for LMDB file to exist
+        logger.info(f"TensorBusClient: Validating connection to Agent at {path}")
+        while not os.path.exists(path):
+            if time.time() > deadline:
+                raise ConnectionError(
+                    f"Agent LMDB not found at {path} after {timeout}s. "
+                    f"Please ensure Agent process is running. "
+                    f"Check AGENT_RANK environment variable is correct."
+                )
+            time.sleep(0.1)
+
+        logger.debug(f"TensorBusClient: Agent LMDB file found at {path}")
+
+        # Step 2: Open LMDB
+        self.state_env = lmdb.open(
+            path,
+            readonly=True,
+            lock=False,
+            subdir=False,
+            max_dbs=2,
+        )
+        self.state_db = self.state_env.open_db(b"pair_state")
+
+        # Step 3: Verify heartbeat is fresh
+        while time.time() <= deadline:
+            heartbeat_fresh = False
+            heartbeat_age = None
+
+            try:
+                with self.state_env.begin(db=self.state_db) as txn:
+                    heartbeat_bytes = txn.get(b"agent:heartbeat")
+                    if heartbeat_bytes:
+                        heartbeat_time = float(heartbeat_bytes.decode())
+                        heartbeat_age = time.time() - heartbeat_time
+
+                        if heartbeat_age < 5.0:  # Heartbeat is fresh
+                            heartbeat_fresh = True
+
+                # Validation successful - keep LMDB open and return
+                if heartbeat_fresh:
+                    logger.info(f"TensorBusClient: Agent connection validated (heartbeat age: {heartbeat_age:.2f}s)")
+                    return  # Success! self.state_env remains open
+
+            except Exception as e:
+                logger.debug(f"TensorBusClient: Heartbeat check error (retrying): {e}")
+
+            time.sleep(0.1)
+
+        # Timeout reached - close LMDB and raise error
+        self.state_env.close()
+        self.state_env = None
+        self.state_db = None
+        raise ConnectionError(
+            f"Agent at {path} is not responding after {timeout}s. "
+            f"Heartbeat is too old or missing. Agent may have crashed."
+        )
 
     def close(self):
         """Cleanup resources."""

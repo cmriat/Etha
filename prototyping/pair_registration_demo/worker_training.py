@@ -22,9 +22,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
-from shared import PAIR_NAME, get_agent_state_path, get_agent_command_queue_path
+from shared import PAIR_NAME
 
-from etha.tensor_bus import TensorBusClient
+from etha.tensor_bus import bootstrap_client
 
 # Configure logging
 logging.basicConfig(
@@ -39,44 +39,31 @@ logger = logging.getLogger(__name__)
 LOCAL_NAME = "training"
 REMOTE_NAME = "inference"
 EXPECTED_WORLD_SIZE = 4  # Total training workers
-AGENT_RANK_OFFSET = 4  # Training workers map to agent ranks 4-7
 
 
 def main():
-    # Get rank from environment (torchrun sets LOCAL_RANK)
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    agent_rank = local_rank + AGENT_RANK_OFFSET  # Training workers map to agent ranks 4-7
-    device = f"cuda:{local_rank + AGENT_RANK_OFFSET}"
+    # Bootstrap TensorBusClient (handles agent_rank calculation and path resolution)
+    client, info = bootstrap_client()
 
     print(f"\n{'=' * 60}")
-    print(f"Training Worker (local_rank={local_rank}) starting...")
-    print(f"Agent rank: {agent_rank}")
-    print(f"Device: {device}")
+    print(f"Training Worker starting...")
+    print(f"  Local rank: {info.local_rank}")
+    print(f"  Agent rank: {info.agent_rank}")
+    print(f"  Device: {info.device}")
+    print(f"  Method: {info.method}")
+    if info.rank_offset is not None:
+        print(f"  Rank offset: {info.rank_offset}")
     print(f"{'=' * 60}\n")
 
     # Set CUDA device
-    torch.cuda.set_device(local_rank + AGENT_RANK_OFFSET)
+    torch.cuda.set_device(info.agent_rank)
 
     # Create dummy tensor
-    tensor = torch.zeros(10, dtype=torch.float32, device=device)
-    logger.info(f"Worker {local_rank}: Created tensor on {device}")
-
-    # Get Agent paths
-    command_queue_path = get_agent_command_queue_path(agent_rank)
-    state_path = get_agent_state_path(agent_rank)
-
-    logger.info(f"Worker {local_rank}: Connecting to Agent {agent_rank}")
-    logger.info(f"  CommandQueue: {command_queue_path}")
-    logger.info(f"  State LMDB: {state_path}")
-
-    # Create TensorBusClient
-    client = TensorBusClient(
-        lmdb_command_queue_path=command_queue_path,
-        agent_state_lmdb_path=state_path,
-    )
+    tensor = torch.zeros(10, dtype=torch.float32, device=info.device)
+    logger.info(f"Worker {info.local_rank}: Created tensor on {info.device}")
 
     # Register pair (blocks until matched)
-    logger.info(f"Worker {local_rank}: Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
+    logger.info(f"Worker {info.local_rank}: Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
 
     start_time = time.time()
     handler = client.register_pair(
@@ -89,17 +76,17 @@ def main():
     elapsed = time.time() - start_time
 
     print(f"\n{'=' * 60}")
-    print(f"✅ Worker {local_rank}: Pair '{PAIR_NAME}' matched!")
+    print(f"✅ Worker {info.local_rank}: Pair '{PAIR_NAME}' matched!")
     print(f"   Elapsed time: {elapsed:.2f}s")
     print(f"{'=' * 60}\n")
 
     # Keep alive for a bit (optional, for debugging)
-    logger.info(f"Worker {local_rank}: Pair registered, keeping alive for 5s...")
+    logger.info(f"Worker {info.local_rank}: Pair registered, keeping alive for 5s...")
     time.sleep(5)
 
     # Cleanup
     client.close()
-    logger.info(f"Worker {local_rank}: Exit")
+    logger.info(f"Worker {info.local_rank}: Exit")
 
 
 if __name__ == "__main__":
