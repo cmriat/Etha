@@ -211,12 +211,22 @@ class CommandQueue:
             return cmd
 
     def close(self):
-        """Close queue."""
-        self._sem.close()
-        try:
-            self._sem.unlink()
-        except posix_ipc.ExistentialError:
-            pass
+        """Close queue (idempotent)."""
+        # Close semaphore (safe to call multiple times)
+        if self._sem is not None:
+            try:
+                self._sem.close()
+            except posix_ipc.ExistentialError:
+                pass  # Already closed
+
+            try:
+                self._sem.unlink()
+            except posix_ipc.ExistentialError:
+                pass  # Already unlinked
+
+            self._sem = None
+
+        # Close LMDB environment
         if self.env is not None:
             self.env.close()
             self.env = None

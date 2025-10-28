@@ -121,10 +121,12 @@ torchrun --nproc_per_node=8 prototyping/pair_registration_demo/agent.py
 
 ```bash
 # Terminal 2
-torchrun --nproc_per_node=4 --master_port=29501 prototyping/pair_registration_demo/worker_inference.py
+AGENT_RANK_OFFSET=0 torchrun --nproc_per_node=4 --master_port=29501 prototyping/pair_registration_demo/worker_inference.py
 ```
 
-**Note**: `--master_port=29501` avoids conflict with Agent's TCPStore on port 29500
+**Note**:
+- `AGENT_RANK_OFFSET=0` maps inference workers (local_rank 0-3) to agent ranks 0-3
+- `--master_port=29501` avoids conflict with Agent's TCPStore on port 29500
 
 **Expected output:**
 ```
@@ -138,10 +140,12 @@ Worker 0: Registering pair 'obs' as 'inference'
 
 ```bash
 # Terminal 3
-torchrun --nproc_per_node=4 --master_port=29502 prototyping/pair_registration_demo/worker_training.py
+AGENT_RANK_OFFSET=4 torchrun --nproc_per_node=4 --master_port=29502 prototyping/pair_registration_demo/worker_training.py
 ```
 
-**Note**: `--master_port=29502` avoids conflict with other processes
+**Note**:
+- `AGENT_RANK_OFFSET=4` maps training workers (local_rank 0-3) to agent ranks 4-7
+- `--master_port=29502` avoids conflict with other processes
 
 **Expected output:**
 ```
@@ -197,6 +201,80 @@ rm /tmp/agent_rank*_state.lmdb*
 ✅ **Worker-Agent IPC**: CommandQueue (Worker→Agent) + State LMDB (Agent→Worker)
 ✅ **State Verification**: Workers poll State LMDB to confirm pair matching
 ✅ **End-to-End Flow**: Full lifecycle from Worker registration to verified matching
+
+## Bootstrap Mechanism
+
+### Worker-Agent Connection
+
+**Problem**: Workers and Agents run in separate process groups (separate torchrun invocations). How does a Worker find and connect to its corresponding Agent?
+
+**Solution**: Convention-based path naming + environment variable offset
+
+1. **Path Naming Convention** (defined in `shared.py`):
+   ```python
+   def get_agent_command_queue_path(rank: int) -> str:
+       return f"/tmp/agent_rank{rank}_command.lmdb"
+
+   def get_agent_state_path(rank: int) -> str:
+       return f"/tmp/agent_rank{rank}_state.lmdb"
+   ```
+
+2. **Agent Side**: Uses its rank (from torchrun's `RANK` env var) to determine paths
+   ```python
+   rank = int(os.environ["RANK"])  # 0-7
+   command_queue_path = get_agent_command_queue_path(rank)
+   state_path = get_agent_state_path(rank)
+   ```
+
+3. **Worker Side**: Determine `agent_rank` (priority order)
+   ```python
+   # Priority 1: Direct specification via AGENT_RANK
+   if "AGENT_RANK" in os.environ:
+       agent_rank = int(os.environ["AGENT_RANK"])
+   # Priority 2: Calculate from LOCAL_RANK + AGENT_RANK_OFFSET
+   else:
+       local_rank = int(os.environ["LOCAL_RANK"])
+       rank_offset = int(os.environ.get("AGENT_RANK_OFFSET", 0))
+       agent_rank = local_rank + rank_offset
+
+   # Use convention functions to get Agent's paths
+   command_queue_path = get_agent_command_queue_path(agent_rank)
+   state_path = get_agent_state_path(agent_rank)
+   ```
+
+4. **Deployment Flexibility**:
+
+   **Method 1: Using AGENT_RANK_OFFSET (with torchrun)**
+   ```bash
+   # Inference workers → Agent 0-3
+   AGENT_RANK_OFFSET=0 torchrun --nproc_per_node=4 worker_inference.py
+
+   # Training workers → Agent 4-7
+   AGENT_RANK_OFFSET=4 torchrun --nproc_per_node=4 worker_training.py
+
+   # Custom split: 1 inference worker, 7 training workers
+   AGENT_RANK_OFFSET=0 torchrun --nproc_per_node=1 worker_inference.py
+   AGENT_RANK_OFFSET=1 torchrun --nproc_per_node=7 worker_training.py
+   ```
+
+   **Method 2: Using AGENT_RANK directly (explicit control)**
+   ```bash
+   # Launch individual workers with explicit agent ranks
+   AGENT_RANK=0 python worker_inference.py &
+   AGENT_RANK=1 python worker_inference.py &
+   AGENT_RANK=2 python worker_inference.py &
+   AGENT_RANK=3 python worker_inference.py &
+   AGENT_RANK=4 python worker_training.py &
+   AGENT_RANK=5 python worker_training.py &
+   AGENT_RANK=6 python worker_training.py &
+   AGENT_RANK=7 python worker_training.py &
+   ```
+
+**Key Benefits**:
+- ✅ **Zero coordination overhead** - No registry service, no file locks, no TCPStore dependency
+- ✅ **Deterministic mapping** - Worker rank N always connects to Agent rank N
+- ✅ **Flexible deployment** - Easy to change worker/agent ratios via environment variables
+- ✅ **Simple implementation** - ~10 lines of code, similar to `_make_semaphore_name` pattern in CommandQueue
 
 ## Implementation Details
 

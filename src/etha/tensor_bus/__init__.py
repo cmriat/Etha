@@ -12,6 +12,7 @@ from .commands import (
     RegisterPair,
     RegisterTensor,
 )
+from .bootstrap import BootstrapInfo, bootstrap_client
 from .command_queue import CommandQueue
 
 __all__ = [
@@ -27,4 +28,6 @@ __all__ = [
     "TensorBusAgent",
     "TensorBusClient",
     "PairHandler",
+    "bootstrap_client",
+    "BootstrapInfo",
 ]
