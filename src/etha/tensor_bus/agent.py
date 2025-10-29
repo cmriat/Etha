@@ -190,7 +190,7 @@ class TensorBusAgent:
             if len(remote_ranks) < expected_remote:
                 logger.debug(f"Daemon {self.rank}: Remote peer progress: {len(remote_ranks)}/{expected_remote}")
                 time.sleep(TIME_INTERVAL)
-        self.remote_ranks = remote_ranks
+
         logger.info(f"Daemon {self.rank}: Remote peer '{remote_name}' complete: {remote_ranks}")
 
         # Step 5: Create PairState
@@ -229,7 +229,7 @@ class TensorBusAgent:
         self.store.set(transfer_ready_key, "1")
         logger.debug(f"Daemon {self.rank}: Set {transfer_ready_key} = '1'")
 
-        for rank in self.remote_ranks:
+        for rank in self.pairs[pair_name].remote_ranks:
             transfer_singal_key = f"pair:{pair_name}/rank:{rank}/state:transfer_signal"
             if not self.store.check([transfer_singal_key]):
                 logger.debug(f"Daemon {self.rank}: Set {transfer_singal_key} = '1'")
@@ -255,7 +255,7 @@ class TensorBusAgent:
         # Transfer tensors
         for tensor_name, tensor in self.pairs[pair_name].tensors.items():
             logger.info(f"Daemon {self.rank}: Transferring tensor '{tensor_name}' for pair '{pair_name}'")
-            for rank in self.remote_ranks:
+            for rank in self.pairs[pair_name].remote_ranks:
                 if transfer_type == "send":
                     torch.distributed.send(tensor, rank)
                 elif transfer_type == "recv":
@@ -264,7 +264,7 @@ class TensorBusAgent:
 
         # Cleanup
         self.store.delete_key(transfer_ready_key)
-        for rank in self.remote_ranks:
+        for rank in self.pairs[pair_name].remote_ranks:
             transfer_singal_key = f"pair:{pair_name}/rank:{rank}/state:transfer_signal"
             self.store.delete_key(transfer_singal_key)
         logger.info(f"Daemon {self.rank}: Transfer completed for pair '{pair_name}'")
