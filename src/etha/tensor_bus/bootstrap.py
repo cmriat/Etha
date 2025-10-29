@@ -7,6 +7,8 @@ import logging
 from dataclasses import dataclass
 from collections.abc import Callable
 
+import torch
+
 from .client import TensorBusClient
 
 logger = logging.getLogger(__name__)
@@ -99,6 +101,7 @@ def bootstrap_client(
 
     # Step 3: Create TensorBusClient
     client = TensorBusClient(
+        agent_rank=agent_rank,
         lmdb_command_queue_path=command_queue_path,
         agent_state_lmdb_path=state_path,
         connection_timeout=connection_timeout,
@@ -106,6 +109,7 @@ def bootstrap_client(
 
     # Step 4: Create BootstrapInfo
     device = f"cuda:{agent_rank}"
+    torch.cuda.set_device(device)
     info = BootstrapInfo(
         agent_rank=agent_rank,
         local_rank=local_rank,

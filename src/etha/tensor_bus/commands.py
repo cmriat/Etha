@@ -1,52 +1,44 @@
 """Command (Host to Tensor Bus) Definitions and State Structures."""
 
+from typing import Literal
+
 import msgspec
 
 
-class BaseCommand(msgspec.Struct, tag=True):
+class BaseCommand(msgspec.Struct, tag=True, kw_only=True):
     """Base class for all Tensor Bus commands.
 
     Features:
     - Auto-tagging: Uses class name as type tag
     - Common timestamp field for all commands
+    - Optional semaphore for completion notification
     """
 
-    timestamp: float
+    timestamp: float | None = None
+    semaphore_name: str | None = None
 
 
-class Send(BaseCommand):
-    """Send tensor command."""
-
-    pair_name: str
-
-
-class Receive(BaseCommand):
-    """Receive tensor command."""
+class Transfer(BaseCommand):
+    """Transfer tensor command."""
 
     pair_name: str
-
-
-class Register(BaseCommand):
-    """Register handler command."""
-
-    handler_id: str
+    transfer_type: Literal["send", "recv"]
 
 
 class RegisterTensor(BaseCommand):
-    # Note: This is for prototyping
     """Register a tensor for zero-copy sharing between processes.
 
     The tensor payload (pickled via PyTorch's ForkingPickler) is stored
-    in LMDB at storage_key. The pickled payload contains all tensor
+    in LMDB at tensor_name. The pickled payload contains all tensor
     metadata (shape, dtype, device, CUDA pointer, etc.).
 
     This message only contains the minimal metadata needed to locate
     and authorize access to the tensor.
     """
 
-    tensor_id: str
-    storage_key: str
-    writer_pid: int
+    pair_name: str
+    tensor_name: str
+    tensor_payload: memoryview
 
 
 class RegisterPair(BaseCommand):
@@ -70,14 +62,11 @@ class RegisterPair(BaseCommand):
     remote_name: str
 
 
-class Stop_Inference(BaseCommand):
-    """Stop inference command."""
+class QueryStatus(BaseCommand):
+    """Query status for a pair."""
+
+    pair_name: str
+    state_name: str
 
 
-class Ready(BaseCommand):
-    """Ready command."""
-
-    tensor_id: str
-
-
-Message = Send | Receive | Register | RegisterTensor | RegisterPair | Stop_Inference | Ready
+Message = Transfer | RegisterTensor | RegisterPair | QueryStatus

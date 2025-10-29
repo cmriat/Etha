@@ -1,7 +1,7 @@
 """LMDB-based Command Queue for Tensor Bus."""
 
 import struct
-import hashlib
+import logging
 
 import lmdb
 import msgspec
@@ -9,6 +9,8 @@ import posix_ipc
 from upath import UPath
 
 from .commands import Message
+
+logger = logging.getLogger(__name__)
 
 
 # TODO: really, could be improved, 1. limited buffer, maybe circular queue 2. single writer multiple reader optimization
@@ -36,7 +38,7 @@ class CommandQueue:
         self._init_pointers()
 
         # POSIX semaphore used to notify waiting consumers.
-        sem_name = self._make_semaphore_name()
+        sem_name = f"/cq_{self.lmdb_path.stem}"
         self._sem = posix_ipc.Semaphore(sem_name, flags=posix_ipc.O_CREAT, initial_value=0)
 
     def _init_pointers(self):
@@ -45,11 +47,6 @@ class CommandQueue:
             if txn.get(b"__head__") is None:
                 txn.put(b"__head__", struct.pack("Q", 0))  # Read pointer
                 txn.put(b"__tail__", struct.pack("Q", 0))  # Write pointer
-
-    def _make_semaphore_name(self) -> str:
-        digest = hashlib.sha1(str(self.lmdb_path).encode("utf-8")).hexdigest()
-        # POSIX semaphore names must start with slash and be short.
-        return f"/cmdq_{digest[:20]}"
 
     def enqueue(self, msg: Message) -> int:
         """Enqueue a message.
@@ -216,14 +213,9 @@ class CommandQueue:
         if self._sem is not None:
             try:
                 self._sem.close()
-            except posix_ipc.ExistentialError:
-                pass  # Already closed
-
-            try:
                 self._sem.unlink()
             except posix_ipc.ExistentialError:
-                pass  # Already unlinked
-
+                pass
             self._sem = None
 
         # Close LMDB environment

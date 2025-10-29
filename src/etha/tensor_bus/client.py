@@ -7,16 +7,25 @@ import os
 import time
 import logging
 import weakref
+from typing import Literal
+from multiprocessing.reduction import ForkingPickler
 
 import lmdb
 import torch
 import msgspec
+import posix_ipc
 
-from .state import PairState
-from .commands import Send, Receive, RegisterPair
+from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensor
+from .pair_state import PairState
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
+
+
+def generate_semaphore_name(command_type: str, pair_name: str) -> str:
+    counter = int(time.time() * 1000) % 1000
+    safe_pair = pair_name.replace("/", "_").replace(":", "_")
+    return f"/command_{command_type}_{safe_pair}_{counter}"
 
 
 class TensorBusClient:
@@ -24,6 +33,7 @@ class TensorBusClient:
 
     def __init__(
         self,
+        agent_rank: int,
         lmdb_command_queue_path: str | None = None,
         agent_state_lmdb_path: str | None = None,
         connection_timeout: float = 30.0,
@@ -39,6 +49,7 @@ class TensorBusClient:
             ValueError: If agent_state_lmdb_path is not provided
             ConnectionError: If Agent is not found or not responding
         """
+        self.agent_rank = agent_rank
         # Step 1: Connection to agent
         if agent_state_lmdb_path is None:
             agent_state_lmdb_path = os.environ.get("TENSOR_BUS_STATE_PATH")
@@ -58,6 +69,40 @@ class TensorBusClient:
         # Step 2: Initialize CommandQueue
         self.command_queue = CommandQueue(lmdb_command_queue_path)
 
+    def _execute_command_with_semaphore(
+        self, command, command_type: str, pair_name: str, blocking: bool = False, timeout: float = 30.0
+    ) -> posix_ipc.Semaphore:
+        sem_name = generate_semaphore_name(command_type, pair_name)
+        sem = posix_ipc.Semaphore(sem_name, flags=posix_ipc.O_CREAT, initial_value=0)
+
+        # Set semaphore name on command
+        command.semaphore_name = sem_name
+        command.timestamp = time.time()
+
+        # Send command
+        self.command_queue.enqueue(command)
+        logger.debug(
+            f"TensorBusClient[{self.agent_rank}]: Sent {command_type} command for pair '{pair_name}' with semaphore {sem_name}"
+        )
+
+        if blocking:
+            try:
+                sem.acquire(timeout=timeout)
+                logger.debug(
+                    f"TensorBusClient[{self.agent_rank}]: {command_type} completed for pair '{pair_name}' with semaphore {sem_name}"
+                )
+            except posix_ipc.BusyError as e:
+                logger.error(
+                    f"TensorBusClient[{self.agent_rank}]: {command_type} timeout for pair '{pair_name}' with semaphore {sem_name}"
+                )
+                raise TimeoutError(
+                    f"TensorBusClient[{self.agent_rank}]: {command_type} timeout for pair '{pair_name}' with semaphore {sem_name}"
+                ) from e
+            finally:
+                sem.close()
+
+        return sem
+
     def register_pair(
         self,
         pair_name: str,
@@ -65,6 +110,8 @@ class TensorBusClient:
         remote_name: str,
         tensor: torch.Tensor,
         expected_world_size: int,
+        blocking: bool = True,
+        timeout: float = 30.0,
     ) -> "PairHandler":
         """Register a pair and return handler.
 
@@ -83,90 +130,74 @@ class TensorBusClient:
             - Remote peer registers
             - Pair is matched
         """
-        logger.info(f"TensorBusClient: Registering pair '{pair_name}' as '{local_name}' -> '{remote_name}'")
+        logger.info(
+            f"TensorBusClient[{self.agent_rank}]: Registering pair '{pair_name}' as '{local_name}' -> '{remote_name}'"
+        )
 
+        # Create RegisterPair command
         msg = RegisterPair(
             pair_name=pair_name,
             local_name=local_name,
             expected_world_size=expected_world_size,
             remote_name=remote_name,
-            timestamp=time.time(),
         )
-        self.command_queue.enqueue(msg)
 
-        logger.debug(f"TensorBusClient: Waiting for pair '{pair_name}' to match")
+        self._execute_command_with_semaphore(msg, "register", pair_name, blocking=blocking, timeout=timeout)
 
-        # TODO: fix busy wait by using a notification mechanism
-        state_key = f"pair:{pair_name}:state".encode()
-
-        matched_state = None
-        while matched_state is None:
-            try:
-                with self.state_env.begin(db=self.state_db) as txn:
-                    state_bytes = txn.get(state_key)
-                    if state_bytes:
-                        state = msgspec.msgpack.Decoder(PairState).decode(state_bytes)
-                        if state.status == "matched":
-                            matched_state = state
-                            logger.info(
-                                f"TensorBusClient: Pair '{pair_name}' matched! "
-                                f"Local ranks: {state.local_ranks}, Remote ranks: {state.remote_ranks}"
-                            )
-                            break
-            except Exception as e:
-                logger.debug(f"TensorBusClient: State polling error (retrying): {e}")
-
-            time.sleep(0.01)
+        # Get the matched state
+        state_key = f"pair:{pair_name}/state:match".encode()
+        with self.state_env.begin(db=self.state_db) as txn:
+            state_bytes = txn.get(state_key)
+            if state_bytes:
+                matched_state = msgspec.msgpack.Decoder(PairState).decode(state_bytes)
+                if matched_state.status != "matched":
+                    raise RuntimeError(f"Pair '{pair_name}' is not matched")
+                else:
+                    logger.info(
+                        f"TensorBusClient[{self.agent_rank}]: Pair '{pair_name}' matched! "
+                        f"Local ranks: {matched_state.local_ranks}, Remote ranks: {matched_state.remote_ranks}"
+                    )
 
         # Create PairHandler
         handler = PairHandler(client=self, pair_name=pair_name, tensor=tensor)
         self.handlers[pair_name] = handler
 
-        logger.info(f"TensorBusClient: Pair '{pair_name}' registered successfully")
+        logger.info(f"TensorBusClient[{self.agent_rank}]: Pair '{pair_name}' registered successfully")
 
         return handler
 
-    def _send(self, pair_name: str, blocking: bool = False):
-        """Internal: Execute send for a pair.
+    def transfer(
+        self, pair_name: str, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
+    ) -> posix_ipc.Semaphore:
+        msg = Transfer(pair_name=pair_name, transfer_type=transfer_type)
+        return self._execute_command_with_semaphore(msg, "transfer", pair_name, blocking=blocking, timeout=timeout)
 
-        Args:
-            pair_name: Pair name
-            blocking: If True, block until send completes
+    def query_transfer_signal(self, pair_name: str, blocking: bool = True, timeout: float = 30.0) -> bool:
+        query_msg = QueryStatus(pair_name=pair_name, state_name="transfer_signal")
+        logger.info(f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for pair '{pair_name}'")
+        # Execute with semaphore synchronization (blocking)
+        self._execute_command_with_semaphore(query_msg, "query", pair_name, blocking=blocking, timeout=timeout)
 
-        Returns:
-            CommHandle (future)
-        """
-        msg = Send(pair_name=pair_name, timestamp=time.time())
-        self.command_queue.enqueue(msg)
+        # Get the status from LMDB
+        state_key = f"pair:{pair_name}/state:transfer_signal".encode()
+        with self.state_env.begin(db=self.state_db) as txn:
+            state_bytes = txn.get(state_key)
+            if state_bytes:
+                state = msgspec.msgpack.Decoder(bool).decode(state_bytes)
+                logger.info(
+                    f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for pair '{pair_name}': {state}"
+                )
+                return state
+            else:
+                return False
 
-        logger.info(f"TensorBusClient: Sent Send command for pair '{pair_name}'")
-
-        if blocking:
-            # TODO: Wait for completion
-            pass
-
-        # TODO: Return CommHandle
-
-    def _recv(self, pair_name: str, blocking: bool = False):
-        """Internal: Execute recv for a pair.
-
-        Args:
-            pair_name: Pair name
-            blocking: If True, block until recv completes
-
-        Returns:
-            CommHandle (future)
-        """
-        msg = Receive(pair_name=pair_name, timestamp=time.time())
-        self.command_queue.enqueue(msg)
-
-        logger.info(f"TensorBusClient: Sent Receive command for pair '{pair_name}'")
-
-        if blocking:
-            # TODO: Wait for completion
-            pass
-
-        # TODO: Return CommHandle
+    def register_tensor(
+        self, pair_name: str, tensor_name: str, tensor: torch.Tensor, blocking: bool = True, timeout: float = 30.0
+    ):
+        msg = RegisterTensor(pair_name=pair_name, tensor_name=tensor_name, tensor_payload=ForkingPickler.dumps(tensor))
+        return self._execute_command_with_semaphore(
+            msg, "register_tensor", pair_name, blocking=blocking, timeout=timeout
+        )
 
     def _connect_agent(self, path: str, timeout: float):
         """Connect to Agent.
@@ -181,7 +212,7 @@ class TensorBusClient:
         deadline = time.time() + timeout
 
         # Step 1: Wait for LMDB file to exist
-        logger.info(f"TensorBusClient: Validating connection to Agent at {path}")
+        logger.info(f"TensorBusClient[{self.agent_rank}]: Validating connection to Agent at {path}")
         while not os.path.exists(path):
             if time.time() > deadline:
                 raise ConnectionError(
@@ -191,7 +222,7 @@ class TensorBusClient:
                 )
             time.sleep(0.1)
 
-        logger.debug(f"TensorBusClient: Agent LMDB file found at {path}")
+        logger.debug(f"TensorBusClient[{self.agent_rank}]: Agent LMDB file found at {path}")
 
         # Step 2: Open LMDB
         self.state_env = lmdb.open(
@@ -201,7 +232,7 @@ class TensorBusClient:
             subdir=False,
             max_dbs=2,
         )
-        self.state_db = self.state_env.open_db(b"pair_state")
+        self.state_db = self.state_env.open_db(b"pair_state", create=False)
 
         # Step 3: Verify heartbeat is fresh
         while time.time() <= deadline:
@@ -220,11 +251,13 @@ class TensorBusClient:
 
                 # Validation successful - keep LMDB open and return
                 if heartbeat_fresh:
-                    logger.info(f"TensorBusClient: Agent connection validated (heartbeat age: {heartbeat_age:.2f}s)")
+                    logger.info(
+                        f"TensorBusClient[{self.agent_rank}]: Agent connection validated (heartbeat age: {heartbeat_age:.2f}s)"
+                    )
                     return  # Success! self.state_env remains open
 
             except Exception as e:
-                logger.debug(f"TensorBusClient: Heartbeat check error (retrying): {e}")
+                logger.debug(f"TensorBusClient[{self.agent_rank}]: Heartbeat check error (retrying): {e}")
 
             time.sleep(0.1)
 
@@ -242,7 +275,7 @@ class TensorBusClient:
         self.command_queue.close()
         if self.state_env is not None:
             self.state_env.close()
-        logger.info("TensorBusClient: Closed")
+        logger.info(f"TensorBusClient[{self.agent_rank}]: Closed")
 
 
 class PairHandler:
@@ -270,31 +303,34 @@ class PairHandler:
         client = self._client_ref()
         if client is None:
             raise RuntimeError(
-                f"TensorBusClient has been garbage collected. PairHandler '{self.pair_name}' is no longer valid."
+                f"TensorBusClient[{self.client.agent_rank}]: has been garbage collected. PairHandler '{self.pair_name}' is no longer valid."
             )
         return client
 
-    def send(self, blocking: bool = False):
-        """Send tensor to remote side.
+    def transfer(
+        self, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
+    ) -> posix_ipc.Semaphore:
+        """Transfer tensor to remote side.
 
         Args:
             blocking: If True, block until send completes
 
         Returns:
-            CommHandle (future)
+            Semaphore for operation completion
         """
-        return self.client._send(self.pair_name, blocking)
+        return self.client.transfer(self.pair_name, transfer_type, blocking=blocking, timeout=timeout)
 
-    def recv(self, blocking: bool = False):
-        """Receive tensor from remote side.
-
-        Args:
-            blocking: If True, block until recv completes
+    def query_transfer_signal(self, blocking: bool = True, timeout: float = 30.0) -> bool:
+        """Query transfer signal status of the pair.
 
         Returns:
-            CommHandle (future)
+            if the transfer signal is active
         """
-        return self.client._recv(self.pair_name, blocking)
+        return self.client.query_transfer_signal(self.pair_name, blocking=blocking, timeout=timeout)
+
+    def register_tensor(self, tensor_name: str, tensor: torch.Tensor, blocking: bool = False, timeout: float = 30.0):
+        """Register a tensor to the pair."""
+        return self.client.register_tensor(self.pair_name, tensor_name, tensor, blocking=blocking, timeout=timeout)
 
     def close(self):
         """Cleanup (placeholder for future use)."""

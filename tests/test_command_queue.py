@@ -6,7 +6,7 @@ import tempfile
 
 import pytest
 
-from etha.tensor_bus.commands import Send, Receive, Register
+from etha.tensor_bus.commands import Transfer, QueryStatus, RegisterTensor
 from etha.tensor_bus.command_queue import CommandQueue
 
 
@@ -36,7 +36,7 @@ class TestCommandQueue:
 
     def test_enqueue_dequeue_single(self, queue):
         """Test single message enqueue and dequeue."""
-        msg = Send(pair_name="t1", timestamp=time.time())
+        msg = Transfer(pair_name="t1", transfer_type="send", timestamp=time.time())
 
         # Enqueue
         msg_id = queue.enqueue(msg)
@@ -45,7 +45,7 @@ class TestCommandQueue:
 
         # Dequeue
         dequeued = queue.dequeue()
-        assert isinstance(dequeued, Send)
+        assert isinstance(dequeued, Transfer)
         assert dequeued.pair_name == "t1"
         assert queue.size() == 0
 
@@ -56,7 +56,7 @@ class TestCommandQueue:
 
     def test_fifo_order(self, queue):
         """Test FIFO ordering guarantee."""
-        msgs = [Send(pair_name=f"t{i}", timestamp=time.time()) for i in range(5)]
+        msgs = [Transfer(pair_name=f"t{i}", transfer_type="send", timestamp=time.time()) for i in range(5)]
 
         # Enqueue all
         for msg in msgs:
@@ -72,9 +72,9 @@ class TestCommandQueue:
     def test_mixed_message_types(self, queue):
         """Test mixed message types (Tagged Union)."""
         msgs = [
-            Send(pair_name="t1", timestamp=1.0),
-            Receive(pair_name="t1", timestamp=2.0),
-            Register(handler_id="h1", timestamp=3.0),
+            Transfer(pair_name="t1", transfer_type="send", timestamp=1.0),
+            QueryStatus(pair_name="t1", state_name="transfer_signal", timestamp=2.0),
+            RegisterTensor(pair_name="t1", tensor_name="t1", tensor_payload=b"", timestamp=3.0),
         ]
 
         # Enqueue mixed types
@@ -83,16 +83,18 @@ class TestCommandQueue:
 
         # Verify type identification
         msg1 = queue.dequeue()
-        assert isinstance(msg1, Send)
+        assert isinstance(msg1, Transfer)
         assert msg1.pair_name == "t1"
 
         msg2 = queue.dequeue()
-        assert isinstance(msg2, Receive)
+        assert isinstance(msg2, QueryStatus)
         assert msg2.pair_name == "t1"
+        assert msg2.state_name == "transfer_signal"
 
         msg3 = queue.dequeue()
-        assert isinstance(msg3, Register)
-        assert msg3.handler_id == "h1"
+        assert isinstance(msg3, RegisterTensor)
+        assert msg3.pair_name == "t1"
+        assert msg3.tensor_name == "t1"
 
     # ==================== Batch Operations ====================
 
@@ -100,7 +102,7 @@ class TestCommandQueue:
         """Test batch dequeue operation."""
         # Enqueue 10 messages
         for i in range(10):
-            queue.enqueue(Send(pair_name=f"t{i}", timestamp=time.time()))
+            queue.enqueue(Transfer(pair_name=f"t{i}", transfer_type="send", timestamp=time.time()))
 
         # Batch dequeue 5 messages
         batch = queue.dequeue_batch(max_count=5)
@@ -115,7 +117,7 @@ class TestCommandQueue:
         """Test batch dequeue when max_count > queue size."""
         # Enqueue 3 messages
         for i in range(3):
-            queue.enqueue(Receive(pair_name=f"t{i}", timestamp=1.0))
+            queue.enqueue(Transfer(pair_name=f"t{i}", transfer_type="recv", timestamp=1.0))
 
         # Request 10 but only 3 available
         batch = queue.dequeue_batch(max_count=10)
@@ -124,7 +126,7 @@ class TestCommandQueue:
 
     def test_peek(self, queue):
         """Test peek does not modify queue."""
-        msg = Receive(pair_name="t1", timestamp=1.0)
+        msg = Transfer(pair_name="t1", transfer_type="recv", timestamp=1.0)
         queue.enqueue(msg)
 
         # Peek multiple times
@@ -145,7 +147,7 @@ class TestCommandQueue:
         """Test clearing the queue."""
         # Enqueue multiple messages
         for i in range(10):
-            queue.enqueue(Receive(pair_name=f"t{i}", timestamp=1.0))
+            queue.enqueue(Transfer(pair_name=f"t{i}", transfer_type="recv", timestamp=1.0))
 
         assert queue.size() == 10
 
@@ -160,7 +162,7 @@ class TestCommandQueue:
 
         # Enqueue 1000 messages
         for i in range(n):
-            queue.enqueue(Send(pair_name=f"t{i}", timestamp=time.time()))
+            queue.enqueue(Transfer(pair_name=f"t{i}", transfer_type="send", timestamp=time.time()))
 
         assert queue.size() == n
 
@@ -180,8 +182,8 @@ class TestCommandQueue:
         """Test queue survives close/reopen."""
         # First queue instance
         q1 = CommandQueue(temp_lmdb_path)
-        q1.enqueue(Send(pair_name="t1", timestamp=1.0))
-        q1.enqueue(Receive(pair_name="t2", timestamp=2.0))
+        q1.enqueue(Transfer(pair_name="t1", transfer_type="send", timestamp=1.0))
+        q1.enqueue(Transfer(pair_name="t2", transfer_type="recv", timestamp=2.0))
         assert q1.size() == 2
         q1.close()
 
@@ -190,11 +192,11 @@ class TestCommandQueue:
         assert q2.size() == 2
 
         msg1 = q2.dequeue()
-        assert isinstance(msg1, Send)
+        assert isinstance(msg1, Transfer)
         assert msg1.pair_name == "t1"
 
         msg2 = q2.dequeue()
-        assert isinstance(msg2, Receive)
+        assert isinstance(msg2, Transfer)
         assert msg2.pair_name == "t2"
 
         assert q2.is_empty()
@@ -204,8 +206,8 @@ class TestCommandQueue:
         """Test destroy() completely removes LMDB files."""
         # Create queue and add some data
         q = CommandQueue(temp_lmdb_path)
-        q.enqueue(Send(pair_name="t1", timestamp=1.0))
-        q.enqueue(Receive(pair_name="t2", timestamp=2.0))
+        q.enqueue(Transfer(pair_name="t1", transfer_type="send", timestamp=1.0))
+        q.enqueue(Transfer(pair_name="t2", transfer_type="recv", timestamp=2.0))
         assert q.size() == 2
 
         # Verify files exist
@@ -226,7 +228,7 @@ class TestCommandQueue:
     def test_destroy_idempotent(self, temp_lmdb_path):
         """Test destroy() can be called multiple times safely."""
         q = CommandQueue(temp_lmdb_path)
-        q.enqueue(Send(pair_name="t1", timestamp=1.0))
+        q.enqueue(Transfer(pair_name="t1", transfer_type="send", timestamp=1.0))
 
         # First destroy
         q.destroy()

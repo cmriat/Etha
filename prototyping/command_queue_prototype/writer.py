@@ -17,8 +17,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expa
 from multiprocessing.reduction import ForkingPickler
 
 import torch
-from upath import UPath
-from shared import LMDB_QUEUE_PATH, LMDB_STORAGE_PATH, store_tensor_payload
+from shared import LMDB_QUEUE_PATH
 
 from etha.tensor_bus import CommandQueue, RegisterTensor
 
@@ -64,17 +63,15 @@ def main():
 
     # Store tensor payload in LMDB storage
     payload = ForkingPickler.dumps(t)
-    store_tensor_payload(tensor_id, payload)
-    print(f"\n[writer] Stored tensor payload in LMDB (size: {len(payload)} bytes)")
 
     # Send RegisterTensor command via CommandQueue
     queue = CommandQueue(LMDB_QUEUE_PATH)
-    msg = RegisterTensor(tensor_id=tensor_id, storage_key=tensor_id, writer_pid=os.getpid(), timestamp=time.time())
+    msg = RegisterTensor(pair_name="pair_0", tensor_name=tensor_id, tensor_payload=payload, timestamp=time.time())
     queue.enqueue(msg)
     queue.close()
 
     print(f"[writer] ✅ Sent RegisterTensor via CommandQueue")
-    print(f"  Message fields: tensor_id, storage_key, writer_pid, timestamp")
+    print(f"  Message fields: pair_name, tensor_name, tensor_payload, timestamp")
     print(f"  Tensor metadata (shape, dtype, device, ptr) in pickled payload")
     print(f"\n[writer] Now start reader.py in another terminal:")
     print(f"  pixi run -e dev python prototyping/command_queue_prototype/reader.py")
@@ -110,15 +107,6 @@ def main():
         cleanup_queue = CommandQueue(LMDB_QUEUE_PATH)
         cleanup_queue.destroy()
         print("[writer] ✅ CommandQueue destroyed")
-
-        # Cleanup: destroy tensor storage
-        storage_path = UPath(LMDB_STORAGE_PATH)
-        try:
-            storage_path.unlink(missing_ok=True)
-            UPath(str(storage_path) + "-lock").unlink(missing_ok=True)
-            print("[writer] ✅ Tensor storage destroyed")
-        except Exception:
-            pass  # Best effort
 
         print("[writer] Exit")
 
