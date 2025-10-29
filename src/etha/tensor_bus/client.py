@@ -91,10 +91,13 @@ class TensorBusClient:
                 logger.debug(
                     f"TensorBusClient[{self.agent_rank}]: {command_type} completed for pair '{pair_name}' with semaphore {sem_name}"
                 )
-            except posix_ipc.BusyError:
-                logger.warning(
+            except posix_ipc.BusyError as e:
+                logger.error(
                     f"TensorBusClient[{self.agent_rank}]: {command_type} timeout for pair '{pair_name}' with semaphore {sem_name}"
                 )
+                raise TimeoutError(
+                    f"TensorBusClient[{self.agent_rank}]: {command_type} timeout for pair '{pair_name}' with semaphore {sem_name}"
+                ) from e
             finally:
                 sem.close()
 
