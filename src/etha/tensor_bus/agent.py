@@ -107,17 +107,18 @@ class TensorBusAgent:
     def _handle_command(self, command):
         """Dispatch command to appropriate handler and handle semaphore release."""
         try:
-            if isinstance(command, RegisterPair):
-                self._handle_register_pair(command)
-            elif isinstance(command, Transfer):
-                self._handle_transfer(command)
-            elif isinstance(command, QueryStatus):
-                self._handle_query_status(command)
-            elif isinstance(command, RegisterTensor):
-                self._handle_register_tensor(command)
-            else:
-                logger.warning(f"Daemon {self.rank}: Unknown command type: {type(command)}")
-                return  # Don't release semaphore for unknown commands
+            match command:
+                case RegisterPair():
+                    self._handle_register_pair(command)
+                case Transfer():
+                    self._handle_transfer(command)
+                case QueryStatus():
+                    self._handle_query_status(command)
+                case RegisterTensor():
+                    self._handle_register_tensor(command)
+                case _:
+                    logger.warning(f"Daemon {self.rank}: Unknown command type: {type(command)}")
+                    return  # Don't release semaphore for unknown commands
 
             # Release semaphore if specified
             if command.semaphore_name:
