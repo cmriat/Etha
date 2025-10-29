@@ -1,5 +1,6 @@
 """State."""
 
+import torch
 import msgspec
 
 
@@ -14,3 +15,4 @@ class PairState(msgspec.Struct):
     status: str  # "matched"
     created_at: float
     last_updated: float
+    tensors: dict[str, torch.Tensor] = {}  # tensor_name -> tensor mapping

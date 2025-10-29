@@ -55,9 +55,6 @@ def main():
         print(f"  Rank offset: {info.rank_offset}")
     print(f"{'=' * 60}\n")
 
-    # Set CUDA device
-    torch.cuda.set_device(info.agent_rank)
-
     # Create dummy tensor
     tensor = torch.zeros(10, dtype=torch.float32, device=info.device)
     logger.info(f"Worker {info.local_rank}: Created tensor on {info.device}")

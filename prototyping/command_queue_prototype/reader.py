@@ -16,7 +16,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expa
 from multiprocessing.reduction import ForkingPickler
 
 import torch
-from shared import LMDB_QUEUE_PATH, load_tensor_payload
+from shared import LMDB_QUEUE_PATH
 
 from etha.tensor_bus import CommandQueue, RegisterTensor
 
@@ -45,18 +45,12 @@ def main():
 
     # Display received message
     print(f"\n[reader] ✅ Received RegisterTensor message:")
-    print(f"  tensor_id: {msg.tensor_id}")
-    print(f"  storage_key: {msg.storage_key}")
-    print(f"  writer_pid: {msg.writer_pid}")
+    print(f"  pair_name: {msg.pair_name}")
+    print(f"  tensor_name: {msg.tensor_name}")
     print(f"  timestamp: {msg.timestamp}")
 
-    # Load tensor payload from LMDB storage
-    print(f"\n[reader] Loading tensor payload from LMDB...")
-    payload = load_tensor_payload(msg.storage_key)
-
-    if payload is None:
-        print(f"[reader] ❌ Tensor payload not found for key '{msg.storage_key}'")
-        return
+    # Load tensor payload from message
+    payload = msg.tensor_payload
 
     # Rebuild tensor (zero-copy via ForkingPickler)
     t = ForkingPickler.loads(payload)

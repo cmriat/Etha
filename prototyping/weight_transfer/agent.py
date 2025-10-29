@@ -12,15 +12,8 @@ This will start 8 Agent processes that:
 """
 
 import os
-import sys
 import logging
 from pathlib import Path
-
-# Ensure we can import from project root
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-
-# CUDA allocator config
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch.distributed as dist
 from shared import (
@@ -40,17 +33,19 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+logger = logging.getLogger(__name__)
+
 
 def main():
     # Get rank and world_size from environment (torchrun sets these)
     rank = int(os.environ.get("RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", AGENT_WORLD_SIZE))
 
-    print(f"\n{'=' * 60}")
-    print(f"Agent Rank {rank} starting...")
-    print(f"World Size: {world_size}")
-    print(f"TCPStore: {TCPSTORE_HOST}:{TCPSTORE_PORT}")
-    print(f"{'=' * 60}\n")
+    logger.info(f"\n{'=' * 60}")
+    logger.info(f"Agent Rank {rank} starting...")
+    logger.info(f"World Size: {world_size}")
+    logger.info(f"TCPStore: {TCPSTORE_HOST}:{TCPSTORE_PORT}")
+    logger.info(f"{'=' * 60}\n")
 
     # Get LMDB paths
     command_queue_path = get_agent_command_queue_path(rank)
@@ -61,10 +56,10 @@ def main():
         path = Path(path_str)
         for f in path.parent.glob(f"{path.name}*"):
             f.unlink(missing_ok=True)
-            print(f"[Agent {rank}] Cleaned up: {f}")
+            logger.debug(f"[Agent {rank}] Cleaned up: {f}")
 
-    print(f"[Agent {rank}] CommandQueue: {command_queue_path}")
-    print(f"[Agent {rank}] State LMDB: {state_path}\n")
+    logger.info(f"[Agent {rank}] CommandQueue: {command_queue_path}")
+    logger.info(f"[Agent {rank}] State LMDB: {state_path}\n")
 
     # Initialize Agent
     agent = TensorBusAgent(
@@ -76,23 +71,23 @@ def main():
         lmdb_state_path=state_path,
     )
 
-    print(f"[Agent {rank}] ✅ Initialized successfully")
-    print(f"[Agent {rank}] Entering main loop (polling for commands)...\n")
+    logger.info(f"[Agent {rank}] ✅ Initialized successfully")
+    logger.info(f"[Agent {rank}] Entering main loop (polling for commands)...\n")
 
     # Wait for all agents to be ready
     dist.barrier()
     if rank == 0:
-        print("\n" + "=" * 60)
-        print("🚀 ALL AGENTS READY - You can now launch workers!")
-        print("=" * 60 + "\n")
+        logger.info("\n" + "=" * 60)
+        logger.info("🚀 ALL AGENTS READY - You can now launch workers!")
+        logger.info("=" * 60 + "\n")
 
     try:
         agent.run()
     except KeyboardInterrupt:
-        print(f"\n[Agent {rank}] Interrupted by user")
+        logger.info(f"\n[Agent {rank}] Interrupted by user")
     finally:
         agent.close()
-        print(f"[Agent {rank}] Cleanup complete. Exit.")
+        logger.info(f"[Agent {rank}] Cleanup complete. Exit.")
 
 
 if __name__ == "__main__":
