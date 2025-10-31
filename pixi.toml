@@ -33,6 +33,7 @@ jupyterlab = "*"
 pytest = "*"
 ruff = "*"
 pre-commit = "*"
+nccl-tests = ">=2.16.7,<3"
 
 [pypi-dependencies]
 etha = { path = ".", editable = true }

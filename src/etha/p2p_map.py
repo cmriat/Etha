@@ -19,6 +19,7 @@ def get_p2p_map(
     target_placements: tuple[Placement, ...],
     device: str = "cpu",
 ) -> tuple[dict[int, dict[tuple, list[int]]], dict[int, dict[tuple, list[tuple[int, tuple]]]], list[int], list[int]]:
+    """Get P2P communication map for tensor redistribution."""
     rank = dist.get_rank()
     source_world_size = source_mesh.size()
     target_world_size = target_mesh.size()
