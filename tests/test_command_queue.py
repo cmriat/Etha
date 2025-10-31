@@ -6,8 +6,7 @@ import tempfile
 
 import pytest
 
-from etha.tensor_bus.commands import Transfer, QueryStatus, RegisterTensor
-from etha.tensor_bus.command_queue import CommandQueue
+from etha.tensor_bus import Transfer, QueryStatus, CommandQueue, RegisterTensor
 
 
 class TestCommandQueue:

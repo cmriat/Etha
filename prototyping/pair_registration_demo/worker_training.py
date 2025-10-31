@@ -67,7 +67,6 @@ def main():
         pair_name=PAIR_NAME,
         local_name=LOCAL_NAME,
         remote_name=REMOTE_NAME,
-        tensor=tensor,
         expected_world_size=EXPECTED_WORLD_SIZE,
     )
     elapsed = time.time() - start_time

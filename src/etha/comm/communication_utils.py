@@ -1,5 +1,6 @@
 """Communication utilities for Etha."""
 
+import logging
 import itertools
 from collections import defaultdict
 
@@ -7,6 +8,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed._tensor import Shard, DTensor, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
+
+logger = logging.getLogger(__name__)
 
 # Global cache for subgroup handles (avoid repeated collective new_group)
 _PROCESS_GROUP_CACHE: dict[tuple[int, ...], dist.ProcessGroup] = {}
@@ -139,8 +142,7 @@ def assemble_target_tensor(
     recv_buffers: dict[tuple[tuple, int, tuple], torch.Tensor],
     target_tensor_shape: torch.Size,
     target_num_slicers: list[int],
-    dtype: torch.dtype,
-    device: str,
+    final_tensor: torch.Tensor,
 ) -> torch.Tensor | None:
     """Assemble final tensor from received chunks.
 
@@ -150,7 +152,6 @@ def assemble_target_tensor(
     if rank not in reverse_map:
         return None
 
-    final_tensor = torch.empty(target_tensor_shape, dtype=dtype, device=device)
     for target_idx, src_list in reverse_map[rank].items():
         for src_rank, sidx in src_list:
             if src_rank == rank:
@@ -176,18 +177,14 @@ def assemble_target_tensor(
             if src_rank != rank:
                 del recv_buffers[buf_key]
 
-    return final_tensor
-
 
 def p2p_communicate(
-    forward_map: dict[int, dict[tuple, list[int]]],
+    source_local_tensor: torch.Tensor,
+    target_local_tensor: torch.Tensor,
+    forward_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
     reverse_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
-    local_tensor: DTensor,
     source_num_slicers: list[int],
     target_num_slicers: list[int],
-    target_tensor_shape: torch.Size,
-    device: str = "cpu",
-    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor | None:
     rank = dist.get_rank()
 
@@ -202,13 +199,11 @@ def p2p_communicate(
     received_data: dict[tuple[int, tuple], torch.Tensor] = {}
     recv_buffers: dict[tuple[tuple, int, tuple], torch.Tensor] = {}
 
-    local_shard = None
     slicer_tuples = None
     chunk_shape = None
-
+    target_tensor_shape = target_local_tensor.shape
     if rank in forward_map:
-        local_shard = local_tensor.to_local()
-        slicer_tuples = get_slicer_tuples(local_shard.shape, source_num_slicers)
+        slicer_tuples = get_slicer_tuples(source_local_tensor.shape, source_num_slicers)
     else:
         chunk_shape = tuple(
             target_tensor_shape[dim] // num_slices if num_slices > 1 else target_tensor_shape[dim]
@@ -216,11 +211,11 @@ def p2p_communicate(
         )
 
     # Self-sends: store locally
-    if rank in forward_map and local_shard is not None:
+    if rank in forward_map and source_local_tensor is not None:
         for source_idx, target_ranks in forward_map[rank].items():
             if rank in target_ranks:
                 slice_tuple = get_slice_from_multi_index(source_idx, source_num_slicers, slicer_tuples)
-                received_data[(rank, source_idx)] = local_shard[slice_tuple]
+                received_data[(rank, source_idx)] = source_local_tensor[slice_tuple]
 
     # Async broadcasts (send/recv) in deterministic order per group
     for group_key in sorted(broadcast_plan.keys(), key=lambda k: (k[0], k[1])):
@@ -229,7 +224,7 @@ def p2p_communicate(
         if rank == src_rank:
             for source_idx in broadcast_plan[group_key]:
                 slice_tuple = get_slice_from_multi_index(source_idx, source_num_slicers, slicer_tuples)
-                data_slice = local_shard[slice_tuple]
+                data_slice = source_local_tensor[slice_tuple]
                 # Only create contiguous copy if necessary for cross-process transfer
                 data_to_send = data_slice if data_slice.is_contiguous() else data_slice.contiguous()
                 w = dist.broadcast(tensor=data_to_send, src=src_rank, group=group, async_op=True)
@@ -240,7 +235,7 @@ def p2p_communicate(
                     for src_rank_check, source_idx in src_list:
                         # Only process broadcasts for current group
                         if src_rank_check == src_rank and source_idx in broadcast_plan[group_key]:
-                            recv_buffer = torch.empty(chunk_shape, dtype=dtype, device=device)
+                            recv_buffer = torch.empty(chunk_shape, dtype=target_local_tensor.dtype, device=target_local_tensor.device)
                             w = dist.broadcast(tensor=recv_buffer, src=src_rank, group=group, async_op=True)
                             bcast_recv_works.append(w)
                             recv_buffers[(target_idx, src_rank_check, source_idx)] = (
@@ -248,14 +243,14 @@ def p2p_communicate(
                             )
 
     # Batched P2P for single-target transfers
-    if rank in forward_map and local_shard is not None:
+    if rank in forward_map and source_local_tensor is not None:
         for source_idx, target_ranks in sorted(forward_map[rank].items()):
             if (rank, source_idx) in broadcast_keys:
                 continue
             other_targets = [r for r in target_ranks if r != rank]
             if len(other_targets) == 1:
                 slice_tuple = get_slice_from_multi_index(source_idx, source_num_slicers, slicer_tuples)
-                data_slice = local_shard[slice_tuple]
+                data_slice = source_local_tensor[slice_tuple]
                 # Only create contiguous copy if necessary for cross-process transfer
                 data_to_send = data_slice if data_slice.is_contiguous() else data_slice.contiguous()
                 p2p_send_ops.append(dist.P2POp(dist.isend, data_to_send, other_targets[0]))
@@ -267,7 +262,7 @@ def p2p_communicate(
                     continue
                 if (src_rank, sidx) in broadcast_keys:
                     continue
-                recv_buffer = torch.empty(chunk_shape, dtype=dtype, device=device)
+                recv_buffer = torch.empty(chunk_shape, dtype=target_local_tensor.dtype, device=target_local_tensor.device)
                 p2p_recv_ops.append(dist.P2POp(dist.irecv, recv_buffer, src_rank))
                 recv_buffers[(target_idx, src_rank, sidx)] = recv_buffer
 
@@ -285,5 +280,5 @@ def p2p_communicate(
         w.wait()
 
     return assemble_target_tensor(
-        rank, reverse_map, received_data, recv_buffers, target_tensor_shape, target_num_slicers, dtype, device
+        rank, reverse_map, received_data, recv_buffers, target_tensor_shape, target_num_slicers, target_local_tensor
     )

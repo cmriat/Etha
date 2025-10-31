@@ -1,6 +1,7 @@
 """P2P map for Etha."""
 
 import math
+import logging
 import itertools
 from collections import defaultdict
 
@@ -10,6 +11,8 @@ from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
 from .communication_utils import get_shard_shape
+
+logger = logging.getLogger(__name__)
 
 
 def get_p2p_map(
@@ -21,8 +24,8 @@ def get_p2p_map(
 ) -> tuple[dict[int, dict[tuple, list[int]]], dict[int, dict[tuple, list[tuple[int, tuple]]]], list[int], list[int]]:
     """Get P2P communication map for tensor redistribution."""
     rank = dist.get_rank()
-    source_world_size = source_mesh.size()
-    target_world_size = target_mesh.size()
+    target_mesh_ranks = target_mesh.mesh.flatten().tolist()
+    source_mesh_ranks = source_mesh.mesh.flatten().tolist()
 
     source_tensor_ndim = (
         max(
@@ -48,53 +51,57 @@ def get_p2p_map(
     middle_tensor_shape = tuple(
         math.lcm(source_shard_shape[i], target_shard_shape[i]) for i in range(len(source_shard_shape))
     )
-    # Always use CPU for mapping computation regardless of actual communication device
-    middle_tensor = torch.zeros(middle_tensor_shape, device=device)
+    logger.debug(
+        f"[P2P Map rank={rank}] Source/Target/Middle Shard Shape: {source_shard_shape} {target_shard_shape} {middle_tensor_shape}"
+    )
     source_num_slicers = []
     target_num_slicers = []
     for o, m, t in zip(source_shard_shape, middle_tensor_shape, target_shard_shape, strict=False):
-        if o < m:
-            source_num_slicers.append(m // o)
-        else:
-            source_num_slicers.append(1)
+        source_num_slicers.append(m // o)
         target_num_slicers.append(m // t)
+    reqs = []
+    if rank in source_mesh_ranks:
+        middle_tensor = torch.zeros(middle_tensor_shape, device=device)
+        dtensor_source = distribute_tensor(middle_tensor, source_mesh, source_placements, src_data_rank=None)
+        local_shard = dtensor_source.to_local()
+        logger.debug(f"[P2P Map rank={rank}] Local Source Shard: {local_shard}")
+        # Create tensor with rank and coordinates encoded as single values
+        # Use dynamic base calculation to support arbitrary dimensions
+        encoded_tensor = torch.zeros_like(local_shard)
 
-    dtensor_source = distribute_tensor(middle_tensor, source_mesh, source_placements)
-    local_shard = dtensor_source.to_local()
+        # Calculate the maximum coordinate in any dimension to determine encoding base
+        # Use middle_tensor_shape to ensure consistent base across all ranks
+        base = max(middle_tensor_shape) + 1  # Base should be larger than any coordinate
 
-    # Create tensor with rank and coordinates encoded as single values
-    # Use dynamic base calculation to support arbitrary dimensions
-    encoded_tensor = torch.zeros_like(local_shard)
+        for idx in itertools.product(*[range(dim) for dim in local_shard.shape]):
+            # Encode rank and coordinates into single value using dynamic base
+            encoded_value = rank
+            for coord in idx:
+                encoded_value = encoded_value * base + coord
+            encoded_tensor[idx] = encoded_value
 
-    # Calculate the maximum coordinate in any dimension to determine encoding base
-    # Use middle_tensor_shape to ensure consistent base across all ranks
-    base = max(middle_tensor_shape) + 1  # Base should be larger than any coordinate
+        local_shard.copy_(encoded_tensor)
+        full_tensor_restored = dtensor_source.full_tensor()
 
-    for idx in itertools.product(*[range(dim) for dim in local_shard.shape]):
-        # Encode rank and coordinates into single value using dynamic base
-        encoded_value = rank
-        for coord in idx:
-            encoded_value = encoded_value * base + coord
-        encoded_tensor[idx] = encoded_value
+        # Find index in source mesh
+        source_idx = source_mesh_ranks.index(rank)
+        # Map to target ranks using original pattern: start from source_idx, step by source mesh size
+        for target_idx in range(source_idx, len(target_mesh_ranks), len(source_mesh_ranks)):
+            target_rank = target_mesh_ranks[target_idx]
+            logger.debug(f"[P2P Map rank={rank}] Sending to target rank: {target_rank}")
+            reqs.append(dist.isend(full_tensor_restored, dst=target_rank))
 
-    local_shard.copy_(encoded_tensor)
-    full_tensor_restored = dtensor_source.full_tensor()
-    dist.barrier()
-    if rank < source_world_size:
-        # Source ranks send to target ranks
-        send_requests = []
-        for target_rank in range(source_world_size + rank, source_world_size + target_world_size, source_world_size):
-            req = dist.isend(full_tensor_restored, dst=target_rank)
-            send_requests.append(req)
-
-        # Wait for all sends to complete
-        for req in send_requests:
-            req.wait()
-    else:
+    elif rank in target_mesh_ranks:
         # Target ranks receive from source ranks
         full_tensor_restored = torch.empty(middle_tensor_shape, device=device)
-        source_rank = (rank - source_world_size) % source_world_size
-        req = dist.irecv(full_tensor_restored, src=source_rank)
+        # Find index in target mesh and map to corresponding source rank
+        target_idx = target_mesh_ranks.index(rank)
+        source_rank = source_mesh_ranks[target_idx % len(source_mesh_ranks)]
+
+        logger.debug(f"[P2P Map rank={rank}] Receiving from source rank: {source_rank}")
+        reqs.append(dist.irecv(full_tensor_restored, src=source_rank))
+
+    for req in reqs:
         req.wait()
 
     def make_nested_defaultdict():
@@ -103,10 +110,10 @@ def get_p2p_map(
     forward_map = defaultdict(make_nested_defaultdict)
     reverse_map = defaultdict(make_nested_defaultdict)
 
-    if rank >= source_world_size:
+    if rank in target_mesh_ranks:
         dtensor_target = distribute_tensor(full_tensor_restored, target_mesh, target_placements, src_data_rank=None)
         local_target_shard = dtensor_target.to_local()
-
+        logger.debug(f"[P2P Map rank={rank}] Local Target Shard: {local_target_shard}")
         # Calculate the same base used for encoding
         # Use middle_tensor_shape to ensure consistent base across all ranks
         base = max(middle_tensor_shape) + 1
@@ -131,13 +138,11 @@ def get_p2p_map(
             source_indices.reverse()
             source_idx = tuple(source_indices)
 
-            # Build forward_map: source_rank -> {source_idx: [target_ranks]}
+            # Build forward_map: source_rank -> {source_idx: [(target_rank, target_idx)]}
             target_rank = rank
-            forward_map[source_rank][source_idx].append(target_rank)
-
+            forward_map[source_rank][source_idx].append((target_rank, target_idx))
             # Build reverse_map: target_rank -> {target_idx: [(source_rank, source_idx)]}
             reverse_map[target_rank][target_idx].append((source_rank, source_idx))
-    dist.barrier()
 
     # Convert defaultdict to regular dict for serialization
     forward_map_regular = {}
@@ -148,8 +153,8 @@ def get_p2p_map(
     for k, v in reverse_map.items():
         reverse_map_regular[k] = dict(v)
 
-    all_forward_maps = [None] * (source_world_size + target_world_size)
-    all_reverse_maps = [None] * (source_world_size + target_world_size)
+    all_forward_maps = [None] * (len(source_mesh_ranks) + len(target_mesh_ranks))
+    all_reverse_maps = [None] * (len(source_mesh_ranks) + len(target_mesh_ranks))
 
     dist.all_gather_object(all_forward_maps, forward_map_regular, group=None)
     dist.all_gather_object(all_reverse_maps, reverse_map_regular, group=None)
@@ -166,8 +171,8 @@ def get_p2p_map(
     for rank_forward_map in all_forward_maps:
         if rank_forward_map is not None:
             for source_rank, source_idx_map in rank_forward_map.items():
-                for source_idx, target_ranks in source_idx_map.items():
-                    merged_forward_map[source_rank][source_idx].extend(target_ranks)
+                for source_idx, target_info_list in source_idx_map.items():
+                    merged_forward_map[source_rank][source_idx].extend(target_info_list)
 
     # Convert nested defaultdict to regular dict
     final_forward_map = {}

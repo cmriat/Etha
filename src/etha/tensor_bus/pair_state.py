@@ -16,3 +16,5 @@ class PairState(msgspec.Struct):
     created_at: float
     last_updated: float
     tensors: dict[str, torch.Tensor] = {}  # tensor_name -> tensor mapping
+    p2p_map_send: dict | None = None  # P2P transfer map for sending optimized communication
+    p2p_map_recv: dict | None = None  # P2P transfer map for receiving optimized communication

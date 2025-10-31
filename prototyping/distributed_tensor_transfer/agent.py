@@ -1,22 +1,17 @@
-"""Agent Process for weight transfer example."""
+"""Agent for distributed tensor transfer example."""
 
 import os
 import logging
 from pathlib import Path
 
 import torch.distributed as dist
-from shared import (
-    TCPSTORE_HOST,
-    TCPSTORE_PORT,
-    AGENT_WORLD_SIZE,
-    get_queue_state_paths,
-)
+from common import TCPSTORE_HOST, TCPSTORE_PORT, AGENT_WORLD_SIZE, get_queue_state_paths
 
 from etha.tensor_bus import TensorBusAgent
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,  # Changed to DEBUG for detailed logs
+    level=logging.DEBUG,
     format="[%(asctime)s] [Agent %(process)d] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -27,7 +22,7 @@ logger = logging.getLogger(__name__)
 def main():
     # Get rank and world_size from environment (torchrun sets these)
     rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", AGENT_WORLD_SIZE))
+    world_size = int(os.environ.get("WORLD_SIZE", AGENT_WORLD_SIZE))  # 4 training + 4 inference agents
 
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Agent Rank {rank} starting...")

@@ -74,7 +74,6 @@ def main():
         pair_name=PAIR_NAME,
         local_name=LOCAL_NAME,
         remote_name=REMOTE_NAME,
-        tensor=engine.param,
         expected_world_size=EXPECTED_WORLD_SIZE,
     )
     sem = handler.register_tensor(tensor_name="param", tensor=engine.param, blocking=False)

@@ -7,6 +7,7 @@ import os
 import time
 import logging
 import weakref
+import traceback
 from typing import Literal
 from multiprocessing.reduction import ForkingPickler
 
@@ -14,6 +15,8 @@ import lmdb
 import torch
 import msgspec
 import posix_ipc
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor.placement_types import Placement
 
 from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensor
 from .pair_state import PairState
@@ -92,9 +95,6 @@ class TensorBusClient:
                     f"TensorBusClient[{self.agent_rank}]: {command_type} completed for pair '{pair_name}' with semaphore {sem_name}"
                 )
             except posix_ipc.BusyError as e:
-                logger.error(
-                    f"TensorBusClient[{self.agent_rank}]: {command_type} timeout for pair '{pair_name}' with semaphore {sem_name}"
-                )
                 raise TimeoutError(
                     f"TensorBusClient[{self.agent_rank}]: {command_type} timeout for pair '{pair_name}' with semaphore {sem_name}"
                 ) from e
@@ -108,8 +108,9 @@ class TensorBusClient:
         pair_name: str,
         local_name: str,
         remote_name: str,
-        tensor: torch.Tensor,
         expected_world_size: int,
+        device_mesh: DeviceMesh | None = None,
+        placements: tuple[Placement, ...] | None = None,
         blocking: bool = True,
         timeout: float = 30.0,
     ) -> "PairHandler":
@@ -121,7 +122,8 @@ class TensorBusClient:
             remote_name: Name of remote peer
             tensor: Local tensor to be registered
             expected_world_size: Number of ranks for local peer
-
+            device_mesh: Local device mesh configuration
+            placements: Local tensor placement strategy
         Returns:
             PairHandler for this pair
 
@@ -134,12 +136,24 @@ class TensorBusClient:
             f"TensorBusClient[{self.agent_rank}]: Registering pair '{pair_name}' as '{local_name}' -> '{remote_name}'"
         )
 
-        # Create RegisterPair command
+        mesh_shape_payload = None
+        placements_payload = None
+
+        if device_mesh is not None:
+            mesh_shape_bytes = ForkingPickler.dumps(tuple(device_mesh.mesh.shape))
+            mesh_shape_payload = memoryview(mesh_shape_bytes)
+
+        if placements is not None:
+            placements_bytes = ForkingPickler.dumps(placements)
+            placements_payload = memoryview(placements_bytes)
+
         msg = RegisterPair(
             pair_name=pair_name,
             local_name=local_name,
             expected_world_size=expected_world_size,
             remote_name=remote_name,
+            mesh_shape_payload=mesh_shape_payload,
+            placements_payload=placements_payload,
         )
 
         self._execute_command_with_semaphore(msg, "register", pair_name, blocking=blocking, timeout=timeout)
@@ -159,7 +173,7 @@ class TensorBusClient:
                     )
 
         # Create PairHandler
-        handler = PairHandler(client=self, pair_name=pair_name, tensor=tensor)
+        handler = PairHandler(client=self, pair_name=pair_name)
         self.handlers[pair_name] = handler
 
         logger.info(f"TensorBusClient[{self.agent_rank}]: Pair '{pair_name}' registered successfully")
@@ -257,7 +271,9 @@ class TensorBusClient:
                     return  # Success! self.state_env remains open
 
             except Exception as e:
-                logger.debug(f"TensorBusClient[{self.agent_rank}]: Heartbeat check error (retrying): {e}")
+                logger.debug(
+                    f"TensorBusClient[{self.agent_rank}]: Heartbeat check error (retrying): {e} {traceback.format_exc()}"
+                )
 
             time.sleep(0.1)
 
@@ -281,17 +297,15 @@ class TensorBusClient:
 class PairHandler:
     """Lightweight handler for a single Pair."""
 
-    def __init__(self, client: TensorBusClient, pair_name: str, tensor: torch.Tensor):
+    def __init__(self, client: TensorBusClient, pair_name: str):
         """Initialize PairHandler.
 
         Args:
             client: TensorBusClient instance
             pair_name: Pair name
-            tensor: Local tensor
         """
         self._client_ref = weakref.ref(client)  # Weak reference to avoid circular ref
         self.pair_name = pair_name
-        self.tensor = tensor
 
     @property
     def client(self) -> TensorBusClient:

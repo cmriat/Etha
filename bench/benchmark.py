@@ -12,7 +12,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
 
-from etha import (
+from etha.comm import (
     get_p2p_map,
     p2p_communicate,
     get_shard_tensor_shape,
