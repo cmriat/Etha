@@ -1,0 +1,1 @@
+- run with pixi run

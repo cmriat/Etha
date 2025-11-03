@@ -134,7 +134,7 @@ def benchmark_single_shape(
     # P2P method warmup
     dist.barrier()
     for _ in range(warmup_iter):
-        p2p_result = p2p_communicate(
+        p2p_communicate(
             source_local_tensor,
             target_local_tensor,
             forward_map,
@@ -173,13 +173,13 @@ def benchmark_single_shape(
             source_world_size,
         )
 
-    # Verify correctness
-    if p2p_result is not None and bc_result is not None:
-        if not torch.allclose(p2p_result, bc_result.to_local()):
-            print(f"[Rank {rank}] P2P result shape: {p2p_result.shape}")
+    # Verify correctness (p2p_communicate modifies target_local_tensor in-place)
+    if target_local_tensor is not None and bc_result is not None:
+        if not torch.allclose(target_local_tensor, bc_result.to_local()):
+            print(f"[Rank {rank}] P2P result shape: {target_local_tensor.shape}")
             print(f"[Rank {rank}] Baseline result shape: {bc_result.to_local().shape}")
-            print(f"[Rank {rank}] Max diff: {(p2p_result - bc_result.to_local()).abs().max().item()}")
-            print(f"[Rank {rank}] P2P sample: {p2p_result}")
+            print(f"[Rank {rank}] Max diff: {(target_local_tensor - bc_result.to_local()).abs().max().item()}")
+            print(f"[Rank {rank}] P2P sample: {target_local_tensor}")
             print(f"[Rank {rank}] Baseline sample: {bc_result.to_local()}")
             raise ValueError("P2P and Gather-Broadcast results mismatch!")
 
@@ -456,7 +456,7 @@ def main():
 
         # Clear process group cache and GPU memory after each mesh combination
         try:
-            from etha.comm.communication_utils import _PROCESS_GROUP_CACHE
+            from etha.comm.communication_methods import _PROCESS_GROUP_CACHE
 
             _PROCESS_GROUP_CACHE.clear()
         except ImportError:
