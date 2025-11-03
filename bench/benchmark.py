@@ -15,7 +15,6 @@ from torch.distributed.tensor.placement_types import _StridedShard
 from etha.comm import (
     get_p2p_map,
     p2p_communicate,
-    get_shard_tensor_shape,
     gather_broadcast_communicate,
 )
 
@@ -103,14 +102,16 @@ def calculate_ideal_bandwidth(
 
 
 def benchmark_single_shape(
+    source_local_tensor,
+    target_local_tensor,
+    source_dist_tensor,
+    target_dist_tensor,  # noqa
     shape: tuple,
     origin_tensor: torch.Tensor,
     forward_map,
     reverse_map,
-    source_dist_tensor,
     source_num_slicers,
     target_num_slicers,
-    target_local_shape,
     current_source_mesh: DeviceMesh,
     current_target_mesh: DeviceMesh,
     source_specs: list,  # noqa
@@ -134,14 +135,12 @@ def benchmark_single_shape(
     dist.barrier()
     for _ in range(warmup_iter):
         p2p_result = p2p_communicate(
+            source_local_tensor,
+            target_local_tensor,
             forward_map,
             reverse_map,
-            source_dist_tensor,
             source_num_slicers,
             target_num_slicers,
-            target_local_shape,
-            device=device,
-            dtype=torch.float32,
         )
     if device == "cuda":
         torch.cuda.synchronize()
@@ -151,14 +150,12 @@ def benchmark_single_shape(
     start_time = time.perf_counter()
     for _ in range(profile_iter):
         p2p_communicate(
+            source_local_tensor,
+            target_local_tensor,
             forward_map,
             reverse_map,
-            source_dist_tensor,
             source_num_slicers,
             target_num_slicers,
-            target_local_shape,
-            device=device,
-            dtype=torch.float32,
         )
     if device == "cuda":
         torch.cuda.synchronize()
@@ -174,7 +171,6 @@ def benchmark_single_shape(
             source_dist_tensor,
             origin_tensor,
             source_world_size,
-            device,
         )
 
     # Verify correctness
@@ -200,7 +196,6 @@ def benchmark_single_shape(
             source_dist_tensor,
             origin_tensor,
             source_world_size,
-            device,
         )
     if device == "cuda":
         torch.cuda.synchronize()
@@ -311,14 +306,11 @@ def main():
     device = "cuda"
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
 
     # Initialize process group
+    dist.init_process_group(backend="nccl" if device == "cuda" else "gloo")
     if device == "cuda":
-        dist.init_process_group(backend="nccl")
         torch.cuda.set_device(local_rank)
-    else:
-        dist.init_process_group(backend="gloo")
 
     # BENCHMARKING PARAMETERS
     warmup_iter = 20
@@ -405,7 +397,7 @@ def main():
         map_time = (time.perf_counter() - start_time) / profile_iter
         if rank == 0:
             print(f"get_p2p_map time: {map_time}")
-
+            print(f"forward_map: {forward_map}")
         for shape in tensor_shapes:
             print(f"  Benchmarking tensor shape: {shape}...")
             torch.manual_seed(0)
@@ -413,20 +405,27 @@ def main():
 
             is_in_source = rank < source_world_size
             source_dist_tensor = None
+            source_local_tensor = None
+            target_dist_tensor = None
+            target_local_tensor = None
             if is_in_source:
                 source_dist_tensor = distribute_tensor(origin_tensor, current_source_mesh, source_specs)
-
-            target_local_shape = get_shard_tensor_shape(shape, current_target_mesh, target_specs)
+                source_local_tensor = source_dist_tensor.to_local()
+            else:
+                target_dist_tensor = distribute_tensor(origin_tensor, current_target_mesh, target_specs)
+                target_local_tensor = target_dist_tensor.to_local()
 
             result = benchmark_single_shape(
+                source_local_tensor,
+                target_local_tensor,
+                source_dist_tensor,
+                target_dist_tensor,
                 shape,
                 origin_tensor,
                 forward_map,
                 reverse_map,
-                source_dist_tensor,
                 source_num_slicers,
                 target_num_slicers,
-                target_local_shape,
                 current_source_mesh,
                 current_target_mesh,
                 source_specs,
@@ -456,7 +455,7 @@ def main():
 
         # Clear process group cache and GPU memory after each mesh combination
         try:
-            from etha.communication_utils import _PROCESS_GROUP_CACHE
+            from etha.comm.communication_utils import _PROCESS_GROUP_CACHE
 
             _PROCESS_GROUP_CACHE.clear()
         except ImportError:
