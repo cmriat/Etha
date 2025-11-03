@@ -10,9 +10,16 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
-from .comm_methods import get_shard_shape
-
 logger = logging.getLogger(__name__)
+
+
+def get_shard_shape(device_mesh: tuple[int, ...], placements: tuple[Placement, ...], tensor_ndim: int) -> list[int]:
+    """Calculate shard shape from device mesh and placements."""
+    shard_shape = [1] * tensor_ndim
+    for i, placement in enumerate(placements):
+        if isinstance(placement, Shard):
+            shard_shape[placement.dim] *= device_mesh[i]
+    return shard_shape
 
 
 def get_p2p_map(
