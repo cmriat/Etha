@@ -195,28 +195,9 @@ def p2p_communicate(
             dtype=dtype,
         )
 
-    # === Phase 3: Execution ===
-    if not target_chunks:
-        # Sender-only rank: execute sends, no result to return
-        execute_naive(
-            source_chunks=source_chunks,
-            target_chunks=[],
-            target_tensor_shape=target_tensor_shape,
-            target_num_slicers=target_num_slicers,
-            device=device,
-            dtype=dtype,
-        )
-        return None
-
-    # Receiver (possibly also sender): execute full communication
-    result = execute_naive(
+    execute_naive(
         source_chunks=source_chunks,
         target_chunks=target_chunks,
-        target_tensor_shape=target_tensor_shape,
+        target_tensor=target_local_tensor,
         target_num_slicers=target_num_slicers,
-        device=device,
-        dtype=dtype,
     )
-
-    if target_local_tensor is not None:
-        target_local_tensor.copy_(result)

@@ -456,7 +456,7 @@ def main():
 
         # Clear process group cache and GPU memory after each mesh combination
         try:
-            from etha.comm.communication_methods import _PROCESS_GROUP_CACHE
+            from etha.comm.comm_methods import _PROCESS_GROUP_CACHE
 
             _PROCESS_GROUP_CACHE.clear()
         except ImportError:

@@ -92,11 +92,9 @@ def prepare_recv_buffers(
 def execute_naive(
     source_chunks: list[SourceChunk],
     target_chunks: list[TargetChunk],
-    target_tensor_shape: tuple[int, ...],
+    target_tensor: torch.Tensor | None,
     target_num_slicers: list[int],
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
+) -> None:
     """Execute transfer in naive mode: launch all → wait all → assemble.
 
     Pure function - all state is in parameters or local variables.
@@ -108,9 +106,6 @@ def execute_naive(
         target_num_slicers: Partitioning of target tensor
         device: Device for final tensor
         dtype: Data type for final tensor
-
-    Returns:
-        Assembled target tensor
     """
     # === Phase 1: Launch sends ===
     send_works: dict[int, dist.Work] = {}
@@ -136,15 +131,14 @@ def execute_naive(
         work.wait()
 
     # === Phase 4: Assemble final tensor ===
-    final_tensor = torch.empty(target_tensor_shape, device=device, dtype=dtype)
+    if target_tensor is not None:
+        target_tensor_shape = tuple(target_tensor.shape)
 
-    # Extend num_slicers to match tensor dimensions
-    target_num_slicers = target_num_slicers + [1] * (len(target_tensor_shape) - len(target_num_slicers))
+        # Extend num_slicers to match tensor dimensions
+        target_num_slicers = target_num_slicers + [1] * (len(target_tensor_shape) - len(target_num_slicers))
 
-    for chunk in target_chunks:
-        _assemble_chunk(chunk, final_tensor, target_num_slicers)
-
-    return final_tensor
+        for chunk in target_chunks:
+            _assemble_chunk(chunk, target_tensor, target_num_slicers)
 
 
 def _launch_send(chunk: SourceChunk) -> dist.Work:

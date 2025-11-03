@@ -10,7 +10,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
-from .communication_methods import get_shard_shape
+from .comm_methods import get_shard_shape
 
 logger = logging.getLogger(__name__)
 
