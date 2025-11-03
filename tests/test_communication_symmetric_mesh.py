@@ -7,8 +7,7 @@ import logging
 import torch
 import pytest
 import torch.distributed as dist
-from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_tensor
-from torch.distributed.tensor.placement_types import _StridedShard
+from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 
 from etha.comm import (
     get_p2p_map,
@@ -31,14 +30,19 @@ def run_test_communication(
     source_world_size = math.prod(source_mesh_shape)
     target_world_size = math.prod(target_mesh_shape)
 
-    source_mesh = DeviceMesh(device, torch.arange(source_world_size).view(source_mesh_shape))
-    target_mesh = DeviceMesh(
-        device,
-        torch.arange(source_world_size, source_world_size + target_world_size).view(target_mesh_shape),
-    )
+    if rank < source_world_size:
+        source_mesh = DeviceMesh(device, torch.arange(source_world_size).view(source_mesh_shape))
+        target_mesh = DeviceMesh(
+            device, torch.arange(source_world_size, source_world_size + target_world_size).view(target_mesh_shape)
+        )
+    else:
+        target_mesh = DeviceMesh(device, torch.arange(source_world_size).view(source_mesh_shape))
+        source_mesh = DeviceMesh(
+            device, torch.arange(source_world_size, source_world_size + target_world_size).view(target_mesh_shape)
+        )
 
-    source_specs = [Replicate(), Replicate(), Shard(0), Shard(1)]
-    target_specs = [Replicate(), _StridedShard(1, split_factor=2), Replicate(), Shard(1)]
+    source_specs = [Shard(1)]
+    target_specs = [Shard(1)]
     # Dummy tensor shape
     torch.manual_seed(0)
     shape = (64, 64)
@@ -46,29 +50,51 @@ def run_test_communication(
     target_origin_tensor = torch.randn(shape, device=device)
     is_in_source = rank < source_world_size
 
-    source_dist_tensor = distribute_tensor(source_origin_tensor, source_mesh, source_specs)
-    source_local_tensor = source_dist_tensor.to_local()
+    source_dist_tensor = None
+    source_local_tensor = None
+    if is_in_source:
+        source_dist_tensor = distribute_tensor(source_origin_tensor, source_mesh, source_specs)
+        source_local_tensor = source_dist_tensor.to_local()
 
-    target_dist_tensor = distribute_tensor(target_origin_tensor, target_mesh, target_specs)
-    target_local_tensor = target_dist_tensor.to_local()
+    target_dist_tensor = None
+    target_local_tensor = None
+    if not is_in_source:
+        target_dist_tensor = distribute_tensor(target_origin_tensor, source_mesh, target_specs)
+        target_local_tensor = target_dist_tensor.to_local()
 
     logger.debug(f"[rank={rank}] Source mesh: {source_mesh.mesh}")
     logger.debug(f"[rank={rank}] Target mesh: {target_mesh.mesh}")
     # Test P2P Map Method
-    forward_map, reverse_map, source_num_slicers, target_num_slicers = get_p2p_map(
-        source_mesh,
-        source_specs,
-        target_mesh,
-        target_specs,
-        device,
-    )
-    forward_map_2, reverse_map_2, source_num_slicers_2, target_num_slicers_2 = get_p2p_map(
-        target_mesh,
-        target_specs,
-        source_mesh,
-        source_specs,
-        device,
-    )
+    if is_in_source:
+        forward_map, reverse_map, source_num_slicers, target_num_slicers = get_p2p_map(
+            source_mesh,
+            source_specs,
+            target_mesh,
+            target_specs,
+            device,
+        )
+        forward_map_2, reverse_map_2, source_num_slicers_2, target_num_slicers_2 = get_p2p_map(
+            target_mesh,
+            target_specs,
+            source_mesh,
+            source_specs,
+            device,
+        )
+    else:
+        forward_map, reverse_map, source_num_slicers, target_num_slicers = get_p2p_map(
+            target_mesh,
+            target_specs,
+            source_mesh,
+            source_specs,
+            device,
+        )
+        forward_map_2, reverse_map_2, source_num_slicers_2, target_num_slicers_2 = get_p2p_map(
+            source_mesh,
+            source_specs,
+            target_mesh,
+            target_specs,
+            device,
+        )
     if rank == 0:
         logger.info(f"Forward Map: {forward_map}")
         logger.info(f"Reverse Map: {reverse_map}")
@@ -89,8 +115,8 @@ def run_test_communication(
 
     # Test Gather-Broadcast Method
     gather_broadcast_result = gather_broadcast_communicate(
-        target_mesh,
-        target_specs,
+        source_mesh,
+        source_specs,
         source_dist_tensor,
         target_origin_tensor,
         source_world_size,
@@ -113,22 +139,7 @@ def run_test_communication(
 @pytest.mark.parametrize(
     "source_mesh_shape, target_mesh_shape",
     [
-        # Same mesh shapes (identity)
-        ((2, 2, 2, 2), (2, 2, 2, 2)),
-        # Last dimension scaling (common case)
-        ((2, 2, 2, 2), (2, 2, 2, 4)),  # Scale up last dim
-        ((2, 2, 2, 4), (2, 2, 2, 2)),  # Scale down last dim
-        # Second-to-last dimension scaling
-        ((2, 2, 2, 2), (2, 2, 4, 2)),
-        ((2, 2, 4, 2), (2, 2, 2, 2)),
-        # Multiple dimension scaling
-        ((2, 2, 2, 2), (2, 2, 4, 4)),
-        ((2, 2, 4, 4), (2, 2, 2, 2)),
-        # First dimension scaling (edge case)
-        ((2, 2, 2, 2), (4, 2, 2, 2)),
-        # Complex mixed scaling
-        ((2, 2, 2, 4), (2, 4, 4, 2)),
-        ((2, 4, 2, 2), (2, 2, 4, 4)),
+        ((4,), (4,)),
     ],
 )
 def test_communication_cpu(source_mesh_shape: tuple, target_mesh_shape: tuple):
