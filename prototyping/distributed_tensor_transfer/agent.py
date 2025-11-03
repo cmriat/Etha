@@ -1,34 +1,17 @@
-"""Agent Process - Pair Registration Demo.
-
-Launch with torchrun:
-    torchrun --nproc_per_node=8 prototyping/pair_registration_demo/daemon.py
-
-This will start 8 Agent processes that:
-1. Form a torch.distributed NCCL group
-2. Share a TCPStore for metadata exchange
-3. Each agent polls its own CommandQueue for RegisterPair messages
-4. Execute pair matching via TCPStore
-5. Write PairState to State LMDB when matched
-"""
+"""Agent for distributed tensor transfer example."""
 
 import os
 import logging
 from pathlib import Path
 
 import torch.distributed as dist
-from shared import (
-    TCPSTORE_HOST,
-    TCPSTORE_PORT,
-    AGENT_WORLD_SIZE,
-    get_agent_state_path,
-    get_agent_command_queue_path,
-)
+from common import TCPSTORE_HOST, TCPSTORE_PORT, AGENT_WORLD_SIZE, get_queue_state_paths
 
 from etha.tensor_bus import TensorBusAgent
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,  # Changed to DEBUG for detailed logs
+    level=logging.DEBUG,
     format="[%(asctime)s] [Agent %(process)d] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -39,7 +22,7 @@ logger = logging.getLogger(__name__)
 def main():
     # Get rank and world_size from environment (torchrun sets these)
     rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", AGENT_WORLD_SIZE))
+    world_size = int(os.environ.get("WORLD_SIZE", AGENT_WORLD_SIZE))  # 4 training + 4 inference agents
 
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Agent Rank {rank} starting...")
@@ -48,8 +31,7 @@ def main():
     logger.info(f"{'=' * 60}\n")
 
     # Get LMDB paths
-    command_queue_path = get_agent_command_queue_path(rank)
-    state_path = get_agent_state_path(rank)
+    command_queue_path, state_path = get_queue_state_paths(rank)
 
     # Clean up old LMDB files (remove stale data and locks)
     for path_str in [command_queue_path, state_path]:
