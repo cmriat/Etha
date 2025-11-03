@@ -157,7 +157,7 @@ class TensorBusAgent:
         logger.info(f"Agent {self.rank}: RegisterPair pair={pair_name}, local={local_name} -> remote={remote_name}")
 
         # Step 1: Write local registration to TCPStore
-        local_key = f"pair:{pair_name}/{local_name}/rank:{self.rank}"
+        local_key = f"pair:{pair_name}/rank:{self.rank}/{local_name}"
         self.store.set(local_key, "1")
         logger.debug(f"Agent {self.rank}: Wrote {local_key} = '1' to TCPStore")
 
@@ -184,10 +184,12 @@ class TensorBusAgent:
             f"Agent {self.rank}: Waiting for local peer '{local_name}' to complete (expected={expected_local})"
         )
         local_ranks = []
-        while len(local_ranks) < expected_local:
+        while True:
             local_ranks = self._scan_peer_ranks(pair_name, local_name)
             if len(local_ranks) < expected_local:
                 time.sleep(TIME_INTERVAL)
+            else:
+                break
 
         logger.info(f"Agent {self.rank}: Local peer complete: {local_ranks}")
 
@@ -202,10 +204,12 @@ class TensorBusAgent:
 
         # Then, wait for all remote ranks to register
         remote_ranks = []
-        while len(remote_ranks) < expected_remote:
+        while True:
             remote_ranks = self._scan_peer_ranks(pair_name, remote_name)
             if len(remote_ranks) < expected_remote:
                 time.sleep(TIME_INTERVAL)
+            else:
+                break
 
         logger.info(f"Agent {self.rank}: Remote peer '{remote_name}' complete: {remote_ranks}")
 
@@ -236,7 +240,7 @@ class TensorBusAgent:
             logger.info(f"Agent {self.rank}: Local mesh: {local_mesh_tensor} with placements: {local_placements}")
             logger.info(f"Agent {self.rank}: Remote mesh: {remote_mesh_tensor} with placements: {remote_placements}")
 
-            # Rule: alphabetically smaller role is source first, larger is target
+            # Rule: alphabetically smaller role is sender first, larger is receiver
             send_first = local_name < remote_name
             if send_first:
                 sender_mesh = DeviceMesh("cuda", local_mesh_tensor)
@@ -305,18 +309,26 @@ class TensorBusAgent:
             local_ranks=local_ranks,
             remote_name=remote_name,
             remote_ranks=remote_ranks,
+            pair_size=expected_local + expected_remote,
+            local_group=dist.new_group(local_ranks),
             status="matched",
-            created_at=time.time(),
-            last_updated=time.time(),
             p2p_map_send=p2p_map_send,
             p2p_map_recv=p2p_map_recv,
         )
         self.pairs[pair_name] = state
 
-        # Step 10: Write PairState to State LMDB (for Worker verification)
+        # Step 10: Set transfer ready and signal flags to 0
+        transfer_ready_key = f"pair:{pair_name}/rank:{self.rank}/state:ready"
+        self.store.set(transfer_ready_key, "0")
+        logger.debug(f"Agent {self.rank}: Set {transfer_ready_key} = '0'")
+        transfer_singal_key = f"pair:{pair_name}/state:transfer_signal"
+        self.store.set(transfer_singal_key, "0")
+        logger.debug(f"Agent {self.rank}: Set {transfer_singal_key} = '0'")
+
+        # Step 11: Write PairState to State LMDB (for Worker verification)
         if self.state_env and self.state_db:
             state_key = f"pair:{pair_name}/state:match".encode()
-            state_bytes = msgspec.msgpack.encode(state)
+            state_bytes = msgspec.msgpack.encode(state.status)
             with self.state_env.begin(write=True, db=self.state_db) as txn:
                 txn.put(state_key, state_bytes)
             logger.debug(f"Agent {self.rank}: Wrote PairState to State LMDB")
@@ -338,21 +350,18 @@ class TensorBusAgent:
 
         transfer_singal_key = f"pair:{pair_name}/state:transfer_signal"
         self.store.set(transfer_singal_key, "1")
+        logger.debug(f"Agent {self.rank}: Set {transfer_singal_key} = '1'")
 
         # Wait for all ranks to be ready
         logger.info(f"Agent {self.rank}: Waiting for all ranks to be ready for transfer")
 
-        ready_count = 0
-        ranks = self.pairs[pair_name].local_ranks + self.pairs[pair_name].remote_ranks
-        while ready_count < len(ranks):
-            ready_count = 0
-            for rank in ranks:
-                wait_key = f"pair:{pair_name}/rank:{rank}/state:ready"
-                if self.store.check([wait_key]) and self.store.get(wait_key) == b"1":
-                    ready_count += 1
-
-            if ready_count < len(ranks):
+        ready_ranks = []
+        while True:
+            ready_ranks = self._scan_peer_ranks(pair_name, "state:ready")
+            if len(ready_ranks) < self.pairs[pair_name].pair_size:
                 time.sleep(TIME_INTERVAL)
+            else:
+                break
 
         logger.info(f"Agent {self.rank}: All ranks ready for transfer")
 
@@ -407,9 +416,8 @@ class TensorBusAgent:
 
         # Cleanup
         dist.barrier()
-        self.store.delete_key(transfer_ready_key)
-        transfer_singal_key = f"pair:{pair_name}/state:transfer_signal"
-        self.store.delete_key(transfer_singal_key)
+        self.store.set(transfer_ready_key, "0")
+        self.store.set(transfer_singal_key, "0")
         logger.info(f"Agent {self.rank}: Transfer completed for pair '{pair_name}'")
 
     def _handle_query_status(self, msg: QueryStatus):
@@ -418,16 +426,19 @@ class TensorBusAgent:
         tcpstore_state_key = f"pair:{pair_name}/state:{state_name}"
         statedb_key = f"pair:{pair_name}/state:{state_name}".encode()
 
+        torch.cuda.synchronize()
+        dist.barrier(group=self.pairs[pair_name].local_group)  # ensure all ranks read the same state
+
         if state_name == "transfer_signal":
             logger.debug(f"Agent {self.rank}: Query {state_name} status for pair '{pair_name}'")
-            transfer_signal = self.store.check([tcpstore_state_key]) and self.store.get(tcpstore_state_key) == b"1"
-
+            state = self.store.get(tcpstore_state_key) == b"1"
+            logger.debug(f"Agent {self.rank}: Query {state_name} status for pair '{pair_name}': {state}")
         else:
             logger.error(f"Agent {self.rank}: Invalid state name: {state_name}")
             return
 
         with self.state_env.begin(write=True, db=self.state_db) as txn:
-            txn.put(statedb_key, msgspec.msgpack.encode(transfer_signal))
+            txn.put(statedb_key, msgspec.msgpack.encode(state))
 
     def _handle_register_tensor(self, msg: RegisterTensor):
         pair_name = msg.pair_name
@@ -469,34 +480,27 @@ class TensorBusAgent:
         if len(mesh_info_list) == 1:
             return
 
-        for i, (mesh_shape, placements) in enumerate(mesh_info_list):
+        for i, mesh_info in enumerate(mesh_info_list):
             # Check mesh shape consistency
-            assert mesh_shape == mesh_info_list[0][0], (
-                f"Agent {self.rank}: rank {i} mesh shape {mesh_shape} != reference {mesh_info_list[0][0]}"
+            assert mesh_info == mesh_info_list[0], (
+                f"Agent {self.rank}: rank {i} mesh info {mesh_info} != reference {mesh_info_list[0]}"
             )
 
-            assert placements == mesh_info_list[0][1], (
-                f"Agent {self.rank}: rank {i} placements {placements} != reference {mesh_info_list[0][1]}"
-            )
-
-    def _scan_peer_ranks(self, pair_name: str, peer_name: str) -> list[int]:
+    def _scan_peer_ranks(self, pair_name: str, status_key: str) -> list[int]:
         """Scan TCPStore for all ranks of a given peer.
 
         Args:
             pair_name: Pair name
-            peer_name: Peer name (local or remote)
+            status_key: Status key (e.g. "state:ready", "state:transfer_signal")
 
         Returns:
-            List of ranks that have registered
+            List of ranks that have the given status
         """
         ranks = []
         for r in range(self.world_size):
-            key = f"pair:{pair_name}/{peer_name}/rank:{r}"
-            # Use check() instead of get() to avoid blocking
-            if self.store.check([key]):
-                value = self.store.get(key)
-                if value == b"1":
-                    ranks.append(r)
+            key = f"pair:{pair_name}/rank:{r}/{status_key}"
+            if self.store.check([key]) and self.store.get(key) == b"1":
+                ranks.append(r)
         return ranks
 
     def _update_heartbeat(self):

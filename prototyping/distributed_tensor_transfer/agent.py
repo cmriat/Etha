@@ -11,7 +11,7 @@ from etha.tensor_bus import TensorBusAgent
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="[%(asctime)s] [Agent %(process)d] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )

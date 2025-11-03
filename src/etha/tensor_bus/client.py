@@ -5,6 +5,7 @@ Host processes use TensorBusClient to register pairs and communicate with Agents
 
 import os
 import time
+import uuid
 import logging
 import weakref
 import traceback
@@ -19,16 +20,15 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
 from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensor
-from .pair_state import PairState
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
 
 
 def generate_semaphore_name(command_type: str, pair_name: str) -> str:
-    counter = int(time.time() * 1000) % 1000
     safe_pair = pair_name.replace("/", "_").replace(":", "_")
-    return f"/command_{command_type}_{safe_pair}_{counter}"
+    unique_suffix = uuid.uuid4().hex  # UUID ensures semaphore uniqueness without global state
+    return f"/command_{command_type}_{safe_pair}_{os.getpid()}_{unique_suffix}"
 
 
 class TensorBusClient:
@@ -163,14 +163,11 @@ class TensorBusClient:
         with self.state_env.begin(db=self.state_db) as txn:
             state_bytes = txn.get(state_key)
             if state_bytes:
-                matched_state = msgspec.msgpack.Decoder(PairState).decode(state_bytes)
-                if matched_state.status != "matched":
+                matched_state = msgspec.msgpack.Decoder(str).decode(state_bytes)
+                if matched_state != "matched":
                     raise RuntimeError(f"Pair '{pair_name}' is not matched")
                 else:
-                    logger.info(
-                        f"TensorBusClient[{self.agent_rank}]: Pair '{pair_name}' matched! "
-                        f"Local ranks: {matched_state.local_ranks}, Remote ranks: {matched_state.remote_ranks}"
-                    )
+                    logger.info(f"TensorBusClient[{self.agent_rank}]: Pair '{pair_name}' matched! ")
 
         # Create PairHandler
         handler = PairHandler(client=self, pair_name=pair_name)

@@ -14,7 +14,7 @@ pixi run torchrun --nproc_per_node=8 --master-port=39500 prototyping/distributed
 
 # Wait for agents to be ready
 echo "⏳ Waiting for agents to initialize..."
-sleep 5
+sleep 8
 
 echo "🔥 Starting Training workers (ranks 0-3)..."
 TRAINING_STRATEGY=${TRAINING_STRATEGY:-"hybrid_dp_mp"} pixi run torchrun --nproc_per_node=4 --master-port=39501 \
@@ -30,5 +30,5 @@ echo "Press Ctrl+C to stop all processes..."
 echo ""
 
 # Wait for any process to exit or Ctrl+C
-trap "echo 'Stopping all processes...'; pkill -f "python"; exit" INT
+trap "echo 'Stopping all processes...'; pkill -f 'agent.py'; pkill -f 'train.py'; pkill -f 'inference.py'; exit" INT
 wait
