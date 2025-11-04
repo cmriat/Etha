@@ -11,8 +11,9 @@ from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_t
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from etha.comm import (
-    get_p2p_map,
-    p2p_communicate,
+    get_m2m_map,
+    m2m_communicate,
+    map_to_chunk_ir,
     gather_broadcast_communicate,
 )
 
@@ -54,8 +55,10 @@ def run_test_communication(
 
     logger.debug(f"[rank={rank}] Source mesh: {source_mesh.mesh}")
     logger.debug(f"[rank={rank}] Target mesh: {target_mesh.mesh}")
-    # Test P2P Map Method
-    forward_map, reverse_map, source_num_slicers, target_num_slicers = get_p2p_map(
+
+    # Generate chunk IR
+    # Step 1: Get M2M map
+    forward_map, reverse_map, source_slicers, target_slicers = get_m2m_map(
         source_mesh,
         source_specs,
         target_mesh,
@@ -63,30 +66,34 @@ def run_test_communication(
         dist.group.WORLD,
         device,
     )
-    forward_map_2, reverse_map_2, source_num_slicers_2, target_num_slicers_2 = get_p2p_map(
-        target_mesh,
-        target_specs,
-        source_mesh,
-        source_specs,
-        dist.group.WORLD,
-        device,
+
+    source_tensor_shape = None
+    target_tensor_shape = None
+    if source_local_tensor is not None and 0 not in source_local_tensor.shape:
+        source_tensor_shape = tuple(source_local_tensor.shape)
+    if target_local_tensor is not None and 0 not in target_local_tensor.shape:
+        target_tensor_shape = tuple(target_local_tensor.shape)
+
+    # Step 2: Generate chunk IR from map + actual tensor shapes
+    source_chunks, target_chunks = map_to_chunk_ir(
+        forward_map=forward_map,
+        reverse_map=reverse_map,
+        source_num_slicers=source_slicers,
+        target_num_slicers=target_slicers,
+        source_tensor_shape=source_tensor_shape,
+        target_tensor_shape=target_tensor_shape,
+        rank=rank,
     )
+
     if rank == 0:
-        logger.info(f"Forward Map: {forward_map}")
-        logger.info(f"Reverse Map: {reverse_map}")
-        logger.info(f"Source Num Slicers: {source_num_slicers}")
-        logger.info(f"Target Num Slicers: {target_num_slicers}")
-        logger.info(f"Forward Map 2: {forward_map_2}")
-        logger.info(f"Reverse Map 2: {reverse_map_2}")
-        logger.info(f"Source Num Slicers 2: {source_num_slicers_2}")
-        logger.info(f"Target Num Slicers 2: {target_num_slicers_2}")
-    p2p_communicate(
+        logger.info(f"Generated {len(source_chunks)} source chunks, {len(target_chunks)} target chunks")
+
+    # Test M2M communication with IR
+    m2m_communicate(
+        source_chunks,
+        target_chunks,
         source_local_tensor,
         target_local_tensor,
-        forward_map,
-        reverse_map,
-        source_num_slicers,
-        target_num_slicers,
     )
 
     # Test Gather-Broadcast Method
@@ -98,15 +105,15 @@ def run_test_communication(
         source_world_size,
     )
     if not is_in_source:
-        full_p2p_result = target_dist_tensor.full_tensor()
+        full_m2m_result = target_dist_tensor.full_tensor()
 
-        assert torch.allclose(full_p2p_result, source_origin_tensor)
+        assert torch.allclose(full_m2m_result, source_origin_tensor)
         # Assert results are close (due to potential floating point differences in distributed ops)
         if target_local_tensor is not None and gather_broadcast_result is not None:
             assert torch.allclose(target_local_tensor, gather_broadcast_result.to_local())
         else:
             raise RuntimeError(
-                f"One result is None, the other is not. P2P: {target_local_tensor}, Gather-Broadcast: {gather_broadcast_result}"
+                f"One result is None, the other is not. M2M: {target_local_tensor}, Gather-Broadcast: {gather_broadcast_result}"
             )
 
     dist.destroy_process_group()

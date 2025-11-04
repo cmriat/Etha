@@ -71,7 +71,7 @@ def map_to_chunk_ir(
     source_num_slicers: list[int],
     target_num_slicers: list[int],
     source_tensor_shape: tuple[int, ...] | None,
-    target_tensor_shape: tuple[int, ...],
+    target_tensor_shape: tuple[int, ...] | None,
     rank: int,
 ) -> tuple[list[SourceChunk], list[TargetChunk]]:
     """Lower topology maps to chunk-level IR.

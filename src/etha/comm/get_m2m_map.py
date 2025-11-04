@@ -36,7 +36,7 @@ def get_shard_shape(device_mesh: tuple[int, ...], placements: tuple[Placement, .
     return shard_shape
 
 
-def get_p2p_map(
+def get_m2m_map(
     source_mesh: DeviceMesh,
     source_placements: tuple[Placement, ...],
     target_mesh: DeviceMesh,
