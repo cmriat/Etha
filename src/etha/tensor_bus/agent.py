@@ -212,6 +212,9 @@ class TensorBusAgent:
                 break
 
         logger.info(f"Agent {self.rank}: Remote peer '{remote_name}' complete: {remote_ranks}")
+        logger.debug(f"Agent {self.rank}: Creating pair group with ranks: {local_ranks + remote_ranks}")
+        pair_group = dist.new_group(ranks=(local_ranks + remote_ranks))
+        logger.debug(f"Agent {self.rank}: Pair group created: {pair_group}")
 
         # Step 6: Collect device mesh and placement info from all ranks
         local_mesh_info = self._collect_mesh_placement_info(pair_name, local_ranks)
@@ -259,6 +262,7 @@ class TensorBusAgent:
                 source_placements=sender_placements,
                 target_mesh=receiver_mesh,
                 target_placements=receiver_placements,
+                group=pair_group,
                 device="cuda",
             )
             forward_map_recv, reverse_map_recv, source_num_slicers_recv, target_num_slicers_recv = get_p2p_map(
@@ -266,6 +270,7 @@ class TensorBusAgent:
                 source_placements=receiver_placements,
                 target_mesh=sender_mesh,
                 target_placements=sender_placements,
+                group=pair_group,
                 device="cuda",
             )
             if send_first:
@@ -311,6 +316,7 @@ class TensorBusAgent:
             remote_ranks=remote_ranks,
             pair_size=expected_local + expected_remote,
             local_group=dist.new_group(local_ranks),
+            pair_group=pair_group,
             status="matched",
             p2p_map_send=p2p_map_send,
             p2p_map_recv=p2p_map_recv,
@@ -415,7 +421,7 @@ class TensorBusAgent:
                 logger.info(f"Agent {self.rank}: Transfered tensor_name: '{tensor_name}'")
 
         # Cleanup
-        dist.barrier()
+        dist.barrier(group=pair_state.pair_group)
         self.store.set(transfer_ready_key, "0")
         self.store.set(transfer_singal_key, "0")
         logger.info(f"Agent {self.rank}: Transfer completed for pair '{pair_name}'")

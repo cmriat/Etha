@@ -20,6 +20,7 @@ def get_p2p_map(
     source_placements: tuple[Placement, ...],
     target_mesh: DeviceMesh,
     target_placements: tuple[Placement, ...],
+    group: dist.ProcessGroup,
     device: str = "cpu",
 ) -> tuple[dict[int, dict[tuple, list[int]]], dict[int, dict[tuple, list[tuple[int, tuple]]]], list[int], list[int]]:
     """Get P2P communication map for tensor redistribution."""
@@ -156,8 +157,8 @@ def get_p2p_map(
     all_forward_maps = [None] * (len(source_mesh_ranks) + len(target_mesh_ranks))
     all_reverse_maps = [None] * (len(source_mesh_ranks) + len(target_mesh_ranks))
 
-    dist.all_gather_object(all_forward_maps, forward_map_regular, group=None)
-    dist.all_gather_object(all_reverse_maps, reverse_map_regular, group=None)
+    dist.all_gather_object(all_forward_maps, forward_map_regular, group=group)
+    dist.all_gather_object(all_reverse_maps, reverse_map_regular, group=group)
 
     merged_forward_map = defaultdict(make_nested_defaultdict)
     merged_reverse_map = defaultdict(make_nested_defaultdict)

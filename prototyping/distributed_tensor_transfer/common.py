@@ -26,7 +26,7 @@ PURE_MP_PLACEMENTS = ("Shard(dim=1)",)  # Shard model parameters on column dimen
 
 # TCPStore configuration
 TCPSTORE_HOST = "localhost"
-TCPSTORE_PORT = 29500
+TCPSTORE_PORT = 39505
 
 # Base path for LMDB storage
 LMDB_ROOT = f"{os.environ['PIXI_PROJECT_ROOT']}/prototyping/distributed_tensor_transfer/dbs"

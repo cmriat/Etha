@@ -15,6 +15,7 @@ class PairState(msgspec.Struct):
     remote_ranks: list[int]  # Ranks for remote peer (e.g., [8, 9, ..., 23])
     pair_size: int  # Total number of ranks in the pair
     local_group: dist.ProcessGroup  # Local process group
+    pair_group: dist.ProcessGroup  # Pair process group
     status: str  # "matched"
     tensors: dict[str, torch.Tensor] = {}  # tensor_name -> tensor mapping
     p2p_map_send: dict | None = None  # P2P transfer map for sending optimized communication
