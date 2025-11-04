@@ -60,6 +60,7 @@ def run_test_communication(
         source_specs,
         target_mesh,
         target_specs,
+        dist.group.WORLD,
         device,
     )
     forward_map_2, reverse_map_2, source_num_slicers_2, target_num_slicers_2 = get_p2p_map(
@@ -67,6 +68,7 @@ def run_test_communication(
         target_specs,
         source_mesh,
         source_specs,
+        dist.group.WORLD,
         device,
     )
     if rank == 0:

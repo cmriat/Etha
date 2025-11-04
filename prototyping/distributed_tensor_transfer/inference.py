@@ -80,8 +80,6 @@ class DistributedInferenceEngine:
 
 def main():
     # Bootstrap TensorBusClient with rank offset for inference workers
-    os.environ["AGENT_RANK_OFFSET"] = "4"
-
     client, info = bootstrap_client(path_naming_fn=get_queue_state_paths)
 
     logger.info(f"\n{'=' * 60}")

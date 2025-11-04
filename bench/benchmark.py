@@ -392,6 +392,7 @@ def main():
             source_specs,
             current_target_mesh,
             target_specs,
+            dist.group.WORLD,
             device,
         )
         map_time = (time.perf_counter() - start_time) / profile_iter
