@@ -10,18 +10,18 @@ rm -rf prototyping/distributed_tensor_transfer/dbs/* -rf
 mkdir -p prototyping/distributed_tensor_transfer/dbs
 
 echo "🚀 Starting Agent processes (ranks 0-7)..."
-pixi run torchrun --nproc_per_node=8 --master-port=29500 prototyping/distributed_tensor_transfer/agent.py > prototyping/distributed_tensor_transfer/logs/agent.log 2>&1 &
+pixi run torchrun --nproc_per_node=8 --master-port=39500 prototyping/distributed_tensor_transfer/agent.py > prototyping/distributed_tensor_transfer/logs/agent.log 2>&1 &
 
 # Wait for agents to be ready
 echo "⏳ Waiting for agents to initialize..."
 sleep 5
 
 echo "🔥 Starting Training workers (ranks 0-3)..."
-TRAINING_STRATEGY=${TRAINING_STRATEGY:-"hybrid_dp_mp"} pixi run torchrun --nproc_per_node=4 --master-port=29501 \
+TRAINING_STRATEGY=${TRAINING_STRATEGY:-"hybrid_dp_mp"} pixi run torchrun --nproc_per_node=4 --master-port=39501 \
     prototyping/distributed_tensor_transfer/train.py > prototyping/distributed_tensor_transfer/logs/train.log 2>&1 &
 
 echo "🔥 Starting Inference workers (ranks 0-3, connecting to agents 4-7)..."
-AGENT_RANK_OFFSET=4 INFERENCE_STRATEGY=${INFERENCE_STRATEGY:-"pure_mp"} pixi run torchrun --nproc_per_node=4 --master-port=29502 \
+AGENT_RANK_OFFSET=4 INFERENCE_STRATEGY=${INFERENCE_STRATEGY:-"hybrid_dp_mp"} pixi run torchrun --nproc_per_node=4 --master-port=39502 \
     prototyping/distributed_tensor_transfer/inference.py > prototyping/distributed_tensor_transfer/logs/inference.log 2>&1 &
 
 echo ""

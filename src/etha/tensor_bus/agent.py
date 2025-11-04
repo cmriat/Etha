@@ -229,64 +229,68 @@ class TensorBusAgent:
             local_mesh_tensor = torch.arange(
                 local_ranks[0], local_ranks[0] + torch.prod(torch.tensor(local_mesh_shape))
             ).view(local_mesh_shape)
-            local_mesh = DeviceMesh("cuda", local_mesh_tensor)
-            # Get remote mesh info (peer's mesh)
             remote_mesh_shape, remote_placements = remote_mesh_info[0]
             remote_mesh_tensor = torch.arange(
                 remote_ranks[0], remote_ranks[0] + torch.prod(torch.tensor(remote_mesh_shape))
             ).view(remote_mesh_shape)
-            remote_mesh = DeviceMesh("cuda", remote_mesh_tensor)
-            logger.info(f"Agent {self.rank}: Local mesh: {local_mesh.mesh} with placements: {local_placements}")
-            logger.info(f"Agent {self.rank}: Remote mesh: {remote_mesh.mesh} with placements: {remote_placements}")
+            logger.info(f"Agent {self.rank}: Local mesh: {local_mesh_tensor} with placements: {local_placements}")
+            logger.info(f"Agent {self.rank}: Remote mesh: {remote_mesh_tensor} with placements: {remote_placements}")
 
             # Rule: alphabetically smaller role is source first, larger is target
             send_first = local_name < remote_name
             if send_first:
-                logger.info(f"Agent {self.rank}: Generating P2P map for {local_name}->{remote_name}")
-                forward_map_send, reverse_map_send, source_num_slicers_send, target_num_slicers_send = get_p2p_map(
-                    source_mesh=local_mesh,
-                    source_placements=local_placements,
-                    target_mesh=remote_mesh,
-                    target_placements=remote_placements,
-                    device="cuda",
-                )
-                logger.info(f"Agent {self.rank}: Generating P2P map for {remote_name}->{local_name}")
-                forward_map_recv, reverse_map_recv, source_num_slicers_recv, target_num_slicers_recv = get_p2p_map(
-                    source_mesh=remote_mesh,
-                    source_placements=remote_placements,
-                    target_mesh=local_mesh,
-                    target_placements=local_placements,
-                    device="cuda",
-                )
+                sender_mesh = DeviceMesh("cuda", local_mesh_tensor)
+                receiver_mesh = DeviceMesh("cuda", remote_mesh_tensor)
+                sender_placements = local_placements
+                receiver_placements = remote_placements
             else:
-                logger.info(f"Agent {self.rank}: Generating P2P map for {remote_name}->{local_name}")
-                forward_map_recv, reverse_map_recv, source_num_slicers_recv, target_num_slicers_recv = get_p2p_map(
-                    source_mesh=remote_mesh,
-                    source_placements=remote_placements,
-                    target_mesh=local_mesh,
-                    target_placements=local_placements,
-                    device="cuda",
-                )
-                logger.info(f"Agent {self.rank}: Generating P2P map for {local_name}->{remote_name}")
-                forward_map_send, reverse_map_send, source_num_slicers_send, target_num_slicers_send = get_p2p_map(
-                    source_mesh=local_mesh,
-                    source_placements=local_placements,
-                    target_mesh=remote_mesh,
-                    target_placements=remote_placements,
-                    device="cuda",
-                )
-            p2p_map_send = {
-                "forward_map": forward_map_send,
-                "reverse_map": reverse_map_send,
-                "source_num_slicers": source_num_slicers_send,
-                "target_num_slicers": target_num_slicers_send,
-            }
-            p2p_map_recv = {
-                "forward_map": forward_map_recv,
-                "reverse_map": reverse_map_recv,
-                "source_num_slicers": source_num_slicers_recv,
-                "target_num_slicers": target_num_slicers_recv,
-            }
+                sender_mesh = DeviceMesh("cuda", remote_mesh_tensor)
+                receiver_mesh = DeviceMesh("cuda", local_mesh_tensor)
+                sender_placements = remote_placements
+                receiver_placements = local_placements
+            logger.info(f"Agent {self.rank}: Generating P2P map for pair '{pair_name}'")
+
+            forward_map_send, reverse_map_send, source_num_slicers_send, target_num_slicers_send = get_p2p_map(
+                source_mesh=sender_mesh,
+                source_placements=sender_placements,
+                target_mesh=receiver_mesh,
+                target_placements=receiver_placements,
+                device="cuda",
+            )
+            forward_map_recv, reverse_map_recv, source_num_slicers_recv, target_num_slicers_recv = get_p2p_map(
+                source_mesh=receiver_mesh,
+                source_placements=receiver_placements,
+                target_mesh=sender_mesh,
+                target_placements=sender_placements,
+                device="cuda",
+            )
+            if send_first:
+                p2p_map_send = {
+                    "forward_map": forward_map_send,
+                    "reverse_map": reverse_map_send,
+                    "source_num_slicers": source_num_slicers_send,
+                    "target_num_slicers": target_num_slicers_send,
+                }
+                p2p_map_recv = {
+                    "forward_map": forward_map_recv,
+                    "reverse_map": reverse_map_recv,
+                    "source_num_slicers": source_num_slicers_recv,
+                    "target_num_slicers": target_num_slicers_recv,
+                }
+            else:
+                p2p_map_send = {
+                    "forward_map": forward_map_recv,
+                    "reverse_map": reverse_map_recv,
+                    "source_num_slicers": source_num_slicers_recv,
+                    "target_num_slicers": target_num_slicers_recv,
+                }
+                p2p_map_recv = {
+                    "forward_map": forward_map_send,
+                    "reverse_map": reverse_map_send,
+                    "source_num_slicers": source_num_slicers_send,
+                    "target_num_slicers": target_num_slicers_send,
+                }
+
             logger.info(f"Agent {self.rank}: Generated P2P map for pair '{pair_name}'")
             logger.info(
                 f"Agent {self.rank}: Forward map: {p2p_map_send['forward_map']} source_num_slicers: {p2p_map_send['source_num_slicers']} target_num_slicers: {p2p_map_send['target_num_slicers']}"

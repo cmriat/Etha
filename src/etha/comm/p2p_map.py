@@ -62,7 +62,7 @@ def get_p2p_map(
     reqs = []
     if rank in source_mesh_ranks:
         middle_tensor = torch.zeros(middle_tensor_shape, device=device)
-        dtensor_source = distribute_tensor(middle_tensor, source_mesh, source_placements, src_data_rank=None)
+        dtensor_source = distribute_tensor(middle_tensor, source_mesh, source_placements)
         local_shard = dtensor_source.to_local()
         logger.debug(f"[P2P Map rank={rank}] Local Source Shard: {local_shard}")
         # Create tensor with rank and coordinates encoded as single values
