@@ -10,6 +10,30 @@ from .utils import (
 from .chunk_ir import SourceChunk, TargetChunk, TransferType
 
 
+def calculate_chunk_shape(
+    num_slicers: list[int],
+    tensor_shape: tuple[int, ...] | None,
+) -> tuple[int, ...]:
+    """Calculate chunk shape from num_slicers and tensor shape.
+
+    Args:
+        num_slicers: Number of slices per dimension
+        tensor_shape: Full tensor shape (if known)
+
+    Returns:
+        Shape of the chunk, or empty tuple if tensor_shape is None
+    """
+    if tensor_shape is None:
+        return ()
+
+    # Extend num_slicers to match tensor dimensions
+    num_slicers = num_slicers + [1] * (len(tensor_shape) - len(num_slicers))
+
+    chunk_shape = tuple(tensor_shape[dim] // num_slicers[dim] for dim in range(len(tensor_shape)))
+
+    return chunk_shape
+
+
 def build_broadcast_plan(
     forward_map: dict[int, dict[tuple, list[int]]],
 ) -> tuple[dict[tuple[int, tuple[int, ...]], list[tuple]], set[tuple[int, tuple]]]:
@@ -41,7 +65,7 @@ def build_broadcast_plan(
     return broadcast_plan, broadcast_keys
 
 
-def map_to_ops(
+def map_to_chunk_ir(
     forward_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
     reverse_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
     source_num_slicers: list[int],
@@ -72,14 +96,19 @@ def map_to_ops(
 
     # Pre-calculate slicer tuples for slice pre-computation
     source_slicer_tuples = None
+    source_num_slicers_extended = None
     if source_tensor_shape is not None:
-        # Extend num_slicers to match tensor dimensions
-        source_num_slicers_extended = source_num_slicers + [1] * (len(source_tensor_shape) - len(source_num_slicers))
+        # Extend or truncate num_slicers to match tensor dimensions
+        source_num_slicers_extended = (source_num_slicers + [1] * len(source_tensor_shape))[: len(source_tensor_shape)]
         source_slicer_tuples = get_slicer_tuples(source_tensor_shape, source_num_slicers_extended)
 
     # Pre-calculate slicer tuples for target
-    target_num_slicers_extended = target_num_slicers + [1] * (len(target_tensor_shape) - len(target_num_slicers))
-    target_slicer_tuples = get_slicer_tuples(target_tensor_shape, target_num_slicers_extended)
+    target_slicer_tuples = None
+    target_num_slicers_extended = None
+    if target_tensor_shape is not None:
+        # Extend or truncate num_slicers to match tensor dimensions
+        target_num_slicers_extended = (target_num_slicers + [1] * len(target_tensor_shape))[: len(target_tensor_shape)]
+        target_slicer_tuples = get_slicer_tuples(target_tensor_shape, target_num_slicers_extended)
 
     source_chunks: list[SourceChunk] = []
     target_chunks: list[TargetChunk] = []
@@ -107,7 +136,7 @@ def map_to_ops(
 
             # Calculate chunk shape (will be set properly during preparation)
             # For source chunks, we don't have tensor_shape yet, will be updated during prepare
-            chunk_shape = _calculate_chunk_shape(source_num_slicers, source_tensor_shape)
+            chunk_shape = calculate_chunk_shape(source_num_slicers, source_tensor_shape)
 
             # Pre-calculate slice_tuples if source shape is available
             slice_tuples = ()
@@ -154,10 +183,14 @@ def map_to_ops(
                     transfer_type = TransferType.P2P
                     group_key = None
 
-                chunk_shape = _calculate_chunk_shape(target_num_slicers, target_tensor_shape)
+                chunk_shape = calculate_chunk_shape(target_num_slicers, target_tensor_shape)
 
                 # Pre-calculate slice_tuples for target position
-                slice_tuples = get_slice_from_multi_index(target_idx, target_num_slicers_extended, target_slicer_tuples)
+                slice_tuples = ()
+                if target_slicer_tuples is not None:
+                    slice_tuples = get_slice_from_multi_index(
+                        target_idx, target_num_slicers_extended, target_slicer_tuples
+                    )
 
                 # Pre-calculate src_slice_tuples for self_copy source reading
                 src_slice_tuples = ()
@@ -183,27 +216,3 @@ def map_to_ops(
                 chunk_id += 1
 
     return source_chunks, target_chunks
-
-
-def _calculate_chunk_shape(
-    num_slicers: list[int],
-    tensor_shape: tuple[int, ...] | None,
-) -> tuple[int, ...]:
-    """Calculate chunk shape from num_slicers and tensor shape.
-
-    Args:
-        num_slicers: Number of slices per dimension
-        tensor_shape: Full tensor shape (if known)
-
-    Returns:
-        Shape of the chunk, or empty tuple if tensor_shape is None
-    """
-    if tensor_shape is None:
-        return ()
-
-    # Extend num_slicers to match tensor dimensions
-    num_slicers = num_slicers + [1] * (len(tensor_shape) - len(num_slicers))
-
-    chunk_shape = tuple(tensor_shape[dim] // num_slicers[dim] for dim in range(len(tensor_shape)))
-
-    return chunk_shape

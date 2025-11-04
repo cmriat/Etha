@@ -7,8 +7,8 @@ import torch.distributed as dist
 from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
-from .comm_execution import execute_naive, prepare_recv_buffers, prepare_send_buffers
-from .p2p_map_lowering import map_to_ops
+from .get_chunk_ir import map_to_chunk_ir
+from .comm_execution import execute_naive
 
 logger = logging.getLogger(__name__)
 
@@ -74,36 +74,22 @@ def p2p_communicate(
     Returns:
         None (result is written to target_local_tensor in-place)
     """
-    rank = dist.get_rank()
-
-    # Determine role and get tensor properties
-    is_sender = rank in forward_map
-    is_receiver = rank in reverse_map
-
-    if not is_sender and not is_receiver:
-        return None
-
-    # Infer target_tensor_shape, device, dtype from available tensor
-    # Also extract source_tensor_shape for slice pre-calculation
-    source_tensor_shape = None
-    if target_local_tensor is not None:
-        target_tensor_shape = tuple(target_local_tensor.shape)
-        device = target_local_tensor.device
-        dtype = target_local_tensor.dtype
-    elif source_local_tensor is not None:
-        # Sender-only: use source tensor properties as placeholder
-        target_tensor_shape = tuple(source_local_tensor.shape)
-        device = source_local_tensor.device
-        dtype = source_local_tensor.dtype
-    else:
+    if source_local_tensor is None and target_local_tensor is None:
         raise ValueError("Both source_local_tensor and target_local_tensor are None")
 
-    # Extract source tensor shape if available
-    if source_local_tensor is not None:
+    rank = dist.get_rank()
+
+    source_tensor_shape = None
+    target_tensor_shape = None
+    # Only extract shape if tensor is non-empty (has data)
+    # Empty tensors (shape contains 0) indicate rank not in mesh
+    if target_local_tensor is not None and 0 not in target_local_tensor.shape:
+        target_tensor_shape = tuple(target_local_tensor.shape)
+    if source_local_tensor is not None and 0 not in source_local_tensor.shape:
         source_tensor_shape = tuple(source_local_tensor.shape)
 
     # === Phase 1: Lowering (planning) ===
-    source_chunks, target_chunks = map_to_ops(
+    source_chunks, target_chunks = map_to_chunk_ir(
         forward_map=forward_map,
         reverse_map=reverse_map,
         source_num_slicers=source_num_slicers,
@@ -117,23 +103,10 @@ def p2p_communicate(
     if not source_chunks and not target_chunks:
         return None
 
-    # === Phase 2: Preparation (buffer allocation) ===
-    if source_chunks:
-        prepare_send_buffers(
-            chunks=source_chunks,
-            local_tensor=source_local_tensor,
-        )
-
-    if target_chunks:
-        prepare_recv_buffers(
-            chunks=target_chunks,
-            source_local_tensor=source_local_tensor,  # For self-copy
-            device=device,
-            dtype=dtype,
-        )
-
+    # === Phase 2: Execution (prepare + send + recv + assemble) ===
     execute_naive(
         source_chunks=source_chunks,
         target_chunks=target_chunks,
-        target_tensor=target_local_tensor,
+        source_local_tensor=source_local_tensor,
+        target_local_tensor=target_local_tensor,
     )
