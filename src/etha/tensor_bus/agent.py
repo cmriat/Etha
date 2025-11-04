@@ -239,26 +239,29 @@ class TensorBusAgent:
             # Rule: alphabetically smaller role is source first, larger is target
             send_first = local_name < remote_name
             if send_first:
-                local_mesh = DeviceMesh("cuda", local_mesh_tensor)
-                remote_mesh = DeviceMesh("cuda", remote_mesh_tensor)
+                sender_mesh = DeviceMesh("cuda", local_mesh_tensor)
+                receiver_mesh = DeviceMesh("cuda", remote_mesh_tensor)
+                sender_placements = local_placements
+                receiver_placements = remote_placements
             else:
-                local_mesh = DeviceMesh("cuda", remote_mesh_tensor)
-                remote_mesh = DeviceMesh("cuda", local_mesh_tensor)
-                local_placements, remote_placements = remote_placements, local_placements
+                sender_mesh = DeviceMesh("cuda", remote_mesh_tensor)
+                receiver_mesh = DeviceMesh("cuda", local_mesh_tensor)
+                sender_placements = remote_placements
+                receiver_placements = local_placements
             logger.info(f"Agent {self.rank}: Generating P2P map for pair '{pair_name}'")
 
             forward_map_send, reverse_map_send, source_num_slicers_send, target_num_slicers_send = get_p2p_map(
-                source_mesh=local_mesh,
-                source_placements=local_placements,
-                target_mesh=remote_mesh,
-                target_placements=remote_placements,
+                source_mesh=sender_mesh,
+                source_placements=sender_placements,
+                target_mesh=receiver_mesh,
+                target_placements=receiver_placements,
                 device="cuda",
             )
             forward_map_recv, reverse_map_recv, source_num_slicers_recv, target_num_slicers_recv = get_p2p_map(
-                source_mesh=remote_mesh,
-                source_placements=remote_placements,
-                target_mesh=local_mesh,
-                target_placements=local_placements,
+                source_mesh=receiver_mesh,
+                source_placements=receiver_placements,
+                target_mesh=sender_mesh,
+                target_placements=sender_placements,
                 device="cuda",
             )
             if send_first:
