@@ -77,12 +77,28 @@ def run_test_communication(
             dist.group.WORLD,
             device,
         )
+        forward_map2, reverse_map2, source_slicers2, target_slicers2 = get_m2m_map(
+            target_mesh,
+            source_specs,
+            source_mesh,
+            target_specs,
+            dist.group.WORLD,
+            device,
+        )
     else:
         forward_map, reverse_map, source_slicers, target_slicers = get_m2m_map(
             target_mesh,
             target_specs,
             source_mesh,
             source_specs,
+            dist.group.WORLD,
+            device,
+        )
+        forward_map2, reverse_map2, source_slicers2, target_slicers2 = get_m2m_map(
+            source_mesh,
+            source_specs,
+            target_mesh,
+            target_specs,
             dist.group.WORLD,
             device,
         )
