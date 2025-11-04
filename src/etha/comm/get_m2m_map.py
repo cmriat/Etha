@@ -10,12 +10,33 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
-from .communication_utils import get_shard_shape
-
 logger = logging.getLogger(__name__)
 
 
-def get_p2p_map(
+def _get_tensor_ndim(placements: tuple[Placement, ...]) -> int:
+    """Calculate tensor ndim from placements.
+
+    Returns the number of dimensions based on the maximum Shard dimension + 1.
+    """
+    return (
+        max(
+            (placement.dim for placement in placements if isinstance(placement, Shard)),
+            default=-1,
+        )
+        + 1
+    )
+
+
+def get_shard_shape(device_mesh: tuple[int, ...], placements: tuple[Placement, ...], tensor_ndim: int) -> list[int]:
+    """Calculate shard shape from device mesh and placements."""
+    shard_shape = [1] * tensor_ndim
+    for i, placement in enumerate(placements):
+        if isinstance(placement, Shard):
+            shard_shape[placement.dim] *= device_mesh[i]
+    return shard_shape
+
+
+def get_m2m_map(
     source_mesh: DeviceMesh,
     source_placements: tuple[Placement, ...],
     target_mesh: DeviceMesh,
@@ -28,20 +49,8 @@ def get_p2p_map(
     target_mesh_ranks = target_mesh.mesh.flatten().tolist()
     source_mesh_ranks = source_mesh.mesh.flatten().tolist()
 
-    source_tensor_ndim = (
-        max(
-            (placement.dim for placement in source_placements if isinstance(placement, Shard)),
-            default=-1,
-        )
-        + 1
-    )
-    target_tensor_ndim = (
-        max(
-            (placement.dim for placement in target_placements if isinstance(placement, Shard)),
-            default=-1,
-        )
-        + 1
-    )
+    source_tensor_ndim = _get_tensor_ndim(source_placements)
+    target_tensor_ndim = _get_tensor_ndim(target_placements)
     tensor_ndim = max(source_tensor_ndim, target_tensor_ndim)
 
     # Calculate shard shapes
@@ -105,11 +114,8 @@ def get_p2p_map(
     for req in reqs:
         req.wait()
 
-    def make_nested_defaultdict():
-        return defaultdict(list)
-
-    forward_map = defaultdict(make_nested_defaultdict)
-    reverse_map = defaultdict(make_nested_defaultdict)
+    forward_map = defaultdict(lambda: defaultdict(list))
+    reverse_map = defaultdict(lambda: defaultdict(list))
 
     if rank in target_mesh_ranks:
         dtensor_target = distribute_tensor(full_tensor_restored, target_mesh, target_placements, src_data_rank=None)
@@ -160,8 +166,8 @@ def get_p2p_map(
     dist.all_gather_object(all_forward_maps, forward_map_regular, group=group)
     dist.all_gather_object(all_reverse_maps, reverse_map_regular, group=group)
 
-    merged_forward_map = defaultdict(make_nested_defaultdict)
-    merged_reverse_map = defaultdict(make_nested_defaultdict)
+    merged_forward_map = defaultdict(lambda: defaultdict(list))
+    merged_reverse_map = defaultdict(lambda: defaultdict(list))
 
     for rank_reverse_map in all_reverse_maps:
         if rank_reverse_map is not None:

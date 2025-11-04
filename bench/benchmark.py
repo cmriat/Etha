@@ -1,4 +1,4 @@
-"""Distributed communication benchmark for P2P vs Gather-Broadcast methods."""
+"""Distributed communication benchmark for M2M vs Gather-Broadcast methods."""
 
 import os
 import math
@@ -13,8 +13,9 @@ from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_t
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from etha.comm import (
-    get_p2p_map,
-    p2p_communicate,
+    get_m2m_map,
+    m2m_communicate,
+    map_to_chunk_ir,
     gather_broadcast_communicate,
 )
 
@@ -108,10 +109,8 @@ def benchmark_single_shape(
     target_dist_tensor,  # noqa
     shape: tuple,
     origin_tensor: torch.Tensor,
-    forward_map,
-    reverse_map,
-    source_num_slicers,
-    target_num_slicers,
+    source_chunks,
+    target_chunks,
     current_source_mesh: DeviceMesh,
     current_target_mesh: DeviceMesh,
     source_specs: list,  # noqa
@@ -124,43 +123,39 @@ def benchmark_single_shape(
     profile_iter: int,
     gpus_per_node: int,
 ):
-    """Benchmark P2P vs Gather-Broadcast for a single tensor shape.
+    """Benchmark M2M vs Gather-Broadcast for a single tensor shape.
 
     Returns:
         dict with benchmark results if rank == 0, None otherwise.
     """
     tensor_size_bytes = origin_tensor.nelement() * origin_tensor.element_size()
 
-    # P2P method warmup
+    # M2M method warmup
     dist.barrier()
     for _ in range(warmup_iter):
-        p2p_result = p2p_communicate(
+        m2m_communicate(
+            source_chunks,
+            target_chunks,
             source_local_tensor,
             target_local_tensor,
-            forward_map,
-            reverse_map,
-            source_num_slicers,
-            target_num_slicers,
         )
     if device == "cuda":
         torch.cuda.synchronize()
     dist.barrier()
 
-    # P2P method benchmark
+    # M2M method benchmark
     start_time = time.perf_counter()
     for _ in range(profile_iter):
-        p2p_communicate(
+        m2m_communicate(
+            source_chunks,
+            target_chunks,
             source_local_tensor,
             target_local_tensor,
-            forward_map,
-            reverse_map,
-            source_num_slicers,
-            target_num_slicers,
         )
     if device == "cuda":
         torch.cuda.synchronize()
     dist.barrier()
-    p2p_time = (time.perf_counter() - start_time) / profile_iter
+    m2m_time = (time.perf_counter() - start_time) / profile_iter
 
     # Gather-Broadcast method warmup
     dist.barrier()
@@ -173,15 +168,15 @@ def benchmark_single_shape(
             source_world_size,
         )
 
-    # Verify correctness
-    if p2p_result is not None and bc_result is not None:
-        if not torch.allclose(p2p_result, bc_result.to_local()):
-            print(f"[Rank {rank}] P2P result shape: {p2p_result.shape}")
+    # Verify correctness (M2M_communicate modifies target_local_tensor in-place)
+    if target_local_tensor is not None and bc_result is not None:
+        if not torch.allclose(target_local_tensor, bc_result.to_local()):
+            print(f"[Rank {rank}] M2M result shape: {target_local_tensor.shape}")
             print(f"[Rank {rank}] Baseline result shape: {bc_result.to_local().shape}")
-            print(f"[Rank {rank}] Max diff: {(p2p_result - bc_result.to_local()).abs().max().item()}")
-            print(f"[Rank {rank}] P2P sample: {p2p_result}")
+            print(f"[Rank {rank}] Max diff: {(target_local_tensor - bc_result.to_local()).abs().max().item()}")
+            print(f"[Rank {rank}] M2M sample: {target_local_tensor}")
             print(f"[Rank {rank}] Baseline sample: {bc_result.to_local()}")
-            raise ValueError("P2P and Gather-Broadcast results mismatch!")
+            raise ValueError("M2M and Gather-Broadcast results mismatch!")
 
     if device == "cuda":
         torch.cuda.synchronize()
@@ -219,13 +214,13 @@ def benchmark_single_shape(
         )
 
         # Effective throughput: how fast we complete the redistribution task
-        p2p_effective_throughput = ideal_transfer_gb / p2p_time
+        m2m_effective_throughput = ideal_transfer_gb / m2m_time
         baseline_effective_throughput = ideal_transfer_gb / baseline_time
 
         print(f"    Origin tensor: {tensor_size_bytes / (1024**2):.2f} MB")
-        print(f"    Ideal P2P transfer (target needs): {ideal_transfer_bytes / (1024**2):.2f} MB")
+        print(f"    Ideal M2M transfer (target needs): {ideal_transfer_bytes / (1024**2):.2f} MB")
         print(f"    Ideal bandwidth (RDMA+NVLink): {ideal_bw:.2f} GB/s")
-        print(f"    P2P effective throughput: {p2p_effective_throughput:.2f} GB/s")
+        print(f"    M2M effective throughput: {m2m_effective_throughput:.2f} GB/s")
         print(f"    Baseline effective throughput: {baseline_effective_throughput:.2f} GB/s")
 
         return {
@@ -233,7 +228,7 @@ def benchmark_single_shape(
             "tensor_size_mb": tensor_size_bytes / (1024**2),
             "ideal_transfer_mb": ideal_transfer_bytes / (1024**2),
             "ideal_bandwidth_gb_s": ideal_bw,
-            "p2p_effective_throughput_gb_s": p2p_effective_throughput,
+            "m2m_effective_throughput_gb_s": m2m_effective_throughput,
             "baseline_effective_throughput_gb_s": baseline_effective_throughput,
         }
 
@@ -255,7 +250,7 @@ def generate_result_plot(
     # Plot all methods including ideal bandwidth
     plot_configs = [
         ("ideal_bandwidth_gb_s", "Ideal (RDMA+NVLink)", "--", "green", None),
-        ("p2p_effective_throughput_gb_s", "P2P Effective", "o", "blue", 8),
+        ("m2m_effective_throughput_gb_s", "M2M Effective", "o", "blue", 8),
         ("baseline_effective_throughput_gb_s", "Gather-Broadcast", "X", "orange", 8),
     ]
 
@@ -385,19 +380,18 @@ def main():
         if device == "cuda":
             torch.cuda.synchronize()
         dist.barrier()
-
         start_time = time.perf_counter()
-        forward_map, reverse_map, source_num_slicers, target_num_slicers = get_p2p_map(
-            current_source_mesh,
-            source_specs,
-            current_target_mesh,
-            target_specs,
-            dist.group.WORLD,
-            device,
+        forward_map, reverse_map, source_slicers, target_slicers = get_m2m_map(
+            source_mesh=current_source_mesh,
+            source_placements=source_specs,
+            target_mesh=current_target_mesh,
+            target_placements=target_specs,
+            group=dist.group.WORLD,
+            device=device,
         )
         map_time = (time.perf_counter() - start_time) / profile_iter
         if rank == 0:
-            print(f"get_p2p_map time: {map_time}")
+            print(f"get_m2m_map time: {map_time}")
             print(f"forward_map: {forward_map}")
         for shape in tensor_shapes:
             print(f"  Benchmarking tensor shape: {shape}...")
@@ -416,6 +410,37 @@ def main():
                 target_dist_tensor = distribute_tensor(origin_tensor, current_target_mesh, target_specs)
                 target_local_tensor = target_dist_tensor.to_local()
 
+            # Generate chunk IR for this specific shape
+            if device == "cuda":
+                torch.cuda.synchronize()
+            dist.barrier()
+
+            start_time = time.perf_counter()
+
+            # Extract shape from actual distributed tensors
+            # Only use shape if tensor is non-empty (contains data)
+            # Empty tensors (shape contains 0) indicate rank not in mesh
+            source_tensor_shape = None
+            target_tensor_shape = None
+            if source_local_tensor is not None and 0 not in source_local_tensor.shape:
+                source_tensor_shape = tuple(source_local_tensor.shape)
+            if target_local_tensor is not None and 0 not in target_local_tensor.shape:
+                target_tensor_shape = tuple(target_local_tensor.shape)
+
+            source_chunks, target_chunks = map_to_chunk_ir(
+                forward_map=forward_map,
+                reverse_map=reverse_map,
+                source_num_slicers=source_slicers,
+                target_num_slicers=target_slicers,
+                source_tensor_shape=source_tensor_shape,
+                target_tensor_shape=target_tensor_shape,
+                rank=rank,
+            )
+            ir_gen_time = (time.perf_counter() - start_time) / profile_iter
+            if rank == 0:
+                print(f"    IR generation time: {ir_gen_time:.6f}s")
+                print(f"    Generated {len(source_chunks)} source chunks, {len(target_chunks)} target chunks")
+
             result = benchmark_single_shape(
                 source_local_tensor,
                 target_local_tensor,
@@ -423,10 +448,8 @@ def main():
                 target_dist_tensor,
                 shape,
                 origin_tensor,
-                forward_map,
-                reverse_map,
-                source_num_slicers,
-                target_num_slicers,
+                source_chunks,
+                target_chunks,
                 current_source_mesh,
                 current_target_mesh,
                 source_specs,
@@ -444,7 +467,7 @@ def main():
                 current_results.append(result)
 
             # Clean up tensors after each shape benchmark
-            del origin_tensor, source_dist_tensor
+            del origin_tensor, source_dist_tensor, source_chunks, target_chunks
             if device == "cuda":
                 torch.cuda.empty_cache()
 
@@ -456,7 +479,7 @@ def main():
 
         # Clear process group cache and GPU memory after each mesh combination
         try:
-            from etha.comm.communication_utils import _PROCESS_GROUP_CACHE
+            from etha.comm.comm_methods import _PROCESS_GROUP_CACHE
 
             _PROCESS_GROUP_CACHE.clear()
         except ImportError:

@@ -15,10 +15,11 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
-from etha.comm import get_p2p_map, p2p_communicate
+from etha.comm import get_m2m_map, m2m_communicate
+from etha.comm.get_chunk_ir import map_to_chunk_ir
 
 from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensor
-from .pair_state import PairState
+from .pair_state import M2MMap, PairState
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class TensorBusAgent:
     Responsibilities:
     1. Listen to CommandQueue for Host commands
     2. Handle RegisterPair: write to TCPStore, poll until both sides ready
-    3. Handle Send/Recv: execute p2p communication (future)
+    3. Handle Send/Recv: execute m2m communication
     """
 
     def __init__(
@@ -227,9 +228,9 @@ class TensorBusAgent:
         if remote_mesh_info:
             self._validate_mesh_placement_consistency(remote_mesh_info)
 
-        # Step 8: Generate P2P map if validation passed
-        p2p_map_send = None
-        p2p_map_recv = None
+        # Step 8: Generate P2P maps if validation passed
+        m2m_map_send = None
+        m2m_map_recv = None
         if local_mesh_info and remote_mesh_info:
             # Get local mesh info (this process's mesh)
             local_mesh_shape, local_placements = local_mesh_info[0]
@@ -243,67 +244,72 @@ class TensorBusAgent:
             logger.info(f"Agent {self.rank}: Local mesh: {local_mesh_tensor} with placements: {local_placements}")
             logger.info(f"Agent {self.rank}: Remote mesh: {remote_mesh_tensor} with placements: {remote_placements}")
 
-            # Rule: alphabetically smaller role is sender first, larger is receiver
-            send_first = local_name < remote_name
-            if send_first:
-                sender_mesh = DeviceMesh("cuda", local_mesh_tensor)
-                receiver_mesh = DeviceMesh("cuda", remote_mesh_tensor)
-                sender_placements = local_placements
-                receiver_placements = remote_placements
+            # Determine canonical ordering to ensure all ranks call get_m2m_map in same order
+            # This prevents deadlock in collective operations within get_m2m_map
+            # We use alphabetical order of role names as the tie-breaker
+            local_is_first = local_name < remote_name
+            if local_is_first:
+                first_mesh = DeviceMesh("cuda", local_mesh_tensor)
+                second_mesh = DeviceMesh("cuda", remote_mesh_tensor)
+                first_placements = local_placements
+                second_placements = remote_placements
             else:
-                sender_mesh = DeviceMesh("cuda", remote_mesh_tensor)
-                receiver_mesh = DeviceMesh("cuda", local_mesh_tensor)
-                sender_placements = remote_placements
-                receiver_placements = local_placements
-            logger.info(f"Agent {self.rank}: Generating P2P map for pair '{pair_name}'")
+                first_mesh = DeviceMesh("cuda", remote_mesh_tensor)
+                second_mesh = DeviceMesh("cuda", local_mesh_tensor)
+                first_placements = remote_placements
+                second_placements = local_placements
+            logger.info(f"Agent {self.rank}: Generating M2M maps for pair '{pair_name}'")
 
-            forward_map_send, reverse_map_send, source_num_slicers_send, target_num_slicers_send = get_p2p_map(
-                source_mesh=sender_mesh,
-                source_placements=sender_placements,
-                target_mesh=receiver_mesh,
-                target_placements=receiver_placements,
+            # Generate M2M maps (topology layer, shape-independent)
+            # IMPORTANT: All ranks must call in the same order to avoid deadlock
+            # First call: first_mesh -> second_mesh
+            forward_map_1, reverse_map_1, source_slicers_1, target_slicers_1 = get_m2m_map(
+                source_mesh=first_mesh,
+                source_placements=first_placements,
+                target_mesh=second_mesh,
+                target_placements=second_placements,
                 group=pair_group,
                 device="cuda",
             )
-            forward_map_recv, reverse_map_recv, source_num_slicers_recv, target_num_slicers_recv = get_p2p_map(
-                source_mesh=receiver_mesh,
-                source_placements=receiver_placements,
-                target_mesh=sender_mesh,
-                target_placements=sender_placements,
+            # Second call: second_mesh -> first_mesh
+            forward_map_2, reverse_map_2, source_slicers_2, target_slicers_2 = get_m2m_map(
+                source_mesh=second_mesh,
+                source_placements=second_placements,
+                target_mesh=first_mesh,
+                target_placements=first_placements,
                 group=pair_group,
                 device="cuda",
             )
-            if send_first:
-                p2p_map_send = {
-                    "forward_map": forward_map_send,
-                    "reverse_map": reverse_map_send,
-                    "source_num_slicers": source_num_slicers_send,
-                    "target_num_slicers": target_num_slicers_send,
-                }
-                p2p_map_recv = {
-                    "forward_map": forward_map_recv,
-                    "reverse_map": reverse_map_recv,
-                    "source_num_slicers": source_num_slicers_recv,
-                    "target_num_slicers": target_num_slicers_recv,
-                }
-            else:
-                p2p_map_send = {
-                    "forward_map": forward_map_recv,
-                    "reverse_map": reverse_map_recv,
-                    "source_num_slicers": source_num_slicers_recv,
-                    "target_num_slicers": target_num_slicers_recv,
-                }
-                p2p_map_recv = {
-                    "forward_map": forward_map_send,
-                    "reverse_map": reverse_map_send,
-                    "source_num_slicers": source_num_slicers_send,
-                    "target_num_slicers": target_num_slicers_send,
-                }
 
-            logger.info(f"Agent {self.rank}: Generated P2P map for pair '{pair_name}'")
-            logger.info(
-                f"Agent {self.rank}: Forward map: {p2p_map_send['forward_map']} source_num_slicers: {p2p_map_send['source_num_slicers']} target_num_slicers: {p2p_map_send['target_num_slicers']}"
-            )
+            # Assign to send/recv based on which mesh is local
+            if local_is_first:
+                m2m_map_send = M2MMap(
+                    forward_map=forward_map_1,
+                    reverse_map=reverse_map_1,
+                    source_num_slicers=source_slicers_1,
+                    target_num_slicers=target_slicers_1,
+                )
+                m2m_map_recv = M2MMap(
+                    forward_map=forward_map_2,
+                    reverse_map=reverse_map_2,
+                    source_num_slicers=source_slicers_2,
+                    target_num_slicers=target_slicers_2,
+                )
+            else:
+                m2m_map_send = M2MMap(
+                    forward_map=forward_map_2,
+                    reverse_map=reverse_map_2,
+                    source_num_slicers=source_slicers_2,
+                    target_num_slicers=target_slicers_2,
+                )
+                m2m_map_recv = M2MMap(
+                    forward_map=forward_map_1,
+                    reverse_map=reverse_map_1,
+                    source_num_slicers=source_slicers_1,
+                    target_num_slicers=target_slicers_1,
+                )
+
+            logger.info(f"Agent {self.rank}: Generated P2P maps for pair '{pair_name}'")
         else:
             logger.info(f"Agent {self.rank}: Skipping P2P map generation - missing or inconsistent mesh/placement info")
 
@@ -318,8 +324,8 @@ class TensorBusAgent:
             local_group=dist.new_group(local_ranks),
             pair_group=pair_group,
             status="matched",
-            p2p_map_send=p2p_map_send,
-            p2p_map_recv=p2p_map_recv,
+            m2m_map_send=m2m_map_send,
+            m2m_map_recv=m2m_map_recv,
         )
         self.pairs[pair_name] = state
 
@@ -371,37 +377,35 @@ class TensorBusAgent:
 
         logger.info(f"Agent {self.rank}: All ranks ready for transfer")
 
-        # Transfer tensors using P2P map if available, otherwise fall back to simple send/recv
+        # Transfer tensors using per-tensor IR if available, otherwise fall back to simple send/recv
         pair_state = self.pairs[pair_name]
 
-        if pair_state.p2p_map_send and pair_state.p2p_map_recv:
-            # Use optimized P2P transfer with device mesh and placement
+        if pair_state.tensor_irs:
             logger.info(f"Agent {self.rank}: Using optimized P2P transfer for pair '{pair_name}'")
 
             for tensor_name, tensor in pair_state.tensors.items():
+                if tensor_name not in pair_state.tensor_irs:
+                    logger.warning(f"Agent {self.rank}: No IR for tensor '{tensor_name}', skipping")
+                    continue
+
                 logger.info(
-                    f"Agent {self.rank}: Transferring tensor_name: '{tensor_name}' tensor: {tensor.shape} for pair '{pair_name}' using P2P map"
+                    f"Agent {self.rank}: Transferring tensor_name: '{tensor_name}' tensor: {tensor.shape} for pair '{pair_name}' using chunk IR"
                 )
+                send_ir, recv_ir = pair_state.tensor_irs[tensor_name]
+
                 if transfer_type == "send":
-                    forward_map = pair_state.p2p_map_send["forward_map"]
-                    reverse_map = pair_state.p2p_map_send["reverse_map"]
-                    source_num_slicers = pair_state.p2p_map_send["source_num_slicers"]
-                    target_num_slicers = pair_state.p2p_map_send["target_num_slicers"]
+                    source_chunks, target_chunks = send_ir
                 else:
-                    forward_map = pair_state.p2p_map_recv["forward_map"]
-                    reverse_map = pair_state.p2p_map_recv["reverse_map"]
-                    source_num_slicers = pair_state.p2p_map_recv["source_num_slicers"]
-                    target_num_slicers = pair_state.p2p_map_recv["target_num_slicers"]
+                    source_chunks, target_chunks = recv_ir
+
                 logger.debug(
-                    f"Agent {self.rank}: Forward map: {forward_map}  Reverse map: {reverse_map} source_num_slicers: {source_num_slicers} target_num_slicers: {target_num_slicers}"
+                    f"Agent {self.rank}: Using {len(source_chunks)} source chunks, {len(target_chunks)} target chunks"
                 )
-                p2p_communicate(
+                m2m_communicate(
+                    source_chunks=source_chunks,
+                    target_chunks=target_chunks,
                     source_local_tensor=tensor,
                     target_local_tensor=tensor,
-                    forward_map=forward_map,
-                    reverse_map=reverse_map,
-                    source_num_slicers=source_num_slicers,
-                    target_num_slicers=target_num_slicers,
                 )
                 logger.info(f"Agent {self.rank}: Transfered tensor_name: '{tensor_name}'")
         else:
@@ -454,7 +458,49 @@ class TensorBusAgent:
         if pair_name not in self.pairs:
             raise ValueError(f"RegisterTensor for unknown pair: {pair_name}")
 
-        self.pairs[pair_name].tensors[tensor_name] = tensor
+        pair_state = self.pairs[pair_name]
+        pair_state.tensors[tensor_name] = tensor
+
+        # Generate IR for this tensor if p2p_map exists and IR not yet generated
+        if pair_state.m2m_map_send and pair_state.m2m_map_recv and tensor_name not in pair_state.tensor_irs:
+            tensor_shape = tensor.shape
+            logger.info(
+                f"Agent {self.rank}: Generating IR for tensor '{tensor_name}' with shape {tensor_shape} in pair '{pair_name}'"
+            )
+
+            # Generate send IR
+            source_chunks_send, target_chunks_send = map_to_chunk_ir(
+                forward_map=pair_state.m2m_map_send.forward_map,
+                reverse_map=pair_state.m2m_map_send.reverse_map,
+                source_num_slicers=pair_state.m2m_map_send.source_num_slicers,
+                target_num_slicers=pair_state.m2m_map_send.target_num_slicers,
+                source_tensor_shape=tensor_shape,
+                target_tensor_shape=tensor_shape,
+                rank=self.rank,
+            )
+
+            # Generate recv IR
+            source_chunks_recv, target_chunks_recv = map_to_chunk_ir(
+                forward_map=pair_state.m2m_map_recv.forward_map,
+                reverse_map=pair_state.m2m_map_recv.reverse_map,
+                source_num_slicers=pair_state.m2m_map_recv.source_num_slicers,
+                target_num_slicers=pair_state.m2m_map_recv.target_num_slicers,
+                source_tensor_shape=tensor_shape,
+                target_tensor_shape=tensor_shape,
+                rank=self.rank,
+            )
+
+            # Store IR
+            pair_state.tensor_irs[tensor_name] = (
+                (source_chunks_send, target_chunks_send),
+                (source_chunks_recv, target_chunks_recv),
+            )
+
+            logger.info(
+                f"Agent {self.rank}: Generated IR for tensor '{tensor_name}': "
+                f"send ({len(source_chunks_send)} src, {len(target_chunks_send)} tgt), "
+                f"recv ({len(source_chunks_recv)} src, {len(target_chunks_recv)} tgt)"
+            )
 
     def _collect_mesh_placement_info(
         self, pair_name: str, ranks: list[int]
