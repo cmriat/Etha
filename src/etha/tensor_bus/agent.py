@@ -244,6 +244,7 @@ class TensorBusAgent:
             else:
                 local_mesh = DeviceMesh("cuda", remote_mesh_tensor)
                 remote_mesh = DeviceMesh("cuda", local_mesh_tensor)
+                local_placements, remote_placements = remote_placements, local_placements
             logger.info(f"Agent {self.rank}: Generating P2P map for pair '{pair_name}'")
 
             forward_map_send, reverse_map_send, source_num_slicers_send, target_num_slicers_send = get_p2p_map(
