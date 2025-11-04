@@ -1,6 +1,5 @@
 """Common constants and configuration for distributed tensor transfer example."""
 
-import os
 import re
 
 import torch
@@ -29,7 +28,7 @@ TCPSTORE_HOST = "localhost"
 TCPSTORE_PORT = 39505
 
 # Base path for LMDB storage
-LMDB_ROOT = f"{os.environ['PIXI_PROJECT_ROOT']}/prototyping/distributed_tensor_transfer/dbs"
+LMDB_ROOT = "/tmp/dbs"
 
 
 def get_queue_state_paths(rank: int) -> tuple[str, str]:
