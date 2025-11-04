@@ -84,6 +84,8 @@ def p2p_communicate(
         return None
 
     # Infer target_tensor_shape, device, dtype from available tensor
+    # Also extract source_tensor_shape for slice pre-calculation
+    source_tensor_shape = None
     if target_local_tensor is not None:
         target_tensor_shape = tuple(target_local_tensor.shape)
         device = target_local_tensor.device
@@ -96,12 +98,17 @@ def p2p_communicate(
     else:
         raise ValueError("Both source_local_tensor and target_local_tensor are None")
 
+    # Extract source tensor shape if available
+    if source_local_tensor is not None:
+        source_tensor_shape = tuple(source_local_tensor.shape)
+
     # === Phase 1: Lowering (planning) ===
     source_chunks, target_chunks = map_to_ops(
         forward_map=forward_map,
         reverse_map=reverse_map,
         source_num_slicers=source_num_slicers,
         target_num_slicers=target_num_slicers,
+        source_tensor_shape=source_tensor_shape,
         target_tensor_shape=target_tensor_shape,
         rank=rank,
     )
@@ -115,14 +122,12 @@ def p2p_communicate(
         prepare_send_buffers(
             chunks=source_chunks,
             local_tensor=source_local_tensor,
-            source_num_slicers=source_num_slicers,
         )
 
     if target_chunks:
         prepare_recv_buffers(
             chunks=target_chunks,
             source_local_tensor=source_local_tensor,  # For self-copy
-            source_num_slicers=source_num_slicers,
             device=device,
             dtype=dtype,
         )
@@ -131,5 +136,4 @@ def p2p_communicate(
         source_chunks=source_chunks,
         target_chunks=target_chunks,
         target_tensor=target_local_tensor,
-        target_num_slicers=target_num_slicers,
     )

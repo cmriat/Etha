@@ -1,9 +1,17 @@
 """Intermediate Representation for tensor transfer operations."""
 
-from typing import Literal
+from enum import Enum
 from dataclasses import dataclass
 
 import torch
+
+
+class TransferType(Enum):
+    """Transfer operation types."""
+
+    SELF_COPY = "self_copy"  # Local copy within same rank
+    P2P = "p2p"  # Point-to-point transfer between two ranks
+    BROADCAST = "broadcast"  # One-to-many transfer
 
 
 @dataclass(slots=True, kw_only=True)
@@ -20,10 +28,12 @@ class BaseChunk:
     chunk_shape: tuple[int, ...]  # Shape of the data being transferred
 
     # Transfer method
-    transfer_type: Literal["self_copy", "p2p", "broadcast"]
+    transfer_type: TransferType
 
     # Buffer management
     buffer: torch.Tensor | None = None
+
+    slice_tuples: tuple[slice, ...] = ()  # Slice tuple for tensor indexing
 
 
 @dataclass(slots=True, kw_only=True)
@@ -61,3 +71,5 @@ class TargetChunk(BaseChunk):
 
     # Broadcast info (None for self_copy and p2p)
     group_key: tuple[int, tuple[int, ...]] | None = None  # (src_rank, tuple(sorted(dst_ranks)))
+
+    src_slice_tuples: tuple[slice, ...] = ()  # Slice tuple for source tensor (self_copy only)

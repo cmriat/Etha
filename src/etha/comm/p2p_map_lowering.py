@@ -2,9 +2,12 @@
 
 from collections import defaultdict
 
-from etha.comm.utils import get_or_create_process_group
-
-from .chunk_ir import SourceChunk, TargetChunk
+from .utils import (
+    get_slicer_tuples,
+    get_slice_from_multi_index,
+    get_or_create_process_group,
+)
+from .chunk_ir import SourceChunk, TargetChunk, TransferType
 
 
 def build_broadcast_plan(
@@ -43,6 +46,7 @@ def map_to_ops(
     reverse_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
     source_num_slicers: list[int],
     target_num_slicers: list[int],
+    source_tensor_shape: tuple[int, ...] | None,
     target_tensor_shape: tuple[int, ...],
     rank: int,
 ) -> tuple[list[SourceChunk], list[TargetChunk]]:
@@ -66,6 +70,17 @@ def map_to_ops(
     # Build broadcast plan to identify 1-to-N transfers
     broadcast_plan, broadcast_keys = build_broadcast_plan(forward_map)
 
+    # Pre-calculate slicer tuples for slice pre-computation
+    source_slicer_tuples = None
+    if source_tensor_shape is not None:
+        # Extend num_slicers to match tensor dimensions
+        source_num_slicers_extended = source_num_slicers + [1] * (len(source_tensor_shape) - len(source_num_slicers))
+        source_slicer_tuples = get_slicer_tuples(source_tensor_shape, source_num_slicers_extended)
+
+    # Pre-calculate slicer tuples for target
+    target_num_slicers_extended = target_num_slicers + [1] * (len(target_tensor_shape) - len(target_num_slicers))
+    target_slicer_tuples = get_slicer_tuples(target_tensor_shape, target_num_slicers_extended)
+
     source_chunks: list[SourceChunk] = []
     target_chunks: list[TargetChunk] = []
 
@@ -84,15 +99,20 @@ def map_to_ops(
 
             # Determine transfer type
             if (rank, source_idx) in broadcast_keys:
-                transfer_type = "broadcast"
+                transfer_type = TransferType.BROADCAST
                 group_key = (rank, tuple(dst_ranks))
             else:
-                transfer_type = "p2p"
+                transfer_type = TransferType.P2P
                 group_key = None
 
             # Calculate chunk shape (will be set properly during preparation)
             # For source chunks, we don't have tensor_shape yet, will be updated during prepare
-            chunk_shape = _calculate_chunk_shape(source_num_slicers, None)
+            chunk_shape = _calculate_chunk_shape(source_num_slicers, source_tensor_shape)
+
+            # Pre-calculate slice_tuples if source shape is available
+            slice_tuples = ()
+            if source_slicer_tuples is not None:
+                slice_tuples = get_slice_from_multi_index(source_idx, source_num_slicers_extended, source_slicer_tuples)
 
             source_chunk = SourceChunk(
                 chunk_id=chunk_id,
@@ -102,8 +122,9 @@ def map_to_ops(
                 src_idx=source_idx,
                 dst_ranks=dst_ranks,
                 group_key=group_key,
+                slice_tuples=slice_tuples,
             )
-            # Note: buffer will be set during prepare_send_buffers()
+
             source_chunks.append(source_chunk)
             chunk_id += 1
 
@@ -117,10 +138,10 @@ def map_to_ops(
             for src_rank, src_idx in src_list:
                 # Determine transfer type
                 if src_rank == rank:
-                    transfer_type = "self_copy"
+                    transfer_type = TransferType.SELF_COPY
                     group_key = None
                 elif (src_rank, src_idx) in broadcast_keys:
-                    transfer_type = "broadcast"
+                    transfer_type = TransferType.BROADCAST
                     # Find the dst_ranks for this broadcast
                     # From broadcast_plan: (src_rank, tuple(dst_ranks)) -> [src_idx, ...]
                     dst_ranks = None
@@ -130,11 +151,20 @@ def map_to_ops(
                             break
                     group_key = (src_rank, dst_ranks) if dst_ranks else None
                 else:
-                    transfer_type = "p2p"
+                    transfer_type = TransferType.P2P
                     group_key = None
 
-                # Calculate chunk shape
                 chunk_shape = _calculate_chunk_shape(target_num_slicers, target_tensor_shape)
+
+                # Pre-calculate slice_tuples for target position
+                slice_tuples = get_slice_from_multi_index(target_idx, target_num_slicers_extended, target_slicer_tuples)
+
+                # Pre-calculate src_slice_tuples for self_copy source reading
+                src_slice_tuples = ()
+                if transfer_type == TransferType.SELF_COPY and source_slicer_tuples is not None:
+                    src_slice_tuples = get_slice_from_multi_index(
+                        src_idx, source_num_slicers_extended, source_slicer_tuples
+                    )
 
                 target_chunk = TargetChunk(
                     chunk_id=chunk_id,
@@ -145,8 +175,10 @@ def map_to_ops(
                     src_rank=src_rank,
                     src_idx=src_idx,
                     group_key=group_key,
+                    slice_tuples=slice_tuples,
+                    src_slice_tuples=src_slice_tuples,
                 )
-                # Note: buffer will be set during prepare_recv_buffers()
+
                 target_chunks.append(target_chunk)
                 chunk_id += 1
 

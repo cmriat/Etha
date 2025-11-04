@@ -3,20 +3,13 @@
 import torch
 import torch.distributed as dist
 
-from etha.comm.utils import get_or_create_process_group
-
-from .utils import (
-    get_slicer_tuples,
-    get_slice_from_multi_index,
-    get_or_create_process_group,
-)
-from .chunk_ir import SourceChunk, TargetChunk
+from .utils import get_or_create_process_group
+from .chunk_ir import SourceChunk, TargetChunk, TransferType
 
 
 def prepare_send_buffers(
     chunks: list[SourceChunk],
     local_tensor: torch.Tensor,
-    source_num_slicers: list[int],
 ) -> None:
     """Prepare send buffers by slicing source tensor.
 
@@ -25,38 +18,22 @@ def prepare_send_buffers(
     Args:
         chunks: SourceChunks to prepare
         local_tensor: Source tensor to slice from
-        source_num_slicers: Partitioning of source tensor
     """
     if not chunks or local_tensor is None:
         return
 
-    # Extend num_slicers to match tensor dimensions
-    source_num_slicers = source_num_slicers + [1] * (local_tensor.ndim - len(source_num_slicers))
-
-    # Pre-compute all slice tuples for efficiency
-    slicer_tuples = get_slicer_tuples(local_tensor.shape, source_num_slicers)
-
     for chunk in chunks:
-        if chunk.transfer_type == "self_copy":
-            # Self-copy doesn't need send buffer
-            continue
-
-        # Slice source tensor
-        slice_tuple = get_slice_from_multi_index(chunk.src_idx, source_num_slicers, slicer_tuples)
-        data_slice = local_tensor[slice_tuple]
-
-        # Make contiguous for network transfer
-        chunk.buffer = data_slice if data_slice.is_contiguous() else data_slice.contiguous()
-
-        # Update chunk_shape if it was a placeholder
-        if not chunk.chunk_shape:
-            chunk.chunk_shape = tuple(chunk.buffer.shape)
+        match chunk.transfer_type:
+            case TransferType.SELF_COPY:
+                continue  # Self-copy doesn't need send buffer
+            case _:
+                data_slice = local_tensor[chunk.slice_tuples]
+                chunk.buffer = data_slice.contiguous()
 
 
 def prepare_recv_buffers(
     chunks: list[TargetChunk],
     source_local_tensor: torch.Tensor | None,
-    source_num_slicers: list[int],
     device: torch.device,
     dtype: torch.dtype,
 ) -> None:
@@ -67,33 +44,24 @@ def prepare_recv_buffers(
     Args:
         chunks: TargetChunks to prepare
         source_local_tensor: Source tensor for self-copy (can be None)
-        source_num_slicers: Partitioning of source tensor (for self-copy)
         device: Device to allocate buffers on
         dtype: Data type for buffers
     """
-    # Pre-compute slicer tuples for self-copy
-    slicer_tuples = None
-    if source_local_tensor is not None:
-        source_num_slicers_extended = source_num_slicers + [1] * (source_local_tensor.ndim - len(source_num_slicers))
-        slicer_tuples = get_slicer_tuples(source_local_tensor.shape, source_num_slicers_extended)
-
     for chunk in chunks:
-        if chunk.transfer_type == "self_copy":
-            # Self-copy: slice from source tensor
-            if source_local_tensor is not None and slicer_tuples is not None:
-                slice_tuple = get_slice_from_multi_index(chunk.src_idx, source_num_slicers_extended, slicer_tuples)
-                chunk.buffer = source_local_tensor[slice_tuple]
-            continue
-
-        # Allocate empty buffer for network receive
-        chunk.buffer = torch.empty(chunk.chunk_shape, dtype=dtype, device=device)
+        match chunk.transfer_type:
+            case TransferType.SELF_COPY:
+                # Self-copy: slice from source tensor
+                if source_local_tensor is not None:
+                    chunk.buffer = source_local_tensor[chunk.src_slice_tuples]
+            case _:
+                # Allocate empty buffer for network receive
+                chunk.buffer = torch.empty(chunk.chunk_shape, dtype=dtype, device=device)
 
 
 def execute_naive(
     source_chunks: list[SourceChunk],
     target_chunks: list[TargetChunk],
     target_tensor: torch.Tensor | None,
-    target_num_slicers: list[int],
 ) -> None:
     """Execute transfer in naive mode: launch all → wait all → assemble.
 
@@ -102,10 +70,7 @@ def execute_naive(
     Args:
         source_chunks: Chunks to send (with buffers prepared)
         target_chunks: Chunks to receive (with buffers prepared)
-        target_tensor_shape: Shape of final assembled tensor
-        target_num_slicers: Partitioning of target tensor
-        device: Device for final tensor
-        dtype: Data type for final tensor
+        target_tensor: Final assembled tensor
     """
     # === Phase 1: Launch sends ===
     send_works: dict[int, dist.Work] = {}
@@ -118,11 +83,12 @@ def execute_naive(
     recv_works: dict[int, dist.Work] = {}
 
     for chunk in target_chunks:
-        if chunk.transfer_type == "self_copy":
-            continue  # Self-copy already handled in prepare phase
-
-        work = _launch_recv(chunk)
-        recv_works[chunk.chunk_id] = work
+        match chunk.transfer_type:
+            case TransferType.SELF_COPY:
+                continue  # Self-copy already handled in prepare phase
+            case _:
+                work = _launch_recv(chunk)
+                recv_works[chunk.chunk_id] = work
 
     # === Phase 3: Wait all ===
     for work in recv_works.values():
@@ -132,13 +98,8 @@ def execute_naive(
 
     # === Phase 4: Assemble final tensor ===
     if target_tensor is not None:
-        target_tensor_shape = tuple(target_tensor.shape)
-
-        # Extend num_slicers to match tensor dimensions
-        target_num_slicers = target_num_slicers + [1] * (len(target_tensor_shape) - len(target_num_slicers))
-
         for chunk in target_chunks:
-            _assemble_chunk(chunk, target_tensor, target_num_slicers)
+            _assemble_chunk(chunk, target_tensor)
 
 
 def _launch_send(chunk: SourceChunk) -> dist.Work:
@@ -150,19 +111,18 @@ def _launch_send(chunk: SourceChunk) -> dist.Work:
     Returns:
         Work handle for async operation
     """
-    if chunk.transfer_type == "broadcast":
-        # Broadcast to multiple ranks
-        group_ranks = [chunk.src_rank] + chunk.dst_ranks
-        group = get_or_create_process_group(group_ranks)
-        return dist.broadcast(tensor=chunk.buffer, src=chunk.src_rank, group=group, async_op=True)
-    elif chunk.transfer_type == "p2p":
-        # P2P send to single rank
-        assert len(chunk.dst_ranks) == 1, f"P2P should have exactly 1 dst_rank, got {len(chunk.dst_ranks)}"
-        # Note: batch_isend_irecv is used in original code, but here we do individual sends
-        # This will be batched at a higher level if needed
-        return dist.isend(tensor=chunk.buffer, dst=chunk.dst_ranks[0])
-    else:
-        raise ValueError(f"Unknown transfer type for send: {chunk.transfer_type}")
+    match chunk.transfer_type:
+        case TransferType.BROADCAST:
+            # Broadcast to multiple ranks
+            group_ranks = [chunk.src_rank] + chunk.dst_ranks
+            group = get_or_create_process_group(group_ranks)
+            return dist.broadcast(tensor=chunk.buffer, src=chunk.src_rank, group=group, async_op=True)
+        case TransferType.P2P:
+            # P2P send to single rank
+            assert len(chunk.dst_ranks) == 1, f"P2P should have exactly 1 dst_rank, got {len(chunk.dst_ranks)}"
+            return dist.isend(tensor=chunk.buffer, dst=chunk.dst_ranks[0])
+        case _:
+            raise ValueError(f"Unknown transfer type for send: {chunk.transfer_type}")
 
 
 def _launch_recv(chunk: TargetChunk) -> dist.Work:
@@ -174,44 +134,30 @@ def _launch_recv(chunk: TargetChunk) -> dist.Work:
     Returns:
         Work handle for async operation
     """
-    if chunk.transfer_type == "broadcast":
-        # Receive broadcast from source rank
-        group_ranks = [chunk.src_rank] + list(chunk.group_key[1]) if chunk.group_key else [chunk.src_rank]
-        group = get_or_create_process_group(group_ranks)
-        return dist.broadcast(tensor=chunk.buffer, src=chunk.src_rank, group=group, async_op=True)
-    elif chunk.transfer_type == "p2p":
-        # P2P receive from source rank
-        return dist.irecv(tensor=chunk.buffer, src=chunk.src_rank)
-    else:
-        raise ValueError(f"Unknown transfer type for recv: {chunk.transfer_type}")
+    match chunk.transfer_type:
+        case TransferType.BROADCAST:
+            # Receive broadcast from source rank
+            group_ranks = [chunk.src_rank] + list(chunk.group_key[1]) if chunk.group_key else [chunk.src_rank]
+            group = get_or_create_process_group(group_ranks)
+            return dist.broadcast(tensor=chunk.buffer, src=chunk.src_rank, group=group, async_op=True)
+        case TransferType.P2P:
+            # P2P receive from source rank
+            return dist.irecv(tensor=chunk.buffer, src=chunk.src_rank)
+        case _:
+            raise ValueError(f"Unknown transfer type for recv: {chunk.transfer_type}")
 
 
 def _assemble_chunk(
     chunk: TargetChunk,
     final_tensor: torch.Tensor,
-    target_num_slicers: list[int],
 ) -> None:
     """Assemble a chunk into the final tensor.
 
     Args:
         chunk: TargetChunk to assemble
         final_tensor: Destination tensor
-        target_num_slicers: Partitioning of target tensor
     """
     # Buffer should already be set (either from network recv or self-copy)
     if chunk.buffer is None:
         return
-
-    # Calculate slice ranges for target position
-    slice_ranges = []
-    for dim, coord in enumerate(chunk.dst_idx):
-        if target_num_slicers[dim] > 1:
-            slice_size = final_tensor.shape[dim] // target_num_slicers[dim]
-            start = coord * slice_size
-            end = start + slice_size
-            slice_ranges.append(slice(start, end))
-        else:
-            slice_ranges.append(slice(None))
-
-    # Copy buffer to final tensor
-    final_tensor[tuple(slice_ranges)].copy_(chunk.buffer)
+    final_tensor[chunk.slice_tuples].copy_(chunk.buffer)
