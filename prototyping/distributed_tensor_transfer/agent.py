@@ -1,6 +1,9 @@
 """Agent for distributed tensor transfer example."""
 
 import os
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import logging
 from pathlib import Path
 

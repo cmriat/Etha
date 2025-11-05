@@ -1,6 +1,8 @@
 """Distributed Training Worker with 4x4 tensor transfer for debugging."""
 
 import os
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
 import logging
 
