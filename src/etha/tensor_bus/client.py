@@ -19,7 +19,7 @@ import posix_ipc
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
-from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensor
+from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensor, RegisterTensorBatch
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
@@ -215,6 +215,36 @@ class TensorBusClient:
             msg, "register_tensor", pair_name, blocking=blocking, timeout=timeout
         )
 
+    def register_tensor_batch(
+        self,
+        pair_name: str,
+        tensor_names: list[str],
+        tensors: list[torch.Tensor],
+        blocking: bool = True,
+        timeout: float = 30.0,
+    ):
+        """Register multiple tensors in batch.
+
+        Args:
+            pair_name: pair name
+            tensor_names: list of tensor names
+            tensors: list of tensors
+            blocking: whether to block until completion
+            timeout: timeout in seconds
+        """
+        if len(tensor_names) != len(tensors):
+            raise ValueError(
+                f"tensor_names and tensors must have same length, got {len(tensor_names)} and {len(tensors)}"
+            )
+
+        tensor_payloads = [ForkingPickler.dumps(tensor.detach()) for tensor in tensors]
+
+        msg = RegisterTensorBatch(pair_name=pair_name, tensor_names=tensor_names, tensor_payloads=tensor_payloads)
+
+        return self._execute_command_with_semaphore(
+            msg, "register_tensor_batch", pair_name, blocking=blocking, timeout=timeout
+        )
+
     def _connect_agent(self, path: str, timeout: float):
         """Connect to Agent.
 
@@ -347,6 +377,14 @@ class PairHandler:
     def register_tensor(self, tensor_name: str, tensor: torch.Tensor, blocking: bool = False, timeout: float = 30.0):
         """Register a tensor to the pair."""
         return self.client.register_tensor(self.pair_name, tensor_name, tensor, blocking=blocking, timeout=timeout)
+
+    def register_tensor_batch(
+        self, tensor_names: list[str], tensors: list[torch.Tensor], blocking: bool = False, timeout: float = 30.0
+    ):
+        """Register multiple tensors in batch."""
+        return self.client.register_tensor_batch(
+            pair_name=self.pair_name, tensor_names=tensor_names, tensors=tensors, blocking=blocking, timeout=timeout
+        )
 
     def close(self):
         """Cleanup (placeholder for future use)."""

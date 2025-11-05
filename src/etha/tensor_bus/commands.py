@@ -41,6 +41,19 @@ class RegisterTensor(BaseCommand):
     tensor_payload: memoryview
 
 
+class RegisterTensorBatch(BaseCommand):
+    """Register multiple tensors for zero-copy sharing between processes.
+
+    Batch version of RegisterTensor for improved efficiency when registering
+    multiple tensors. Reduces LMDB cross-process communication overhead by
+    sending all tensors in a single command instead of multiple individual commands.
+    """
+
+    pair_name: str
+    tensor_names: list[str]
+    tensor_payloads: list[memoryview]
+
+
 class RegisterPair(BaseCommand):
     """Register to a Pair (peer-to-peer communication endpoint).
 
@@ -74,4 +87,4 @@ class QueryStatus(BaseCommand):
     state_name: str
 
 
-Message = Transfer | RegisterTensor | RegisterPair | QueryStatus
+Message = Transfer | RegisterTensor | RegisterTensorBatch | RegisterPair | QueryStatus
