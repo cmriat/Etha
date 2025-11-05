@@ -12,7 +12,7 @@ from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 from etha.comm import (
     get_m2m_map,
     m2m_communicate,
-    map_to_chunk_ir,
+    map_to_chunk_ops,
     gather_broadcast_communicate,
 )
 
@@ -111,7 +111,7 @@ def run_test_communication(
         target_tensor_shape = tuple(target_local_tensor.shape)
 
     # Step 2: Generate chunk IR from map + actual tensor shapes
-    source_chunks, target_chunks = map_to_chunk_ir(
+    source_chunks, target_chunks = map_to_chunk_ops(
         forward_map=forward_map,
         reverse_map=reverse_map,
         source_num_slicers=source_slicers,

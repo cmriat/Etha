@@ -4,7 +4,7 @@ import torch
 import torch.distributed as dist
 
 from .utils import get_or_create_process_group
-from .chunk_ir import SourceChunk, TargetChunk, TransferType
+from .chunk_ops import SourceChunk, TargetChunk, TransferType
 
 
 def _prepare_send_buffer(chunk: SourceChunk, local_tensor: torch.Tensor) -> None:
@@ -127,8 +127,6 @@ def execute_naive(
         device = source_local_tensor.device
         dtype = source_local_tensor.dtype
 
-    # TODO: may have mixed send/recv roles, should keep order to avoid deadlock
-    # TODO: optimize with pipelining
     # === Phase 1: Prepare buffers ===
     for chunk in source_chunks:
         _prepare_send_buffer(chunk, source_local_tensor)

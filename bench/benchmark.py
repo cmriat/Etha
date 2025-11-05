@@ -15,7 +15,7 @@ from torch.distributed.tensor.placement_types import _StridedShard
 from etha.comm import (
     get_m2m_map,
     m2m_communicate,
-    map_to_chunk_ir,
+    map_to_chunk_ops,
     gather_broadcast_communicate,
 )
 
@@ -427,7 +427,7 @@ def main():
             if target_local_tensor is not None and 0 not in target_local_tensor.shape:
                 target_tensor_shape = tuple(target_local_tensor.shape)
 
-            source_chunks, target_chunks = map_to_chunk_ir(
+            source_chunks, target_chunks = map_to_chunk_ops(
                 forward_map=forward_map,
                 reverse_map=reverse_map,
                 source_num_slicers=source_slicers,

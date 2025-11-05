@@ -7,7 +7,7 @@ from .utils import (
     get_slice_from_multi_index,
     get_or_create_process_group,
 )
-from .chunk_ir import SourceChunk, TargetChunk, TransferType
+from .chunk_ops import SourceChunk, TargetChunk, TransferType
 
 
 def calculate_chunk_shape(
@@ -65,7 +65,7 @@ def build_broadcast_plan(
     return broadcast_plan, broadcast_keys
 
 
-def map_to_chunk_ir(
+def map_to_chunk_ops(
     forward_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
     reverse_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
     source_num_slicers: list[int],

@@ -7,7 +7,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
-from .chunk_ir import SourceChunk, TargetChunk
+from .chunk_ops import SourceChunk, TargetChunk
 from .comm_execution import execute_naive
 
 logger = logging.getLogger(__name__)

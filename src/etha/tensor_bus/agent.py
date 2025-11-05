@@ -16,7 +16,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
 from etha.comm import get_m2m_map, m2m_communicate
-from etha.comm.get_chunk_ir import map_to_chunk_ir
 
 from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
 from .pair_state import M2MMap, PairState
