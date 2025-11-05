@@ -13,9 +13,9 @@ from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_t
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from etha.comm import (
-    get_m2m_map,
     m2m_communicate,
-    map_to_chunk_ops,
+    get_m2m_transfers,
+    transfers_to_chunks,
     bind_tensors_to_chunks,
     gather_broadcast_communicate,
 )
@@ -104,7 +104,7 @@ def calculate_ideal_bandwidth(
 
 
 def benchmark_single_shape(
-    source_local_tensor,
+    source_local_tensor,  # noqa
     target_local_tensor,
     source_dist_tensor,
     target_dist_tensor,  # noqa
@@ -131,8 +131,7 @@ def benchmark_single_shape(
     """
     tensor_size_bytes = origin_tensor.nelement() * origin_tensor.element_size()
 
-    # Bind tensors to chunks once (reused for both warmup and benchmark)
-    bind_tensors_to_chunks(source_chunks, target_chunks, source_local_tensor, target_local_tensor)
+    # Chunks will be bound after they are created
 
     # M2M method warmup
     dist.barrier()
@@ -375,7 +374,7 @@ def main():
             torch.cuda.synchronize()
         dist.barrier()
         start_time = time.perf_counter()
-        forward_map, reverse_map, source_slicers, target_slicers = get_m2m_map(
+        transfers = get_m2m_transfers(
             source_mesh=current_source_mesh,
             source_placements=source_specs,
             target_mesh=current_target_mesh,
@@ -385,8 +384,7 @@ def main():
         )
         map_time = (time.perf_counter() - start_time) / profile_iter
         if rank == 0:
-            print(f"get_m2m_map time: {map_time}")
-            print(f"forward_map: {forward_map}")
+            print(f"get_m2m_transfers time: {map_time}")
         for shape in tensor_shapes:
             print(f"  Benchmarking tensor shape: {shape}...")
             torch.manual_seed(0)
@@ -421,15 +419,17 @@ def main():
             if target_local_tensor is not None and 0 not in target_local_tensor.shape:
                 target_tensor_shape = tuple(target_local_tensor.shape)
 
-            source_chunks, target_chunks = map_to_chunk_ops(
-                forward_map=forward_map,
-                reverse_map=reverse_map,
-                source_num_slicers=source_slicers,
-                target_num_slicers=target_slicers,
+            source_chunks, target_chunks = transfers_to_chunks(
+                transfers=transfers,
+                rank=rank,
                 source_tensor_shape=source_tensor_shape,
                 target_tensor_shape=target_tensor_shape,
-                rank=rank,
             )
+            # For source ranks, they need a target tensor for self-copy operations
+            # Use the source tensor as target tensor for self-copy
+            effective_target_tensor = target_local_tensor if target_local_tensor is not None else source_local_tensor
+            bind_tensors_to_chunks(source_chunks, target_chunks, source_local_tensor, effective_target_tensor)
+
             ir_gen_time = (time.perf_counter() - start_time) / profile_iter
             if rank == 0:
                 print(f"    IR generation time: {ir_gen_time:.6f}s")

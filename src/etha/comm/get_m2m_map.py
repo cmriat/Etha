@@ -43,7 +43,7 @@ def get_m2m_map(
     target_placements: tuple[Placement, ...],
     group: dist.ProcessGroup,
     device: str = "cpu",
-) -> tuple[dict[int, dict[tuple, list[int]]], dict[int, dict[tuple, list[tuple[int, tuple]]]], list[int], list[int]]:
+) -> tuple[dict[int, dict[tuple, list[tuple[int, tuple]]]], list[int], list[int]]:
     """Get P2P communication map for tensor redistribution."""
     rank = dist.get_rank()
     target_mesh_ranks = target_mesh.mesh.flatten().tolist()
@@ -115,7 +115,6 @@ def get_m2m_map(
         req.wait()
 
     forward_map = defaultdict(lambda: defaultdict(list))
-    reverse_map = defaultdict(lambda: defaultdict(list))
 
     if rank in target_mesh_ranks:
         dtensor_target = distribute_tensor(full_tensor_restored, target_mesh, target_placements, src_data_rank=None)
@@ -148,33 +147,17 @@ def get_m2m_map(
             # Build forward_map: source_rank -> {source_idx: [(target_rank, target_idx)]}
             target_rank = rank
             forward_map[source_rank][source_idx].append((target_rank, target_idx))
-            # Build reverse_map: target_rank -> {target_idx: [(source_rank, source_idx)]}
-            reverse_map[target_rank][target_idx].append((source_rank, source_idx))
 
     # Convert defaultdict to regular dict for serialization
+    # Always create dicts, even if empty, to ensure all ranks have data
     forward_map_regular = {}
     for k, v in forward_map.items():
         forward_map_regular[k] = dict(v)
 
-    reverse_map_regular = {}
-    for k, v in reverse_map.items():
-        reverse_map_regular[k] = dict(v)
-
     all_forward_maps = [None] * (len(source_mesh_ranks) + len(target_mesh_ranks))
-    all_reverse_maps = [None] * (len(source_mesh_ranks) + len(target_mesh_ranks))
-
     dist.all_gather_object(all_forward_maps, forward_map_regular, group=group)
-    dist.all_gather_object(all_reverse_maps, reverse_map_regular, group=group)
 
     merged_forward_map = defaultdict(lambda: defaultdict(list))
-    merged_reverse_map = defaultdict(lambda: defaultdict(list))
-
-    for rank_reverse_map in all_reverse_maps:
-        if rank_reverse_map is not None:
-            for target_rank, target_idx_map in rank_reverse_map.items():
-                for target_idx, source_info_list in target_idx_map.items():
-                    merged_reverse_map[target_rank][target_idx].extend(source_info_list)
-
     for rank_forward_map in all_forward_maps:
         if rank_forward_map is not None:
             for source_rank, source_idx_map in rank_forward_map.items():
@@ -186,13 +169,4 @@ def get_m2m_map(
     for source_rank, source_idx_map in merged_forward_map.items():
         final_forward_map[source_rank] = dict(source_idx_map)
 
-    final_reverse_map = {}
-    for target_rank, target_idx_map in merged_reverse_map.items():
-        final_reverse_map[target_rank] = dict(target_idx_map)
-
-    return (
-        final_forward_map,
-        final_reverse_map,
-        source_num_slicers,
-        target_num_slicers,
-    )
+    return final_forward_map, source_num_slicers, target_num_slicers

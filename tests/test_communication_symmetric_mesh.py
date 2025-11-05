@@ -10,12 +10,11 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 
 from etha.comm import (
-    get_m2m_map,
     m2m_communicate,
-    map_to_chunk_ops,
+    bind_tensors_to_chunks,
     gather_broadcast_communicate,
 )
-from etha.comm.get_chunk_ops import bind_tensors_to_chunks
+from etha.comm.get_chunk_ops import get_m2m_transfers, transfers_to_chunks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -67,41 +66,25 @@ def run_test_communication(
     logger.debug(f"[rank={rank}] Source mesh: {source_mesh.mesh}")
     logger.debug(f"[rank={rank}] Target mesh: {target_mesh.mesh}")
 
-    # Generate chunk IR
-    # Step 1: Get M2M map
+    # Generate chunk IR using new Transfer-based API
+    # Step 1: Get transfers using the new API
     if is_in_source:
-        forward_map, reverse_map, source_slicers, target_slicers = get_m2m_map(
-            source_mesh,
-            source_specs,
-            target_mesh,
-            target_specs,
-            dist.group.WORLD,
-            device,
-        )
-        forward_map2, reverse_map2, source_slicers2, target_slicers2 = get_m2m_map(
-            target_mesh,
-            source_specs,
-            source_mesh,
-            target_specs,
-            dist.group.WORLD,
-            device,
+        transfers = get_m2m_transfers(
+            source_mesh=source_mesh,
+            source_placements=source_specs,
+            target_mesh=target_mesh,
+            target_placements=target_specs,
+            group=dist.group.WORLD,
+            device=device,
         )
     else:
-        forward_map, reverse_map, source_slicers, target_slicers = get_m2m_map(
-            target_mesh,
-            target_specs,
-            source_mesh,
-            source_specs,
-            dist.group.WORLD,
-            device,
-        )
-        forward_map2, reverse_map2, source_slicers2, target_slicers2 = get_m2m_map(
-            source_mesh,
-            source_specs,
-            target_mesh,
-            target_specs,
-            dist.group.WORLD,
-            device,
+        transfers = get_m2m_transfers(
+            source_mesh=target_mesh,
+            source_placements=target_specs,
+            target_mesh=source_mesh,
+            target_placements=source_specs,
+            group=dist.group.WORLD,
+            device=device,
         )
 
     source_tensor_shape = None
@@ -111,15 +94,12 @@ def run_test_communication(
     if target_local_tensor is not None and 0 not in target_local_tensor.shape:
         target_tensor_shape = tuple(target_local_tensor.shape)
 
-    # Step 2: Generate chunk IR from map + actual tensor shapes
-    source_chunks, target_chunks = map_to_chunk_ops(
-        forward_map=forward_map,
-        reverse_map=reverse_map,
-        source_num_slicers=source_slicers,
-        target_num_slicers=target_slicers,
+    # Step 2: Convert transfers to chunks
+    source_chunks, target_chunks = transfers_to_chunks(
+        transfers=transfers,
+        rank=rank,
         source_tensor_shape=source_tensor_shape,
         target_tensor_shape=target_tensor_shape,
-        rank=rank,
     )
 
     if rank == 0:

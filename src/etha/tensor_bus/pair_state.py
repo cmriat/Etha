@@ -4,16 +4,14 @@ import torch
 import msgspec
 import torch.distributed as dist
 
-from etha.comm.chunk_ops import SourceChunk, TargetChunk
+from etha.comm.chunk_ops import Transfer, SourceChunk, TargetChunk
 
 
-class M2MMap(msgspec.Struct):
-    """Mesh to mesh topology map (shape-independent)."""
+class M2MTransfers(msgspec.Struct):
+    """Mesh to mesh topology using Transfer IR (shape-independent)."""
 
-    forward_map: dict  # src_rank -> {src_idx: [(dst_rank, dst_idx), ...]}
-    reverse_map: dict  # dst_rank -> {dst_idx: [(src_rank, src_idx), ...]}
-    source_num_slicers: list[int]  # Number of slices per dimension for source
-    target_num_slicers: list[int]  # Number of slices per dimension for target
+    transfers_send: list[Transfer] | None = None  # Transfers for sending (local -> remote)
+    transfers_recv: list[Transfer] | None = None  # Transfers for receiving (remote -> local)
 
 
 class PairState(msgspec.Struct):
@@ -30,8 +28,8 @@ class PairState(msgspec.Struct):
     status: str  # "matched"
 
     # Topology layer: M2M maps (shape-independent, reusable)
-    m2m_map_send: M2MMap | None = None  # Map for sending (local -> remote)
-    m2m_map_recv: M2MMap | None = None  # Map for receiving (remote -> local)
+    transfers_send: M2MTransfers | None = None  # Map for sending (local -> remote)
+    transfers_recv: M2MTransfers | None = None  # Map for receiving (remote -> local)
 
     # Data layer: Per-tensor storage
     tensors: dict[str, torch.Tensor] = {}  # tensor_name -> tensor mapping

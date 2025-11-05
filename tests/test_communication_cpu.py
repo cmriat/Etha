@@ -11,9 +11,9 @@ from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_t
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from etha.comm import (
-    get_m2m_map,
     m2m_communicate,
-    map_to_chunk_ops,
+    get_m2m_transfers,
+    transfers_to_chunks,
     bind_tensors_to_chunks,
     gather_broadcast_communicate,
 )
@@ -57,15 +57,15 @@ def run_test_communication(
     logger.debug(f"[rank={rank}] Source mesh: {source_mesh.mesh}")
     logger.debug(f"[rank={rank}] Target mesh: {target_mesh.mesh}")
 
-    # Generate chunk IR
-    # Step 1: Get M2M map
-    forward_map, reverse_map, source_slicers, target_slicers = get_m2m_map(
-        source_mesh,
-        source_specs,
-        target_mesh,
-        target_specs,
-        dist.group.WORLD,
-        device,
+    # Generate chunk IR using new API
+    # Step 1: Get Transfer IR
+    transfers = get_m2m_transfers(
+        source_mesh=source_mesh,
+        source_placements=source_specs,
+        target_mesh=target_mesh,
+        target_placements=target_specs,
+        group=dist.group.WORLD,
+        device=device,
     )
 
     source_tensor_shape = None
@@ -75,15 +75,12 @@ def run_test_communication(
     if target_local_tensor is not None and 0 not in target_local_tensor.shape:
         target_tensor_shape = tuple(target_local_tensor.shape)
 
-    # Step 2: Generate chunk IR from map + actual tensor shapes
-    source_chunks, target_chunks = map_to_chunk_ops(
-        forward_map=forward_map,
-        reverse_map=reverse_map,
-        source_num_slicers=source_slicers,
-        target_num_slicers=target_slicers,
+    # Step 2: Generate chunk IR from Transfers
+    source_chunks, target_chunks = transfers_to_chunks(
+        transfers=transfers,
+        rank=rank,
         source_tensor_shape=source_tensor_shape,
         target_tensor_shape=target_tensor_shape,
-        rank=rank,
     )
 
     if rank == 0:

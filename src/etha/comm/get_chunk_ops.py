@@ -1,8 +1,8 @@
 """Communication Lowering - Convert topology maps to IR chunks."""
 
-from collections import defaultdict
-
 import torch
+from torch.distributed import ProcessGroup
+from torch.distributed.tensor import Placement, DeviceMesh
 
 from etha.comm.chunk_ops import SourceChunk, TargetChunk, logger
 
@@ -11,7 +11,103 @@ from .utils import (
     get_slice_from_multi_index,
     get_or_create_process_group,
 )
-from .chunk_ops import SourceChunk, TargetChunk, TransferType
+from .chunk_ops import Transfer, SourceChunk, TargetChunk, TransferType
+
+
+def get_m2m_transfers(
+    source_mesh: DeviceMesh,
+    source_placements: tuple[Placement, ...],
+    target_mesh: DeviceMesh,
+    target_placements: tuple[Placement, ...],
+    group: ProcessGroup,
+    device: str = "cpu",
+) -> list[Transfer]:
+    """Generate Transfer IR for mesh-to-mesh communication.
+
+    This is the primary user-facing function for generating a complete communication
+    plan. Each Transfer contains all necessary metadata including partitioning info.
+
+    Args:
+        source_mesh: Source device mesh
+        source_placements: Source tensor placements
+        target_mesh: Target device mesh
+        target_placements: Target tensor placements
+        group: Process group for communication
+        device: Device for execution ("cpu" or "cuda")
+
+    Returns:
+        List of Transfer objects with complete metadata
+    """
+    from .get_m2m_map import get_m2m_map
+
+    # Generate maps
+    forward_map, source_num_slicers, target_num_slicers = get_m2m_map(
+        source_mesh=source_mesh,
+        source_placements=source_placements,
+        target_mesh=target_mesh,
+        target_placements=target_placements,
+        group=group,
+        device=device,
+    )
+
+    # Convert to Transfer IR
+    return map_to_transfers(forward_map, source_num_slicers, target_num_slicers)
+
+
+def map_to_transfers(
+    forward_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
+    source_num_slicers: list[int],
+    target_num_slicers: list[int],
+) -> list[Transfer]:
+    """Convert forward_map to Transfer IR with complete metadata.
+
+    Args:
+        forward_map: src_rank -> {src_idx: [(dst_rank, dst_idx), ...]}
+        source_num_slicers: Partitioning of source tensor
+        target_num_slicers: Partitioning of target tensor
+
+    Returns:
+        List of Transfer objects with complete metadata (excluding self-copy)
+    """
+    transfers = []
+    for src_rank in sorted(forward_map.keys()):
+        for src_idx in sorted(forward_map[src_rank].keys()):
+            dst_list = forward_map[src_rank][src_idx]
+
+            other_dsts = [(r, idx) for r, idx in dst_list if r != src_rank]
+
+            if other_dsts:
+                # Determine transfer type based on number of destinations
+                transfer_type = TransferType.BROADCAST if len(other_dsts) > 1 else TransferType.P2P
+
+                transfers.append(
+                    Transfer(
+                        src_rank=src_rank,
+                        src_idx=src_idx,
+                        dst_list=other_dsts,
+                        transfer_type=transfer_type,
+                        source_num_slicers=source_num_slicers,
+                        target_num_slicers=target_num_slicers,
+                    )
+                )
+
+    return transfers
+
+
+def assign_pipeline_stages(
+    transfers: list[Transfer],
+    chunks_per_stage: int = 4,
+) -> None:
+    """Assign pipeline stage IDs to transfers for pipelined execution.
+
+    Args:
+        transfers: List of Transfer objects to assign stages to
+        chunks_per_stage: Number of operations per pipeline stage
+    """
+    sorted_transfers = sorted(transfers, key=lambda t: (t.src_rank, t.src_idx))
+
+    for i, transfer in enumerate(sorted_transfers):
+        transfer.stage_id = i // chunks_per_stage
 
 
 def calculate_chunk_shape(
@@ -38,182 +134,142 @@ def calculate_chunk_shape(
     return chunk_shape
 
 
-def build_broadcast_plan(
-    forward_map: dict[int, dict[tuple, list[int]]],
-) -> tuple[dict[tuple[int, tuple[int, ...]], list[tuple]], set[tuple[int, tuple]]]:
-    """Build broadcast plan for 1-to-many transfers.
+def build_broadcast_groups(transfers: list[Transfer]) -> None:
+    """Pre-create process groups for all broadcast operations.
 
-    Returns:
-        broadcast_plan: Maps (src, tuple(targets)) -> [source_idx...]
-        broadcast_keys: Set of (src, source_idx) that use broadcast
-    """
-    broadcast_plan: dict[tuple[int, tuple[int, ...]], list[tuple]] = defaultdict(list)
-    for src in sorted(forward_map.keys()):
-        inner = forward_map[src]
-        for source_idx in sorted(inner.keys()):
-            targets = inner[source_idx]
-            other_targets = sorted([r[0] for r in targets if r[0] != src])
-            if len(other_targets) > 1:
-                broadcast_plan[(src, tuple(other_targets))].append(source_idx)
-
-    broadcast_keys: set[tuple[int, tuple]] = set()
-    for (src, _targets), idx_list in broadcast_plan.items():
-        for sx in idx_list:
-            broadcast_keys.add((src, sx))
-
-    # Create all subgroups in a consistent order across all ranks
-    for group_key in sorted(broadcast_plan.keys(), key=lambda k: (k[0], k[1])):
-        group_ranks = [group_key[0]] + list(group_key[1])
-        get_or_create_process_group(group_ranks)
-
-    return broadcast_plan, broadcast_keys
-
-
-def map_to_chunk_ops(
-    forward_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
-    reverse_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
-    source_num_slicers: list[int],
-    target_num_slicers: list[int],
-    source_tensor_shape: tuple[int, ...] | None,
-    target_tensor_shape: tuple[int, ...] | None,
-    rank: int,
-) -> tuple[list[SourceChunk], list[TargetChunk]]:
-    """Lower topology maps to chunk-level IR.
-
-    Pure planning function - no execution, no state.
+    Creates groups in deterministic order across all ranks to avoid deadlocks.
 
     Args:
-        forward_map: src_rank -> {src_idx: [(dst_rank, dst_idx), ...]}
-        reverse_map: dst_rank -> {dst_idx: [(src_rank, src_idx), ...]}
-        source_num_slicers: Partitioning of source tensor
-        target_num_slicers: Partitioning of target tensor
-        target_tensor_shape: Shape of final target tensor
+        transfers: List of Transfer objects
+    """
+    broadcast_groups = set()
+    for transfer in transfers:
+        if transfer.transfer_type == TransferType.BROADCAST:
+            dst_ranks = sorted({r for r, _ in transfer.dst_list})
+            group_ranks = tuple([transfer.src_rank] + dst_ranks)
+            broadcast_groups.add(group_ranks)
+
+    for group_ranks in sorted(broadcast_groups):
+        get_or_create_process_group(list(group_ranks))
+
+
+def transfers_to_chunks(
+    transfers: list[Transfer],
+    rank: int,
+    source_tensor_shape: tuple[int, ...] | None,
+    target_tensor_shape: tuple[int, ...] | None,
+) -> tuple[list[SourceChunk], list[TargetChunk]]:
+    """Convert Transfer IR to execution-ready Chunks for this rank.
+
+    Args:
+        transfers: List of all Transfer objects (global)
         rank: Current process rank
+        source_tensor_shape: Shape of source tensor (if known)
+        target_tensor_shape: Shape of target tensor (if known)
 
     Returns:
-        (source_chunks, target_chunks):
-            - source_chunks: Chunks this rank needs to SEND
-            - target_chunks: Chunks this rank needs to RECEIVE
+        (source_chunks, target_chunks) for this rank
     """
-    # Build broadcast plan to identify 1-to-N transfers
-    broadcast_plan, broadcast_keys = build_broadcast_plan(forward_map)
+    # Get num_slicers from first Transfer (all transfers have same values)
+    if not transfers:
+        return [], []
 
-    # Pre-calculate slicer tuples for slice pre-computation
+    source_num_slicers = transfers[0].source_num_slicers
+    target_num_slicers = transfers[0].target_num_slicers
+
+    # Pre-calculate slicer tuples for slice indexing
     source_slicer_tuples = None
     source_num_slicers_extended = None
     if source_tensor_shape is not None:
-        # Extend or truncate num_slicers to match tensor dimensions
         source_num_slicers_extended = (source_num_slicers + [1] * len(source_tensor_shape))[: len(source_tensor_shape)]
         source_slicer_tuples = get_slicer_tuples(source_tensor_shape, source_num_slicers_extended)
 
-    # Pre-calculate slicer tuples for target
     target_slicer_tuples = None
     target_num_slicers_extended = None
     if target_tensor_shape is not None:
-        # Extend or truncate num_slicers to match tensor dimensions
         target_num_slicers_extended = (target_num_slicers + [1] * len(target_tensor_shape))[: len(target_tensor_shape)]
         target_slicer_tuples = get_slicer_tuples(target_tensor_shape, target_num_slicers_extended)
 
+    # Pre-create broadcast process groups before generating chunks
+    # This ensures all ranks create groups in the same order
+    build_broadcast_groups(transfers)
+
     source_chunks: list[SourceChunk] = []
     target_chunks: list[TargetChunk] = []
-
     chunk_id = 0
 
-    # === Generate SourceChunks from forward_map ===
-    if rank in forward_map:
-        for source_idx in sorted(forward_map[rank].keys()):
-            targets = forward_map[rank][source_idx]  # [(dst_rank, dst_idx), ...]
-
-            # Extract dst_ranks (excluding self)
-            dst_ranks = sorted({r[0] for r in targets if r[0] != rank})
-
-            if not dst_ranks:
-                continue
-
-            # Determine transfer type
-            if (rank, source_idx) in broadcast_keys:
-                transfer_type = TransferType.BROADCAST
+    # === Generate SourceChunks from transfers where src_rank == rank ===
+    for transfer in transfers:
+        if transfer.src_rank == rank:
+            # Determine group_key for broadcast
+            group_key = None
+            if transfer.transfer_type == TransferType.BROADCAST:
+                dst_ranks = sorted({r for r, _ in transfer.dst_list})
                 group_key = (rank, tuple(dst_ranks))
-            else:
-                transfer_type = TransferType.P2P
-                group_key = None
 
-            # Calculate chunk shape (will be set properly during preparation)
-            # For source chunks, we don't have tensor_shape yet, will be updated during prepare
-            chunk_shape = calculate_chunk_shape(source_num_slicers, source_tensor_shape)
-
-            # Pre-calculate slice_tuples if source shape is available
+            # Pre-calculate slice_tuples
             slice_tuples = ()
             if source_slicer_tuples is not None:
-                slice_tuples = get_slice_from_multi_index(source_idx, source_num_slicers_extended, source_slicer_tuples)
+                slice_tuples = get_slice_from_multi_index(
+                    transfer.src_idx, source_num_slicers_extended, source_slicer_tuples
+                )
 
             source_chunk = SourceChunk(
                 chunk_id=chunk_id,
-                chunk_shape=chunk_shape,
-                transfer_type=transfer_type,
+                chunk_shape=calculate_chunk_shape(source_num_slicers, source_tensor_shape),
+                transfer_type=transfer.transfer_type,
                 src_rank=rank,
-                src_idx=source_idx,
-                dst_ranks=dst_ranks,
+                src_idx=transfer.src_idx,
+                dst_ranks=sorted({r for r, _ in transfer.dst_list}),
                 group_key=group_key,
                 slice_tuples=slice_tuples,
+                stage_id=transfer.stage_id,
             )
 
             source_chunks.append(source_chunk)
             chunk_id += 1
 
-    # === Generate TargetChunks from reverse_map ===
-    if rank in reverse_map:
-        for target_idx in sorted(reverse_map[rank].keys()):
-            src_list = reverse_map[rank][target_idx]  # [(src_rank, src_idx), ...]
-
-            # Usually len(src_list) == 1 (one slot receives from one source)
-            # But handle multiple sources just in case
-            for src_rank, src_idx in src_list:
-                # Determine transfer type
-                if src_rank == rank:
+    # === Generate TargetChunks from transfers===
+    for transfer in transfers:
+        for dst_rank, dst_idx in transfer.dst_list:
+            if dst_rank == rank:
+                if transfer.src_rank == rank:
                     transfer_type = TransferType.SELF_COPY
                     group_key = None
-                elif (src_rank, src_idx) in broadcast_keys:
-                    transfer_type = TransferType.BROADCAST
-                    # Find the dst_ranks for this broadcast
-                    # From broadcast_plan: (src_rank, tuple(dst_ranks)) -> [src_idx, ...]
-                    dst_ranks = None
-                    for (bs, bdst), idx_list in broadcast_plan.items():
-                        if bs == src_rank and src_idx in idx_list:
-                            dst_ranks = bdst
-                            break
-                    group_key = (src_rank, dst_ranks) if dst_ranks else None
                 else:
-                    transfer_type = TransferType.P2P
-                    group_key = None
+                    transfer_type = transfer.transfer_type
+                    if transfer_type == TransferType.BROADCAST:
+                        dst_ranks = sorted({r for r, _ in transfer.dst_list})
+                        group_key = (transfer.src_rank, tuple(dst_ranks))
+                    else:
+                        group_key = None
 
-                chunk_shape = calculate_chunk_shape(target_num_slicers, target_tensor_shape)
-
-                # Pre-calculate slice_tuples for target position
+                # Pre-calculate slice_tuples
                 slice_tuples = ()
                 if target_slicer_tuples is not None:
                     slice_tuples = get_slice_from_multi_index(
-                        target_idx, target_num_slicers_extended, target_slicer_tuples
+                        dst_idx, target_num_slicers_extended, target_slicer_tuples
                     )
 
-                # Pre-calculate src_slice_tuples for self_copy source reading
+                # Pre-calculate src_slice_tuples for self_copy
                 src_slice_tuples = ()
                 if transfer_type == TransferType.SELF_COPY and source_slicer_tuples is not None:
                     src_slice_tuples = get_slice_from_multi_index(
-                        src_idx, source_num_slicers_extended, source_slicer_tuples
+                        transfer.src_idx, source_num_slicers_extended, source_slicer_tuples
                     )
 
                 target_chunk = TargetChunk(
                     chunk_id=chunk_id,
-                    chunk_shape=chunk_shape,
+                    chunk_shape=calculate_chunk_shape(target_num_slicers, target_tensor_shape),
                     transfer_type=transfer_type,
                     dst_rank=rank,
-                    dst_idx=target_idx,
-                    src_rank=src_rank,
-                    src_idx=src_idx,
+                    dst_idx=dst_idx,
+                    src_rank=transfer.src_rank,
+                    src_idx=transfer.src_idx,
                     group_key=group_key,
                     slice_tuples=slice_tuples,
                     src_slice_tuples=src_slice_tuples,
+                    stage_id=transfer.stage_id,
                 )
 
                 target_chunks.append(target_chunk)
