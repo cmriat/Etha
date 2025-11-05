@@ -4,7 +4,7 @@ import torch
 import msgspec
 import torch.distributed as dist
 
-from etha.comm.chunk_ops import Transfer, SourceChunk, TargetChunk
+from etha.comm.ir import Transfer, SourceChunk, TargetChunk
 
 
 class M2MTransfers(msgspec.Struct):

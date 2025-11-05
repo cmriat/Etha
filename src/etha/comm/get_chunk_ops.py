@@ -1,113 +1,15 @@
-"""Communication Lowering - Convert topology maps to IR chunks."""
+"""Convert transfer IR to chunk IR."""
 
 import torch
-from torch.distributed import ProcessGroup
-from torch.distributed.tensor import Placement, DeviceMesh
 
-from etha.comm.chunk_ops import SourceChunk, TargetChunk, logger
+from etha.comm.ir import SourceChunk, TargetChunk, logger
 
+from .ir import Transfer, SourceChunk, TargetChunk, TransferType
 from .utils import (
     get_slicer_tuples,
     get_slice_from_multi_index,
     get_or_create_process_group,
 )
-from .chunk_ops import Transfer, SourceChunk, TargetChunk, TransferType
-
-
-def get_m2m_transfers(
-    source_mesh: DeviceMesh,
-    source_placements: tuple[Placement, ...],
-    target_mesh: DeviceMesh,
-    target_placements: tuple[Placement, ...],
-    group: ProcessGroup,
-    device: str = "cpu",
-) -> list[Transfer]:
-    """Generate Transfer IR for mesh-to-mesh communication.
-
-    This is the primary user-facing function for generating a complete communication
-    plan. Each Transfer contains all necessary metadata including partitioning info.
-
-    Args:
-        source_mesh: Source device mesh
-        source_placements: Source tensor placements
-        target_mesh: Target device mesh
-        target_placements: Target tensor placements
-        group: Process group for communication
-        device: Device for execution ("cpu" or "cuda")
-
-    Returns:
-        List of Transfer objects with complete metadata
-    """
-    from .get_m2m_map import get_m2m_map
-
-    # Generate maps
-    forward_map, source_num_slicers, target_num_slicers = get_m2m_map(
-        source_mesh=source_mesh,
-        source_placements=source_placements,
-        target_mesh=target_mesh,
-        target_placements=target_placements,
-        group=group,
-        device=device,
-    )
-
-    # Convert to Transfer IR
-    return map_to_transfers(forward_map, source_num_slicers, target_num_slicers)
-
-
-def map_to_transfers(
-    forward_map: dict[int, dict[tuple, list[tuple[int, tuple]]]],
-    source_num_slicers: list[int],
-    target_num_slicers: list[int],
-) -> list[Transfer]:
-    """Convert forward_map to Transfer IR with complete metadata.
-
-    Args:
-        forward_map: src_rank -> {src_idx: [(dst_rank, dst_idx), ...]}
-        source_num_slicers: Partitioning of source tensor
-        target_num_slicers: Partitioning of target tensor
-
-    Returns:
-        List of Transfer objects with complete metadata (excluding self-copy)
-    """
-    transfers = []
-    for src_rank in sorted(forward_map.keys()):
-        for src_idx in sorted(forward_map[src_rank].keys()):
-            dst_list = forward_map[src_rank][src_idx]
-
-            other_dsts = [(r, idx) for r, idx in dst_list if r != src_rank]
-
-            if other_dsts:
-                # Determine transfer type based on number of destinations
-                transfer_type = TransferType.BROADCAST if len(other_dsts) > 1 else TransferType.P2P
-
-                transfers.append(
-                    Transfer(
-                        src_rank=src_rank,
-                        src_idx=src_idx,
-                        dst_list=other_dsts,
-                        transfer_type=transfer_type,
-                        source_num_slicers=source_num_slicers,
-                        target_num_slicers=target_num_slicers,
-                    )
-                )
-
-    return transfers
-
-
-def assign_pipeline_stages(
-    transfers: list[Transfer],
-    chunks_per_stage: int = 4,
-) -> None:
-    """Assign pipeline stage IDs to transfers for pipelined execution.
-
-    Args:
-        transfers: List of Transfer objects to assign stages to
-        chunks_per_stage: Number of operations per pipeline stage
-    """
-    sorted_transfers = sorted(transfers, key=lambda t: (t.src_rank, t.src_idx))
-
-    for i, transfer in enumerate(sorted_transfers):
-        transfer.stage_id = i // chunks_per_stage
 
 
 def calculate_chunk_shape(
@@ -196,18 +98,13 @@ def transfers_to_chunks(
 
     source_chunks: list[SourceChunk] = []
     target_chunks: list[TargetChunk] = []
-    chunk_id = 0
 
     # === Generate SourceChunks from transfers where src_rank == rank ===
     for transfer in transfers:
         if transfer.src_rank == rank:
-            # Determine group_key for broadcast
-            group_key = None
-            if transfer.transfer_type == TransferType.BROADCAST:
-                dst_ranks = sorted({r for r, _ in transfer.dst_list})
-                group_key = (rank, tuple(dst_ranks))
+            dst_ranks = sorted({r for r, _ in transfer.dst_list})
+            group_key = (rank, tuple(dst_ranks)) if transfer.transfer_type == TransferType.BROADCAST else None
 
-            # Pre-calculate slice_tuples
             slice_tuples = ()
             if source_slicer_tuples is not None:
                 slice_tuples = get_slice_from_multi_index(
@@ -215,19 +112,17 @@ def transfers_to_chunks(
                 )
 
             source_chunk = SourceChunk(
-                chunk_id=chunk_id,
                 chunk_shape=calculate_chunk_shape(source_num_slicers, source_tensor_shape),
                 transfer_type=transfer.transfer_type,
                 src_rank=rank,
                 src_idx=transfer.src_idx,
-                dst_ranks=sorted({r for r, _ in transfer.dst_list}),
+                dst_ranks=dst_ranks,
                 group_key=group_key,
                 slice_tuples=slice_tuples,
                 stage_id=transfer.stage_id,
             )
 
             source_chunks.append(source_chunk)
-            chunk_id += 1
 
     # === Generate TargetChunks from transfers===
     for transfer in transfers:
@@ -259,7 +154,6 @@ def transfers_to_chunks(
                     )
 
                 target_chunk = TargetChunk(
-                    chunk_id=chunk_id,
                     chunk_shape=calculate_chunk_shape(target_num_slicers, target_tensor_shape),
                     transfer_type=transfer_type,
                     dst_rank=rank,
@@ -273,7 +167,6 @@ def transfers_to_chunks(
                 )
 
                 target_chunks.append(target_chunk)
-                chunk_id += 1
 
     return source_chunks, target_chunks
 
@@ -303,9 +196,9 @@ def bind_tensors_to_chunks(
     if source_tensor is not None:
         for chunk in source_chunks:
             chunk.tensor = source_tensor
-            logger.debug(f"Bound source tensor to chunk {chunk.chunk_id}")
+            logger.debug("Bound source tensor to chunk")
 
     if target_tensor is not None:
         for chunk in target_chunks:
             chunk.tensor = target_tensor
-            logger.debug(f"Bound target tensor to chunk {chunk.chunk_id}")
+            logger.debug("Bound target tensor to chunk")

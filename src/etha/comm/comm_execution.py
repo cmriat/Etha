@@ -2,8 +2,8 @@
 
 import torch.distributed as dist
 
+from .ir import SourceChunk, TargetChunk, TransferType
 from .utils import get_or_create_process_group
-from .chunk_ops import SourceChunk, TargetChunk, TransferType
 
 
 def _prepare_send_buffer(chunk: SourceChunk) -> None:
@@ -17,9 +17,7 @@ def _prepare_send_buffer(chunk: SourceChunk) -> None:
             pass
         case _:
             if chunk.tensor is None:
-                raise ValueError(
-                    f"SourceChunk {chunk.chunk_id} has no tensor bound. Call bind_tensors_to_chunks() first."
-                )
+                raise ValueError("SourceChunk has no tensor bound. Call bind_tensors_to_chunks() first.")
             chunk.buffer = chunk.tensor[chunk.slice_tuples].contiguous()
 
 
@@ -30,7 +28,7 @@ def _prepare_recv_buffer(chunk: TargetChunk) -> None:
         chunk: TargetChunk to prepare.
     """
     if chunk.tensor is None:
-        raise ValueError(f"TargetChunk {chunk.chunk_id} has no tensor bound. Call bind_tensors_to_chunks() first.")
+        raise ValueError("TargetChunk has no tensor bound. Call bind_tensors_to_chunks() first.")
 
     match chunk.transfer_type:
         case TransferType.SELF_COPY:

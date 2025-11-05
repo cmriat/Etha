@@ -114,12 +114,12 @@ def get_m2m_map(
     for req in reqs:
         req.wait()
 
-    forward_map = defaultdict(lambda: defaultdict(list))
+    m2m_map = defaultdict(lambda: defaultdict(list))
 
     if rank in target_mesh_ranks:
         dtensor_target = distribute_tensor(full_tensor_restored, target_mesh, target_placements, src_data_rank=None)
         local_target_shard = dtensor_target.to_local()
-        logger.debug(f"[P2P Map rank={rank}] Local Target Shard: {local_target_shard}")
+        logger.debug(f"[M2M Map rank={rank}] Local Target Shard: {local_target_shard}")
         # Calculate the same base used for encoding
         # Use middle_tensor_shape to ensure consistent base across all ranks
         base = max(middle_tensor_shape) + 1
@@ -144,29 +144,26 @@ def get_m2m_map(
             source_indices.reverse()
             source_idx = tuple(source_indices)
 
-            # Build forward_map: source_rank -> {source_idx: [(target_rank, target_idx)]}
             target_rank = rank
-            forward_map[source_rank][source_idx].append((target_rank, target_idx))
+            m2m_map[source_rank][source_idx].append((target_rank, target_idx))
 
-    # Convert defaultdict to regular dict for serialization
-    # Always create dicts, even if empty, to ensure all ranks have data
-    forward_map_regular = {}
-    for k, v in forward_map.items():
-        forward_map_regular[k] = dict(v)
+    m2m_map_regular = {}
+    for k, v in m2m_map.items():
+        m2m_map_regular[k] = dict(v)
 
-    all_forward_maps = [None] * (len(source_mesh_ranks) + len(target_mesh_ranks))
-    dist.all_gather_object(all_forward_maps, forward_map_regular, group=group)
+    all_m2m_maps = [None] * (len(source_mesh_ranks) + len(target_mesh_ranks))
+    dist.all_gather_object(all_m2m_maps, m2m_map_regular, group=group)
 
-    merged_forward_map = defaultdict(lambda: defaultdict(list))
-    for rank_forward_map in all_forward_maps:
-        if rank_forward_map is not None:
-            for source_rank, source_idx_map in rank_forward_map.items():
+    merged_m2m_map = defaultdict(lambda: defaultdict(list))
+    for rank_m2m_map in all_m2m_maps:
+        if rank_m2m_map is not None:
+            for source_rank, source_idx_map in rank_m2m_map.items():
                 for source_idx, target_info_list in source_idx_map.items():
-                    merged_forward_map[source_rank][source_idx].extend(target_info_list)
+                    merged_m2m_map[source_rank][source_idx].extend(target_info_list)
 
     # Convert nested defaultdict to regular dict
-    final_forward_map = {}
-    for source_rank, source_idx_map in merged_forward_map.items():
-        final_forward_map[source_rank] = dict(source_idx_map)
+    final_m2m_map = {}
+    for source_rank, source_idx_map in merged_m2m_map.items():
+        final_m2m_map[source_rank] = dict(source_idx_map)
 
-    return final_forward_map, source_num_slicers, target_num_slicers
+    return final_m2m_map, source_num_slicers, target_num_slicers

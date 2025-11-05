@@ -11,10 +11,11 @@ from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 
 from etha.comm import (
     m2m_communicate,
+    get_m2m_transfers,
+    transfers_to_chunks,
     bind_tensors_to_chunks,
     gather_broadcast_communicate,
 )
-from etha.comm.get_chunk_ops import get_m2m_transfers, transfers_to_chunks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

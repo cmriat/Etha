@@ -29,7 +29,7 @@ class Transfer:
     src_idx: tuple  # Source multi-dimensional index
     dst_list: list[tuple[int, tuple]]  # [(dst_rank, dst_idx), ...]
     transfer_type: TransferType
-    stage_id: int = 0  # Pipeline stage (assigned later)
+    stage_id: int = 0  # Pipeline stage
 
     # Partitioning metadata for source and target tensors
     source_num_slicers: list[int]  # How source tensor is partitioned
@@ -46,9 +46,6 @@ class Transfer:
 @dataclass(slots=True, kw_only=True)
 class BaseChunk:
     """Base class for transfer chunks."""
-
-    # Identity
-    chunk_id: int  # Unique ID for this chunk
 
     # Shape info
     chunk_shape: tuple[int, ...]  # Shape of the data being transferred
@@ -91,7 +88,7 @@ class SourceChunk(BaseChunk):
     def __repr__(self) -> str:
         """Return a concise representation for debugging."""
         return (
-            f"SourceChunk(id={self.chunk_id}, "
+            f"SourceChunk("
             f"type={self.transfer_type.name[:3] if self.transfer_type else '???'}, "
             f"src={self.src_rank}→{self.dst_ranks}, "
             f"tensor={self.tensor is not None}, "
@@ -122,7 +119,7 @@ class TargetChunk(BaseChunk):
     def __repr__(self) -> str:
         """Return a concise representation for debugging."""
         return (
-            f"TargetChunk(id={self.chunk_id}, "
+            f"TargetChunk("
             f"type={self.transfer_type.name[:3] if self.transfer_type else '???'}, "
             f"src={self.src_rank}→dst={self.dst_rank}, "
             f"tensor={self.tensor is not None}, "
