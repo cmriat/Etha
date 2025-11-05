@@ -195,8 +195,5 @@ def execute_pipeline(
 
         # If nothing completed and we still have work, wait for at least one to complete
         if not completed_indices and in_flight:
-            # Block on the first in-flight chunk
-            chunk = in_flight[0]
-            if chunk.work is not None:
-                chunk.work.wait()
-            # Will be cleaned up in next iteration
+            chunk = in_flight.pop(0)
+            _cleanup_chunk(chunk)

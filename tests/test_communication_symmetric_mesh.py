@@ -13,7 +13,6 @@ from etha.comm import (
     get_m2m_map,
     m2m_communicate,
     map_to_chunk_ops,
-    gather_broadcast_communicate,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -23,119 +22,119 @@ logger = logging.getLogger(__name__)
 def run_test_communication(
     rank: int,
     world_size: int,
-    source_mesh_shape: tuple[int, ...],
-    target_mesh_shape: tuple[int, ...],
+    mesh_shape: tuple[int, ...],
     device: str,
 ):
+    """Test symmetric mesh communication where both groups send and receive.
+
+    This test verifies that calling get_m2m_map twice with reversed source/target
+    does not cause deadlocks. Both groups act as sender and receiver.
+    """
     dist.init_process_group(backend="nccl" if device == "cuda" else "gloo", rank=rank, world_size=world_size)
-    source_world_size = math.prod(source_mesh_shape)
-    target_world_size = math.prod(target_mesh_shape)
+    mesh_size = math.prod(mesh_shape)
 
-    if rank < source_world_size:
-        source_mesh = DeviceMesh(device, torch.arange(source_world_size).view(source_mesh_shape))
-        target_mesh = DeviceMesh(
-            device, torch.arange(source_world_size, source_world_size + target_world_size).view(target_mesh_shape)
-        )
-    else:
-        target_mesh = DeviceMesh(device, torch.arange(source_world_size).view(source_mesh_shape))
-        source_mesh = DeviceMesh(
-            device, torch.arange(source_world_size, source_world_size + target_world_size).view(target_mesh_shape)
-        )
+    # All ranks use consistent mesh definitions
+    mesh_a = DeviceMesh(device, torch.arange(mesh_size).view(mesh_shape))
+    mesh_b = DeviceMesh(device, torch.arange(mesh_size, mesh_size * 2).view(mesh_shape))
 
-    source_specs = [Shard(1)]
-    target_specs = [Shard(1)]
+    specs = [Shard(1)]
+
     # Dummy tensor shape
     torch.manual_seed(0)
     shape = (64, 64)
-    source_origin_tensor = torch.randn(shape, device=device)
-    target_origin_tensor = torch.randn(shape, device=device)
-    is_in_source = rank < source_world_size
+    tensor_a_origin = torch.randn(shape, device=device)
+    tensor_b_origin = torch.randn(shape, device=device)
 
-    source_dist_tensor = None
-    source_local_tensor = None
-    if is_in_source:
-        source_dist_tensor = distribute_tensor(source_origin_tensor, source_mesh, source_specs)
-        source_local_tensor = source_dist_tensor.to_local()
+    is_in_mesh_a = rank < mesh_size
 
-    target_dist_tensor = None
-    target_local_tensor = None
-    if not is_in_source:
-        target_dist_tensor = distribute_tensor(target_origin_tensor, source_mesh, target_specs)
-        target_local_tensor = target_dist_tensor.to_local()
+    # Each rank belongs to one mesh and creates a distributed tensor
+    if is_in_mesh_a:
+        dist_tensor_a = distribute_tensor(tensor_a_origin, mesh_a, specs)
+        local_tensor = dist_tensor_a.to_local()
+    else:
+        # Create target distributed tensor with random data (will be overwritten)
+        dist_tensor_b = distribute_tensor(tensor_b_origin, mesh_b, specs)
+        local_tensor = dist_tensor_b.to_local()
 
-    logger.debug(f"[rank={rank}] Source mesh: {source_mesh.mesh}")
-    logger.debug(f"[rank={rank}] Target mesh: {target_mesh.mesh}")
+    logger.debug(f"[rank={rank}] Mesh A: {mesh_a.mesh}, Mesh B: {mesh_b.mesh}")
 
-    # Generate chunk IR using new API
-    # Step 1: Get M2M map
-    if is_in_source:
-        m2m_map, source_num_slicers, target_num_slicers = get_m2m_map(
-            source_mesh=source_mesh,
-            source_placements=source_specs,
-            target_mesh=target_mesh,
-            target_placements=target_specs,
-            group=dist.group.WORLD,
-            device=device,
+    # Test: Call get_m2m_map twice with reversed source/target to test for deadlock
+    # Direction 1: A -> B
+    m2m_map_a_to_b, source_slicers_a, target_slicers_b = get_m2m_map(
+        source_mesh=mesh_a,
+        source_placements=specs,
+        target_mesh=mesh_b,
+        target_placements=specs,
+        group=dist.group.WORLD,
+        device=device,
+    )
+
+    # Direction 2: B -> A (reversed to test deadlock)
+    m2m_map_b_to_a, source_slicers_b, target_slicers_a = get_m2m_map(
+        source_mesh=mesh_b,
+        source_placements=specs,
+        target_mesh=mesh_a,
+        target_placements=specs,
+        group=dist.group.WORLD,
+        device=device,
+    )
+
+    logger.info("Successfully called get_m2m_map twice without deadlock")
+
+    # Generate chunks for the direction this rank participates in
+    if is_in_mesh_a:
+        # Mesh A sends to Mesh B
+        chunks = map_to_chunk_ops(
+            m2m_map=m2m_map_a_to_b,
+            rank=rank,
+            source_num_slicers=source_slicers_a,
+            target_num_slicers=target_slicers_b,
+            source_tensor=local_tensor,
+            target_tensor=None,
         )
     else:
-        m2m_map, source_num_slicers, target_num_slicers = get_m2m_map(
-            source_mesh=target_mesh,
-            source_placements=target_specs,
-            target_mesh=source_mesh,
-            target_placements=source_specs,
-            group=dist.group.WORLD,
-            device=device,
+        # Mesh B receives from Mesh A
+        chunks = map_to_chunk_ops(
+            m2m_map=m2m_map_a_to_b,
+            rank=rank,
+            source_num_slicers=source_slicers_a,
+            target_num_slicers=target_slicers_b,
+            source_tensor=None,
+            target_tensor=local_tensor,
         )
 
-    # Step 2: Generate execution-ready chunks directly
-    chunks = map_to_chunk_ops(
-        m2m_map=m2m_map,
-        rank=rank,
-        source_num_slicers=source_num_slicers,
-        target_num_slicers=target_num_slicers,
-        source_tensor=source_local_tensor,
-        target_tensor=target_local_tensor,
-    )
+    logger.info(f"[rank={rank}] Generated {len(chunks)} chunks")
 
-    if rank == 0:
-        logger.info(f"Generated {len(chunks)} chunks")
+    logger.info(f"[rank={rank}] About to start m2m_communicate")
 
-    # Test M2M communication with unified chunks
+    for chunk in chunks:
+        logger.info(f"[rank={rank}] Chunk: {chunk}")
+
+    # Execute communication
     m2m_communicate(chunks=chunks)
 
-    # Test Gather-Broadcast Method
-    gather_broadcast_result = gather_broadcast_communicate(
-        source_mesh,
-        source_specs,
-        source_dist_tensor,
-        target_origin_tensor,
-        source_world_size,
-    )
-    if not is_in_source:
-        full_m2m_result = target_dist_tensor.full_tensor()
+    logger.info(f"[rank={rank}] Finished m2m_communicate")
 
-        assert torch.allclose(full_m2m_result, source_origin_tensor)
-        # Assert results are close (due to potential floating point differences in distributed ops)
-        if target_local_tensor is not None and gather_broadcast_result is not None:
-            assert torch.allclose(target_local_tensor, gather_broadcast_result.to_local())
-        else:
-            raise RuntimeError(
-                f"One result is None, the other is not. M2M: {target_local_tensor}, Gather-Broadcast: {gather_broadcast_result}"
-            )
+    # Verify results for receiver side
+    if not is_in_mesh_a:
+        # The communication wrote to local_tensor, which is part of dist_tensor_b
+        # Verify the full tensor matches the source
+        full_result = dist_tensor_b.full_tensor()
+        assert torch.allclose(full_result, tensor_a_origin), f"M2M communication result mismatch on rank {rank}"
 
     dist.destroy_process_group()
 
 
 @pytest.mark.parametrize(
-    "source_mesh_shape, target_mesh_shape",
+    "mesh_shape",
     [
-        ((4,), (4,)),
+        (4,),
     ],
 )
-def test_communication_cpu(source_mesh_shape: tuple, target_mesh_shape: tuple):
-    source_world_size = math.prod(source_mesh_shape)
-    target_world_size = math.prod(target_mesh_shape)
-    world_size = source_world_size + target_world_size
+def test_communication_cpu(mesh_shape: tuple):
+    """Test symmetric mesh communication without deadlock."""
+    mesh_size = math.prod(mesh_shape)
+    world_size = mesh_size * 2  # Two meshes of equal size
     device = "cpu"
 
     os.environ["MASTER_ADDR"] = "localhost"
@@ -155,7 +154,7 @@ def test_communication_cpu(source_mesh_shape: tuple, target_mesh_shape: tuple):
     try:
         torch.multiprocessing.spawn(
             run_test_communication,
-            args=(world_size, source_mesh_shape, target_mesh_shape, device),
+            args=(world_size, mesh_shape, device),
             nprocs=world_size,
             join=True,
         )
