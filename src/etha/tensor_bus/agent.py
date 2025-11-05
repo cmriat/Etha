@@ -388,7 +388,7 @@ class TensorBusAgent:
                     logger.warning(f"Agent {self.rank}: No IR for tensor '{tensor_name}', skipping")
                     continue
 
-                logger.info(
+                logger.debug(
                     f"Agent {self.rank}: Transferring tensor_name: '{tensor_name}' tensor: {tensor.shape} for pair '{pair_name}' using chunk IR"
                 )
                 send_ir, recv_ir = pair_state.tensor_irs[tensor_name]
@@ -407,21 +407,21 @@ class TensorBusAgent:
                     source_local_tensor=tensor,
                     target_local_tensor=tensor,
                 )
-                logger.info(f"Agent {self.rank}: Transfered tensor_name: '{tensor_name}'")
+                logger.debug(f"Agent {self.rank}: Transfered tensor_name: '{tensor_name}'")
         else:
             # Fall back to simple send/recv without P2P optimization
             logger.info(
                 f"Agent {self.rank}: Using simple send/recv transfer for pair '{pair_name}' (no P2P map available)"
             )
             for tensor_name, tensor in pair_state.tensors.items():
-                logger.info(
+                logger.debug(
                     f"Agent {self.rank}: Transferring tensor_name: '{tensor_name}' tensor: {tensor.shape} for pair '{pair_name}' using simple send/recv"
                 )
                 if transfer_type == "send":
                     torch.distributed.send(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
                 elif transfer_type == "recv":
                     torch.distributed.recv(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
-                logger.info(f"Agent {self.rank}: Transfered tensor_name: '{tensor_name}'")
+                logger.debug(f"Agent {self.rank}: Transfered tensor_name: '{tensor_name}'")
 
         # Cleanup
         dist.barrier(group=pair_state.pair_group)
@@ -463,7 +463,7 @@ class TensorBusAgent:
         # Generate IR for this tensor if p2p_map exists and IR not yet generated
         if pair_state.m2m_map_send and pair_state.m2m_map_recv and tensor_name not in pair_state.tensor_irs:
             tensor_shape = tensor.shape
-            logger.info(
+            logger.debug(
                 f"Agent {self.rank}: Generating IR for tensor '{tensor_name}' with shape {tensor_shape} in pair '{pair_name}'"
             )
 
@@ -495,7 +495,7 @@ class TensorBusAgent:
                 (source_chunks_recv, target_chunks_recv),
             )
 
-            logger.info(
+            logger.debug(
                 f"Agent {self.rank}: Generated IR for tensor '{tensor_name}': "
                 f"send ({len(source_chunks_send)} src, {len(target_chunks_send)} tgt), "
                 f"recv ({len(source_chunks_recv)} src, {len(target_chunks_recv)} tgt)"

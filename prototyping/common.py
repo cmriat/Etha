@@ -21,7 +21,7 @@ HYBRID_DP_MP_PLACEMENTS = ("Replicate()", "Shard(dim=0)")  # Replicate params on
 
 # Strategy 2: Pure Model Parallel - column-wise sharding of model parameters
 PURE_MP_MESH_SHAPE = (4,)  # 1x4 mesh for 4 GPUs
-PURE_MP_PLACEMENTS = ("Shard(dim=1)",)  # Shard model parameters on column dimension (512)
+PURE_MP_PLACEMENTS = ("Shard(dim=0)",)  # Shard model parameters on column dimension (512)
 
 # TCPStore configuration
 TCPSTORE_HOST = "localhost"

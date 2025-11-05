@@ -3,9 +3,11 @@
 import os
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+import sys
 import time
 import logging
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import torch
 from common import PAIR_NAME, TENSOR_SHAPE, read_placement, get_mesh_config, get_queue_state_paths
 from torch.distributed._tensor import DeviceMesh, distribute_tensor
