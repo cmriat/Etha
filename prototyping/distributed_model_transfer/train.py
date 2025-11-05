@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from common import PAIR_NAME, read_placement, get_mesh_config, get_queue_state_paths
 from transformers import AutoModelForCausalLM
-from torch.distributed._tensor import DeviceMesh, distribute_tensor
+from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 
 from etha.tensor_bus import bootstrap_client
 
@@ -35,6 +35,7 @@ EXPECTED_WORLD_SIZE = 4
 
 # Distributed strategy configuration
 DISTRIBUTED_STRATEGY = os.environ.get("TRAINING_STRATEGY", "pure_mp")
+MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen3-30B-A3B")
 
 
 class DistributedTrainer:
@@ -48,7 +49,7 @@ class DistributedTrainer:
         self.setup_device_mesh()
 
         # Create model
-        self.model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-30B-A3B", dtype=torch.bfloat16)
+        self.model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.bfloat16)
         logger.info(f"Rank {rank}: Model created from pretrained model")
         self.model.to(device)
         logger.info(f"Rank {rank}: Model moved to device")
@@ -112,6 +113,8 @@ def main():
     tensor_names = []
     tensor_data = []
     for name, param in trainer.model.named_parameters():
+        if not isinstance(param, DTensor):
+            continue
         tensor_names.append(name)
         tensor_data.append(param.data.to_local())
 
