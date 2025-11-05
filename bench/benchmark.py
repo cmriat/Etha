@@ -136,7 +136,7 @@ def benchmark_single_shape(
     # M2M method warmup
     dist.barrier()
     for _ in range(warmup_iter):
-        m2m_communicate(source_chunks, target_chunks)
+        m2m_communicate(source_chunks, target_chunks, pipelined=True)
     if device == "cuda":
         torch.cuda.synchronize()
     dist.barrier()
@@ -144,7 +144,7 @@ def benchmark_single_shape(
     # M2M method benchmark
     start_time = time.perf_counter()
     for _ in range(profile_iter):
-        m2m_communicate(source_chunks, target_chunks)
+        m2m_communicate(source_chunks, target_chunks, pipelined=True)
     if device == "cuda":
         torch.cuda.synchronize()
     dist.barrier()

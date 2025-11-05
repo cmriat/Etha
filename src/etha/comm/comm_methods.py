@@ -8,7 +8,7 @@ from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
 from .ir import SourceChunk, TargetChunk
-from .comm_execution import execute_naive
+from .comm_execution import execute_naive, execute_pipelined
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ def gather_broadcast_communicate(
 def m2m_communicate(
     source_chunks: list[SourceChunk],
     target_chunks: list[TargetChunk],
+    pipelined: bool = False,
 ) -> None:
     """Execute mesh-to-mesh communication using pre-compiled chunk IR.
 
@@ -64,24 +65,8 @@ def m2m_communicate(
 
     Returns:
         None (result is written to target tensor in-place)
-
-    Example:
-        # Step 1: Generate chunk IR (planning phase)
-        chunks_src, chunks_tgt = map_to_chunk_ops(...)
-
-        # Step 2: Bind tensors (binding phase)
-        from etha.comm.chunk_ops import bind_tensors_to_chunks
-        bind_tensors_to_chunks(chunks_src, chunks_tgt, src_tensor, dst_tensor)
-
-        # Step 3: Execute transfer (execution phase)
-        m2m_communicate(chunks_src, chunks_tgt)
-
-        # Advanced: Batch multiple tensors
-        bind_tensors_to_chunks(chunks_a_src, chunks_a_tgt, tensor_a_src, tensor_a_dst)
-        bind_tensors_to_chunks(chunks_b_src, chunks_b_tgt, tensor_b_src, tensor_b_dst)
-
-        all_src = chunks_a_src + chunks_b_src
-        all_tgt = chunks_a_tgt + chunks_b_tgt
-        m2m_communicate(all_src, all_tgt)  # Execute all at once
     """
-    execute_naive(source_chunks=source_chunks, target_chunks=target_chunks)
+    if pipelined:
+        execute_pipelined(source_chunks=source_chunks, target_chunks=target_chunks)
+    else:
+        execute_naive(source_chunks=source_chunks, target_chunks=target_chunks)

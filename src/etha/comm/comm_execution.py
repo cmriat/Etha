@@ -1,5 +1,7 @@
 """Communication Executor - Execute transfer operations."""
 
+from collections import defaultdict
+
 import torch.distributed as dist
 
 from .ir import SourceChunk, TargetChunk, TransferType
@@ -155,13 +157,15 @@ def execute_naive(
 def execute_pipelined(
     source_chunks: list[SourceChunk],
     target_chunks: list[TargetChunk],
-    max_in_flight: int = 2,
 ) -> None:
     """Execute transfer with pipelining based on chunk stage IDs.
 
     Chunks are grouped by their stage_id field (assigned during planning).
     Multiple stages can be in-flight simultaneously, with max_in_flight
     controlling the pipeline depth for overlapped communication.
+
+    This implementation enables true overlap between prepare operations of stage N+1
+    and launch operations of stage N through simple 3-stage pipelining.
 
     Args:
         source_chunks: Chunks to send (must have .tensor bound and .stage_id set)
@@ -172,8 +176,6 @@ def execute_pipelined(
         stage_id is assigned during map_to_chunk_ops() via chunks_per_stage parameter.
         Paired send/recv operations are guaranteed to be in the same stage.
     """
-    from collections import defaultdict
-
     # Group chunks by stage_id
     src_by_stage = defaultdict(list)
     for chunk in source_chunks:
@@ -186,41 +188,44 @@ def execute_pipelined(
     # Get all stage IDs (sorted for deterministic execution)
     all_stages = sorted(set(src_by_stage.keys()) | set(tgt_by_stage.keys()))
 
-    # Pipeline state: [(stage_id, src_chunks, tgt_chunks), ...]
-    in_flight_stages = []
+    if not all_stages:
+        return
 
-    for stage_id in all_stages:
-        src_stage = src_by_stage.get(stage_id, [])
-        tgt_stage = tgt_by_stage.get(stage_id, [])
+    # === Prepare first stage buffers ===
+    first_stage_id = all_stages[0]
+    first_src = src_by_stage.get(first_stage_id, [])
+    first_tgt = tgt_by_stage.get(first_stage_id, [])
 
-        # === Phase 1: Prepare buffers ===
-        for chunk in src_stage:
-            _prepare_send_buffer(chunk)
-        for chunk in tgt_stage:
-            _prepare_recv_buffer(chunk)
+    for chunk in first_src:
+        _prepare_send_buffer(chunk)
+    for chunk in first_tgt:
+        _prepare_recv_buffer(chunk)
 
-        # === Phase 2: Launch async operations ===
-        for chunk in src_stage:
+    # === launch current, prepare next, wait current ===
+    for i in range(len(all_stages)):
+        current_stage_id = all_stages[i]
+        current_src = src_by_stage.get(current_stage_id, [])
+        current_tgt = tgt_by_stage.get(current_stage_id, [])
+
+        # Launch operations for current stage
+        for chunk in current_src:
             _launch_send(chunk)
-        for chunk in tgt_stage:
+        for chunk in current_tgt:
             _launch_recv(chunk)
 
-        # Add to in-flight queue
-        in_flight_stages.append((stage_id, src_stage, tgt_stage))
+        # Prepare next stage buffers while current stage is running (overlap!)
+        if i < len(all_stages) - 1:
+            next_stage_id = all_stages[i + 1]
+            next_src = src_by_stage.get(next_stage_id, [])
+            next_tgt = tgt_by_stage.get(next_stage_id, [])
 
-        # === Phase 3: Pipeline control - wait for oldest if pipeline is full ===
-        if len(in_flight_stages) >= max_in_flight:
-            # Wait for oldest stage to complete
-            old_stage_id, old_src, old_tgt = in_flight_stages.pop(0)
+            for chunk in next_src:
+                _prepare_send_buffer(chunk)
+            for chunk in next_tgt:
+                _prepare_recv_buffer(chunk)
 
-            for chunk in old_src:
-                _cleanup_send_chunk(chunk)
-            for chunk in old_tgt:
-                _assemble_chunk(chunk)
-
-    # === Phase 4: Drain pipeline - wait for all remaining stages ===
-    for _, src_stage, tgt_stage in in_flight_stages:
-        for chunk in src_stage:
+        # Wait for current stage operations to complete
+        for chunk in current_src:
             _cleanup_send_chunk(chunk)
-        for chunk in tgt_stage:
+        for chunk in current_tgt:
             _assemble_chunk(chunk)
