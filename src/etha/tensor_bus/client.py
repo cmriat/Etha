@@ -181,6 +181,9 @@ class TensorBusClient:
         self, pair_name: str, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
     ) -> posix_ipc.Semaphore:
         msg = Transfer(pair_name=pair_name, transfer_type=transfer_type)
+        logger.info(
+            f"TensorBusClient[{self.agent_rank}]: Sending transfer command for pair '{pair_name} {transfer_type}'"
+        )
         return self._execute_command_with_semaphore(msg, "transfer", pair_name, blocking=blocking, timeout=timeout)
 
     def query_transfer_signal(self, pair_name: str, blocking: bool = True, timeout: float = 30.0) -> bool:
@@ -205,7 +208,9 @@ class TensorBusClient:
     def register_tensor(
         self, pair_name: str, tensor_name: str, tensor: torch.Tensor, blocking: bool = True, timeout: float = 30.0
     ):
-        msg = RegisterTensor(pair_name=pair_name, tensor_name=tensor_name, tensor_payload=ForkingPickler.dumps(tensor))
+        msg = RegisterTensor(
+            pair_name=pair_name, tensor_name=tensor_name, tensor_payload=ForkingPickler.dumps(tensor.detach())
+        )
         return self._execute_command_with_semaphore(
             msg, "register_tensor", pair_name, blocking=blocking, timeout=timeout
         )
