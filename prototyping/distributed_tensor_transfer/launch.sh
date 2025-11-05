@@ -3,11 +3,11 @@
 set -e
 echo "🧹 Cleaning up old log and LMDB files..."
 
-rm -rf prototyping/distributed_tensor_transfer/logs/* -rf
+rm -rf prototyping/distributed_tensor_transfer/logs/*
 mkdir -p prototyping/distributed_tensor_transfer/logs
 
-rm -rf prototyping/distributed_tensor_transfer/dbs/* -rf
-mkdir -p prototyping/distributed_tensor_transfer/dbs
+rm -rf /tmp/dbs/*
+mkdir -p /tmp/dbs
 
 echo "🚀 Starting Agent processes (ranks 0-7)..."
 pixi run torchrun --nproc_per_node=8 --master-port=39500 prototyping/distributed_tensor_transfer/agent.py > prototyping/distributed_tensor_transfer/logs/agent.log 2>&1 &
