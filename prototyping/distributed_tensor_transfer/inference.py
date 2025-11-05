@@ -84,14 +84,14 @@ def main():
 
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Distributed Inference Worker starting...")
-    logger.info(f"  Local rank: {info.local_rank}")
+    logger.info(f"  Global rank: {info.global_rank}")
     logger.info(f"  Agent rank: {info.agent_rank}")
     logger.info(f"  CUDA device: {info.device}")
     logger.info(f"  Distributed strategy: {DISTRIBUTED_STRATEGY}")
     logger.info(f"{'=' * 60}\n")
 
     # Create distributed inference engine
-    engine = DistributedInferenceEngine(info.local_rank, info.device)
+    engine = DistributedInferenceEngine(info.global_rank, info.device)
 
     # Register pair for distributed tensor transfer
     logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")

@@ -13,6 +13,8 @@ from .client import TensorBusClient
 
 logger = logging.getLogger(__name__)
 
+GPU_PER_NODE = 8
+
 
 @dataclass
 class BootstrapInfo:
@@ -20,7 +22,7 @@ class BootstrapInfo:
 
     Attributes:
         agent_rank: The agent rank this worker is connected to
-        local_rank: Local rank within the worker process group (from torchrun)
+        global_rank: Global rank within the worker process group (from torchrun)
         rank_offset: Offset used for calculation (if applicable)
         device: CUDA device string (e.g., "cuda:0")
         command_queue_path: Path to Agent's CommandQueue LMDB
@@ -29,7 +31,7 @@ class BootstrapInfo:
     """
 
     agent_rank: int
-    local_rank: int
+    global_rank: int
     rank_offset: int | None
     device: str
     command_queue_path: str
@@ -67,23 +69,23 @@ def bootstrap_client(
         ConnectionError: If Agent is not found or not responding
     """
     # Step 1: Determine agent_rank from environment
+    global_rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
     if "AGENT_RANK" in os.environ:
         # Priority 1: Direct specification
-        agent_rank = int(os.environ["AGENT_RANK"])
-        local_rank = int(os.environ.get("LOCAL_RANK", agent_rank))
         rank_offset = None
+        agent_rank = int(os.environ["AGENT_RANK"])
         method = "direct"
 
         logger.info(f"Bootstrap: Using AGENT_RANK={agent_rank} (direct specification)")
     else:
-        # Priority 2: Calculate from LOCAL_RANK + AGENT_RANK_OFFSET
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        # Priority 2: Calculate from GLOBAL_RANK + AGENT_RANK_OFFSET
         rank_offset = int(os.environ.get("AGENT_RANK_OFFSET", 0))
-        agent_rank = local_rank + rank_offset
+        agent_rank = global_rank + rank_offset
         method = "offset"
 
         logger.info(
-            f"Bootstrap: Calculated agent_rank={agent_rank} (LOCAL_RANK={local_rank} + AGENT_RANK_OFFSET={rank_offset})"
+            f"Bootstrap: Calculated agent_rank={agent_rank} (GLOBAL_RANK={global_rank} + AGENT_RANK_OFFSET={rank_offset})"
         )
 
     # Step 2: Resolve LMDB paths
@@ -108,11 +110,14 @@ def bootstrap_client(
     )
 
     # Step 4: Create BootstrapInfo
-    device = f"cuda:{agent_rank}"
-    torch.cuda.set_device(device)
+    if rank_offset is not None and rank_offset < GPU_PER_NODE:
+        device = f"cuda:{agent_rank}"
+        torch.cuda.set_device(device)
+    else:
+        device = f"cuda:{local_rank}"
     info = BootstrapInfo(
         agent_rank=agent_rank,
-        local_rank=local_rank,
+        global_rank=global_rank,
         rank_offset=rank_offset,
         device=device,
         command_queue_path=command_queue_path,
