@@ -136,7 +136,7 @@ def _is_complete(chunk: SourceChunk | TargetChunk) -> bool:
 
 def execute_pipeline(
     chunks: list[SourceChunk | TargetChunk],
-    max_in_flight: int = 4,
+    max_in_flight: int = 8,
 ) -> None:
     """Execute chunks with polling-based producer-consumer pipeline.
 

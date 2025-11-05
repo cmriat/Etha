@@ -139,7 +139,16 @@ def test_communication_cpu(source_mesh_shape: tuple, target_mesh_shape: tuple):
     device = "cpu"
 
     os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29500"
+
+    # Find an available port dynamically
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+
+    os.environ["MASTER_PORT"] = str(port)
 
     # Use torch.multiprocessing.spawn to run the test in multiple processes
     # This is a common pattern for testing distributed PyTorch applications

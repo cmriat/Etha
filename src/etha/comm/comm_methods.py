@@ -48,7 +48,7 @@ def gather_broadcast_communicate(
 
 def m2m_communicate(
     chunks: list[SourceChunk | TargetChunk],
-    max_in_flight: int = 4,
+    max_in_flight: int = 8,
 ) -> None:
     """Execute mesh-to-mesh communication using pre-compiled chunk IR.
 
