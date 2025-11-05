@@ -2,7 +2,7 @@
 
 from .agent import TensorBusAgent
 from .client import PairHandler, TensorBusClient
-from .commands import Message, Transfer, QueryStatus, RegisterPair, RegisterTensor
+from .commands import Message, Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
 from .bootstrap import BootstrapInfo, bootstrap_client
 from .pair_state import PairState
 from .command_queue import CommandQueue
@@ -11,7 +11,7 @@ __all__ = [
     "Message",
     "Transfer",
     "RegisterPair",
-    "RegisterTensor",
+    "RegisterTensorBatch",
     "QueryStatus",
     "PairState",
     "CommandQueue",

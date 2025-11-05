@@ -74,7 +74,7 @@ class DistributedInferenceEngine:
     def distribute_model(self):
         """Distribute model."""
         for name, param in self.model.named_parameters():
-            dist_param = distribute_tensor(param, self.device_mesh, tuple(self.placements))
+            dist_param = nn.Parameter(distribute_tensor(param, self.device_mesh, tuple(self.placements)))
 
             self._assign_parameter(name, dist_param)
 
@@ -116,13 +116,20 @@ def main():
     )
     logger.info(f"✅ Pair '{PAIR_NAME}' registered successfully!")
     # Register the distributed tensor
-    sems = []
+    tensor_names = []
+    tensor_data = []
     for name, param in engine.model.named_parameters():
-        sem = handler.register_tensor(tensor_name=name, tensor=param.data.to_local(), blocking=False)
-        sems.append(sem)
-    for sem in sems:
-        sem.acquire()
-        sem.close()
+        tensor_names.append(name)
+        tensor_data.append(param.data.to_local())
+
+    # Batch register all tensors
+    sem = handler.register_tensor_batch(
+        tensor_names=tensor_names,
+        tensors=tensor_data,
+        blocking=False,
+    )
+    sem.acquire()
+    sem.close()
 
     logger.info(f"✅ Tensors for Pair '{PAIR_NAME}' registered successfully!")
 
