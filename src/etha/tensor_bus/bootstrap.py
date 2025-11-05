@@ -28,9 +28,9 @@ def setup_ptrace():
     libc = ctypes.CDLL("libc.so.6", use_errno=True)
     result = libc.prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0)
     if result == 0:
-        print("[Bootstrap] ✅ Ptrace authorized (ANY)")
+        logger.debug("[Bootstrap] Ptrace authorized (ANY)")
     else:
-        print(f"[Bootstrap] ⚠️  Ptrace setup failed: {result}")
+        logger.error(f"[Bootstrap] Ptrace setup failed: {result}")
 
 
 @dataclass
