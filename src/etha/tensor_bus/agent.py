@@ -417,11 +417,10 @@ class TensorBusAgent:
                 logger.info(
                     f"Agent {self.rank}: Transferring tensor_name: '{tensor_name}' tensor: {tensor.shape} for pair '{pair_name}' using simple send/recv"
                 )
-                for rank in pair_state.remote_ranks:
-                    if transfer_type == "send":
-                        torch.distributed.send(tensor, rank)
-                    elif transfer_type == "recv":
-                        torch.distributed.recv(tensor, rank)
+                if transfer_type == "send":
+                    torch.distributed.send(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
+                elif transfer_type == "recv":
+                    torch.distributed.recv(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
                 logger.info(f"Agent {self.rank}: Transfered tensor_name: '{tensor_name}'")
 
         # Cleanup

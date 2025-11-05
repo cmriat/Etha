@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import ctypes
 import logging
 from dataclasses import dataclass
 from collections.abc import Callable
@@ -14,6 +15,22 @@ from .client import TensorBusClient
 logger = logging.getLogger(__name__)
 
 GPU_PER_NODE = 8
+
+
+def setup_ptrace():
+    """Setup ptrace authorization for agent process.
+
+    For simplicity, we use PR_SET_PTRACER_ANY in this prototype.
+    In production, you'd authorize specific agent PIDs.
+    """
+    PR_SET_PTRACER = 0x59616D61
+    PR_SET_PTRACER_ANY = -1
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    result = libc.prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0)
+    if result == 0:
+        print("[Bootstrap] ✅ Ptrace authorized (ANY)")
+    else:
+        print(f"[Bootstrap] ⚠️  Ptrace setup failed: {result}")
 
 
 @dataclass
@@ -68,6 +85,8 @@ def bootstrap_client(
         ValueError: If required environment variables are missing
         ConnectionError: If Agent is not found or not responding
     """
+    # Step 0: Setup ptrace authorization
+    setup_ptrace()
     # Step 1: Determine agent_rank from environment
     global_rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -77,7 +96,7 @@ def bootstrap_client(
         agent_rank = int(os.environ["AGENT_RANK"])
         method = "direct"
 
-        logger.info(f"Bootstrap: Using AGENT_RANK={agent_rank} (direct specification)")
+        logger.info(f"[Bootstrap] Using AGENT_RANK={agent_rank} (direct specification)")
     else:
         # Priority 2: Calculate from GLOBAL_RANK + AGENT_RANK_OFFSET
         rank_offset = int(os.environ.get("AGENT_RANK_OFFSET", 0))
@@ -85,7 +104,7 @@ def bootstrap_client(
         method = "offset"
 
         logger.info(
-            f"Bootstrap: Calculated agent_rank={agent_rank} (GLOBAL_RANK={global_rank} + AGENT_RANK_OFFSET={rank_offset})"
+            f"[Bootstrap] Calculated agent_rank={agent_rank} (GLOBAL_RANK={global_rank} + AGENT_RANK_OFFSET={rank_offset})"
         )
 
     # Step 2: Resolve LMDB paths
@@ -97,9 +116,9 @@ def bootstrap_client(
         # Use custom naming function
         command_queue_path, state_path = path_naming_fn(agent_rank)
 
-    logger.info(f"Bootstrap: Resolved paths for Agent {agent_rank}")
-    logger.info(f"  CommandQueue: {command_queue_path}")
-    logger.info(f"  State: {state_path}")
+    logger.info(f"[Bootstrap] Resolved paths for Agent {agent_rank}")
+    logger.info(f"[Bootstrap]  CommandQueue: {command_queue_path}")
+    logger.info(f"[Bootstrap]  State: {state_path}")
 
     # Step 3: Create TensorBusClient
     client = TensorBusClient(
@@ -125,6 +144,6 @@ def bootstrap_client(
         method=method,
     )
 
-    logger.info(f"Bootstrap: Successfully initialized TensorBusClient (agent_rank={agent_rank}, method={method})")
+    logger.info(f"[Bootstrap] Successfully initialized TensorBusClient (agent_rank={agent_rank}, method={method})")
 
     return client, info
