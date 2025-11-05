@@ -1,9 +1,12 @@
 """Intermediate Representation for tensor transfer operations."""
 
+import logging
 from enum import Enum
 from dataclasses import dataclass
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class TransferType(Enum):
@@ -16,10 +19,7 @@ class TransferType(Enum):
 
 @dataclass(slots=True, kw_only=True)
 class BaseChunk:
-    """Base class for transfer chunks.
-
-    Shared fields for both send and receive operations.
-    """
+    """Base class for transfer chunks."""
 
     # Identity
     chunk_id: int  # Unique ID for this chunk
@@ -30,8 +30,14 @@ class BaseChunk:
     # Transfer method
     transfer_type: TransferType
 
+    # Tensor reference (None during planning, populated during binding)
+    tensor: torch.Tensor | None = None
+
     # Buffer management
     buffer: torch.Tensor | None = None
+
+    # Async work handle (None for SELF_COPY or before launch, populated during execution)
+    work: "torch.distributed.Work | None" = None
 
     slice_tuples: tuple[slice, ...] = ()  # Slice tuple for tensor indexing
 

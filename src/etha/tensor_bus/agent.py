@@ -15,7 +15,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
-from etha.comm import get_m2m_map, m2m_communicate
+from etha.comm import get_m2m_map, m2m_communicate, bind_tensors_to_chunks
 
 from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
 from .pair_state import M2MMap, PairState
@@ -382,6 +382,9 @@ class TensorBusAgent:
         if pair_state.tensor_irs:
             logger.info(f"Agent {self.rank}: Using optimized P2P transfer for pair '{pair_name}'")
 
+            all_source_chunks = []
+            all_target_chunks = []
+
             for tensor_name, tensor in pair_state.tensors.items():
                 if tensor_name not in pair_state.tensor_irs:
                     logger.warning(f"Agent {self.rank}: No IR for tensor '{tensor_name}', skipping")
@@ -398,15 +401,32 @@ class TensorBusAgent:
                     source_chunks, target_chunks = recv_ir
 
                 logger.debug(
-                    f"Agent {self.rank}: Using {len(source_chunks)} source chunks, {len(target_chunks)} target chunks"
+                    f"Agent {self.rank}: Binding {len(source_chunks)} source chunks, {len(target_chunks)} target chunks for tensor '{tensor_name}'"
                 )
-                m2m_communicate(
+
+                # Bind tensor references to chunks
+                bind_tensors_to_chunks(
                     source_chunks=source_chunks,
                     target_chunks=target_chunks,
-                    source_local_tensor=tensor,
-                    target_local_tensor=tensor,
+                    source_tensor=tensor,
+                    target_tensor=tensor,
                 )
-                logger.debug(f"Agent {self.rank}: Transfered tensor_name: '{tensor_name}'")
+
+                # Accumulate chunks for batch execution
+                all_source_chunks.extend(source_chunks)
+                all_target_chunks.extend(target_chunks)
+
+            # Execute all transfers in one batch
+            if all_source_chunks or all_target_chunks:
+                logger.info(
+                    f"Agent {self.rank}: Executing batch transfer with {len(all_source_chunks)} source chunks, "
+                    f"{len(all_target_chunks)} target chunks for {len(pair_state.tensors)} tensors"
+                )
+                m2m_communicate(
+                    source_chunks=all_source_chunks,
+                    target_chunks=all_target_chunks,
+                )
+                logger.info(f"Agent {self.rank}: Batch transfer completed for pair '{pair_name}'")
         else:
             # Fall back to simple send/recv without P2P optimization
             logger.info(

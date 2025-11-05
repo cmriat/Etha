@@ -2,6 +2,10 @@
 
 from collections import defaultdict
 
+import torch
+
+from etha.comm.chunk_ops import SourceChunk, TargetChunk, logger
+
 from .utils import (
     get_slicer_tuples,
     get_slice_from_multi_index,
@@ -216,3 +220,36 @@ def map_to_chunk_ops(
                 chunk_id += 1
 
     return source_chunks, target_chunks
+
+
+def bind_tensors_to_chunks(
+    source_chunks: list[SourceChunk],
+    target_chunks: list[TargetChunk],
+    source_tensor: torch.Tensor | None = None,
+    target_tensor: torch.Tensor | None = None,
+) -> None:
+    """Bind tensor references to chunks (in-place operation).
+
+    This function transitions chunks from planning phase (tensor-agnostic) to
+    execution phase (tensor-bound). After binding, chunks are self-contained
+    and can be executed without passing tensors separately.
+
+    Args:
+        source_chunks: List of source chunks to bind (modified in-place)
+        target_chunks: List of target chunks to bind (modified in-place)
+        source_tensor: Tensor to bind to source chunks (None for receiver-only ranks)
+        target_tensor: Tensor to bind to target chunks (None for sender-only ranks)
+
+    Note:
+        This is an in-place operation. After calling this function, the chunks'
+        .tensor field will reference the provided tensors.
+    """
+    if source_tensor is not None:
+        for chunk in source_chunks:
+            chunk.tensor = source_tensor
+            logger.debug(f"Bound source tensor to chunk {chunk.chunk_id}")
+
+    if target_tensor is not None:
+        for chunk in target_chunks:
+            chunk.tensor = target_tensor
+            logger.debug(f"Bound target tensor to chunk {chunk.chunk_id}")

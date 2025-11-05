@@ -14,6 +14,7 @@ from etha.comm import (
     get_m2m_map,
     m2m_communicate,
     map_to_chunk_ops,
+    bind_tensors_to_chunks,
     gather_broadcast_communicate,
 )
 
@@ -88,13 +89,11 @@ def run_test_communication(
     if rank == 0:
         logger.info(f"Generated {len(source_chunks)} source chunks, {len(target_chunks)} target chunks")
 
+    # Bind tensors to chunks
+    bind_tensors_to_chunks(source_chunks, target_chunks, source_local_tensor, target_local_tensor)
+
     # Test M2M communication with IR
-    m2m_communicate(
-        source_chunks,
-        target_chunks,
-        source_local_tensor,
-        target_local_tensor,
-    )
+    m2m_communicate(source_chunks, target_chunks)
 
     # Test Gather-Broadcast Method
     gather_broadcast_result = gather_broadcast_communicate(

@@ -1,164 +1,145 @@
 """Communication Executor - Execute transfer operations."""
 
-import torch
 import torch.distributed as dist
 
 from .utils import get_or_create_process_group
 from .chunk_ops import SourceChunk, TargetChunk, TransferType
 
 
-def _prepare_send_buffer(chunk: SourceChunk, local_tensor: torch.Tensor) -> None:
+def _prepare_send_buffer(chunk: SourceChunk) -> None:
     """Prepare send buffer for a single SourceChunk.
 
     Args:
-        chunk: SourceChunk to prepare
-        local_tensor: Source tensor to slice from
+        chunk: SourceChunk to prepare (must have .tensor bound)
     """
+    if chunk.tensor is None:
+        raise ValueError(f"SourceChunk {chunk.chunk_id} has no tensor bound. Call bind_tensors_to_chunks() first.")
+
     match chunk.transfer_type:
         case TransferType.SELF_COPY:
             pass
         case _:
-            data_slice = local_tensor[chunk.slice_tuples]
-            chunk.buffer = data_slice.contiguous()
+            chunk.buffer = chunk.tensor[chunk.slice_tuples].contiguous()
 
 
-def _prepare_recv_buffer(
-    chunk: TargetChunk,
-    source_local_tensor: torch.Tensor | None,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> None:
+def _prepare_recv_buffer(chunk: TargetChunk) -> None:
     """Prepare receive buffer for a single TargetChunk.
 
     Args:
-        chunk: TargetChunk to prepare
-        source_local_tensor: Source tensor for self-copy (can be None)
-        device: Device to allocate buffers on
-        dtype: Data type for buffers
+        chunk: TargetChunk to prepare (must have .tensor bound)
+    """
+    if chunk.tensor is None:
+        raise ValueError(f"TargetChunk {chunk.chunk_id} has no tensor bound. Call bind_tensors_to_chunks() first.")
+
+    match chunk.transfer_type:
+        case TransferType.SELF_COPY:
+            chunk.buffer = chunk.tensor[chunk.src_slice_tuples]
+        case _:
+            chunk.buffer = chunk.tensor[chunk.slice_tuples].contiguous()
+
+
+def _launch_send(chunk: SourceChunk) -> None:
+    """Launch async send operation, store work handle in chunk.
+
+    Args:
+        chunk: SourceChunk with buffer prepared (modified in-place)
     """
     match chunk.transfer_type:
         case TransferType.SELF_COPY:
-            chunk.buffer = source_local_tensor[chunk.src_slice_tuples]
-        case _:
-            chunk.buffer = torch.empty(chunk.chunk_shape, dtype=dtype, device=device)
-
-
-def _launch_send(chunk: SourceChunk) -> dist.Work:
-    """Launch async send operation for a SourceChunk.
-
-    Args:
-        chunk: SourceChunk with buffer prepared
-
-    Returns:
-        Work handle for async operation
-    """
-    match chunk.transfer_type:
+            chunk.work = None
         case TransferType.BROADCAST:
-            # Broadcast to multiple ranks
             group_ranks = [chunk.src_rank] + chunk.dst_ranks
             group = get_or_create_process_group(group_ranks)
-            return dist.broadcast(tensor=chunk.buffer, src=chunk.src_rank, group=group, async_op=True)
+            chunk.work = dist.broadcast(tensor=chunk.buffer, src=chunk.src_rank, group=group, async_op=True)
         case TransferType.P2P:
-            # P2P send to single rank
             assert len(chunk.dst_ranks) == 1, f"P2P should have exactly 1 dst_rank, got {len(chunk.dst_ranks)}"
-            return dist.isend(tensor=chunk.buffer, dst=chunk.dst_ranks[0])
-        case _:
-            raise ValueError(f"Unknown transfer type for send: {chunk.transfer_type}")
+            chunk.work = dist.isend(tensor=chunk.buffer, dst=chunk.dst_ranks[0])
 
 
-def _launch_recv(chunk: TargetChunk) -> dist.Work:
-    """Launch async receive operation for a TargetChunk.
+def _launch_recv(chunk: TargetChunk) -> None:
+    """Launch async receive operation, store work handle in chunk.
 
     Args:
-        chunk: TargetChunk with buffer allocated
-
-    Returns:
-        Work handle for async operation
+        chunk: TargetChunk with buffer allocated (modified in-place)
     """
     match chunk.transfer_type:
+        case TransferType.SELF_COPY:
+            chunk.work = None
         case TransferType.BROADCAST:
             group_ranks = [chunk.src_rank] + list(chunk.group_key[1]) if chunk.group_key else [chunk.src_rank]
             group = get_or_create_process_group(group_ranks)
-            return dist.broadcast(tensor=chunk.buffer, src=chunk.src_rank, group=group, async_op=True)
+            chunk.work = dist.broadcast(tensor=chunk.buffer, src=chunk.src_rank, group=group, async_op=True)
         case TransferType.P2P:
-            return dist.irecv(tensor=chunk.buffer, src=chunk.src_rank)
-        case _:
-            raise ValueError(f"Unknown transfer type for recv: {chunk.transfer_type}")
+            chunk.work = dist.irecv(tensor=chunk.buffer, src=chunk.src_rank)
 
 
-def _assemble_chunk(
-    chunk: TargetChunk,
-    final_tensor: torch.Tensor,
-) -> None:
-    """Assemble a chunk into the final tensor.
+def _assemble_chunk(chunk: TargetChunk) -> None:
+    """Wait for recv to complete, assemble chunk into final tensor, and cleanup.
 
     Args:
-        chunk: TargetChunk to assemble
-        final_tensor: Destination tensor
+        chunk: TargetChunk to assemble (must have .tensor bound)
     """
-    if chunk.buffer is None:
-        return
-    final_tensor[chunk.slice_tuples].copy_(chunk.buffer)
-    chunk.buffer = None  # Free buffer reference
+    # Wait for async recv to complete
+    if chunk.work is not None:
+        chunk.work.wait()
+        chunk.work = None
+
+    chunk.tensor[chunk.slice_tuples].copy_(chunk.buffer)
+    chunk.buffer = None
+
+
+def _cleanup_send_chunk(chunk: SourceChunk) -> None:
+    """Wait for send to complete and cleanup buffer.
+
+    Args:
+        chunk: SourceChunk to cleanup
+    """
+    # Wait for async send to complete
+    if chunk.work is not None:
+        chunk.work.wait()
+        chunk.work = None
+
+    chunk.buffer = None
 
 
 def execute_naive(
     source_chunks: list[SourceChunk],
     target_chunks: list[TargetChunk],
-    source_local_tensor: torch.Tensor | None,
-    target_local_tensor: torch.Tensor | None,
 ) -> None:
     """Execute transfer in naive mode: prepare → launch all → wait all → assemble.
 
-    Pure function - all state is in parameters or local variables.
+    Pure function - all state is in chunk objects (including tensor references and work handles).
+
+    IMPORTANT: Chunks must have tensor references bound via bind_tensors_to_chunks()
+    before calling this function.
 
     Args:
-        source_chunks: Chunks to send
-        target_chunks: Chunks to receive
-        source_local_tensor: Source tensor for slicing and self-copy
-        target_local_tensor: Final assembled tensor (can be None for sender-only)
+        source_chunks: Chunks to send (must have .tensor bound)
+        target_chunks: Chunks to receive (must have .tensor bound)
+
+    Raises:
+        ValueError: If chunks do not have tensor references bound
     """
-    if source_local_tensor is None and target_local_tensor is None:
-        raise ValueError("Both source_local_tensor and target_local_tensor are None")
-    if target_local_tensor is not None:
-        device = target_local_tensor.device
-        dtype = target_local_tensor.dtype
-    if source_local_tensor is not None:
-        device = source_local_tensor.device
-        dtype = source_local_tensor.dtype
+    # TODO: may have mixed send/recv roles, should keep order to avoid deadlock
+    # TODO: optimize with pipelining
 
     # === Phase 1: Prepare buffers ===
     for chunk in source_chunks:
-        _prepare_send_buffer(chunk, source_local_tensor)
+        _prepare_send_buffer(chunk)
 
     for chunk in target_chunks:
-        _prepare_recv_buffer(chunk, source_local_tensor, device, dtype)
+        _prepare_recv_buffer(chunk)
 
-    # === Phase 2: Launch sends ===
-    send_works: dict[int, dist.Work] = {}
-
+    # === Phase 2: Launch all async operations ===
     for chunk in source_chunks:
-        work = _launch_send(chunk)
-        send_works[chunk.chunk_id] = work
-
-    # === Phase 3: Launch receives ===
-    recv_works: dict[int, dist.Work] = {}
+        _launch_send(chunk)
 
     for chunk in target_chunks:
-        match chunk.transfer_type:
-            case TransferType.SELF_COPY:
-                continue
-            case _:
-                work = _launch_recv(chunk)
-                recv_works[chunk.chunk_id] = work
+        _launch_recv(chunk)
 
-    # === Phase 4: Wait all ===
-    for work in recv_works.values():
-        work.wait()
-    for work in send_works.values():
-        work.wait()
+    # === Phase 3: Wait + cleanup (each chunk completes its lifecycle) ===
+    for chunk in source_chunks:
+        _cleanup_send_chunk(chunk)
 
-    # === Phase 5: Assemble final tensor ===
-    if target_local_tensor is not None:
-        for chunk in target_chunks:
-            _assemble_chunk(chunk, target_local_tensor)
+    for chunk in target_chunks:
+        _assemble_chunk(chunk)

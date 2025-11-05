@@ -16,6 +16,7 @@ from etha.comm import (
     get_m2m_map,
     m2m_communicate,
     map_to_chunk_ops,
+    bind_tensors_to_chunks,
     gather_broadcast_communicate,
 )
 
@@ -130,15 +131,13 @@ def benchmark_single_shape(
     """
     tensor_size_bytes = origin_tensor.nelement() * origin_tensor.element_size()
 
+    # Bind tensors to chunks once (reused for both warmup and benchmark)
+    bind_tensors_to_chunks(source_chunks, target_chunks, source_local_tensor, target_local_tensor)
+
     # M2M method warmup
     dist.barrier()
     for _ in range(warmup_iter):
-        m2m_communicate(
-            source_chunks,
-            target_chunks,
-            source_local_tensor,
-            target_local_tensor,
-        )
+        m2m_communicate(source_chunks, target_chunks)
     if device == "cuda":
         torch.cuda.synchronize()
     dist.barrier()
@@ -146,12 +145,7 @@ def benchmark_single_shape(
     # M2M method benchmark
     start_time = time.perf_counter()
     for _ in range(profile_iter):
-        m2m_communicate(
-            source_chunks,
-            target_chunks,
-            source_local_tensor,
-            target_local_tensor,
-        )
+        m2m_communicate(source_chunks, target_chunks)
     if device == "cuda":
         torch.cuda.synchronize()
     dist.barrier()

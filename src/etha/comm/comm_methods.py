@@ -49,28 +49,39 @@ def gather_broadcast_communicate(
 def m2m_communicate(
     source_chunks: list[SourceChunk],
     target_chunks: list[TargetChunk],
-    source_local_tensor: torch.Tensor | None,
-    target_local_tensor: torch.Tensor | None,
 ) -> None:
     """Execute mesh-to-mesh communication using pre-compiled chunk IR.
 
-    This is the execution phase - performs actual data transfer based on IR.
+    This function performs the execution phase of mesh-to-mesh communication.
+    Chunks must have tensor references bound before calling this function.
 
-    IMPORTANT: This function modifies target_local_tensor IN-PLACE.
+    IMPORTANT: Call bind_tensors_to_chunks() before this function to attach
+    tensor references to chunks.
 
     Args:
-        source_chunks: Chunks this rank needs to SEND (from map_to_chunk_ir)
-        target_chunks: Chunks this rank needs to RECEIVE (from map_to_chunk_ir)
-        source_local_tensor: Local tensor to send from (can be None for receiver-only)
-        target_local_tensor: Local tensor to receive into (modified in-place, can be None for sender-only)
+        source_chunks: Chunks to send (must have .tensor bound)
+        target_chunks: Chunks to receive (must have .tensor bound)
 
     Returns:
-        None (result is written to target_local_tensor in-place)
+        None (result is written to target tensor in-place)
+
+    Example:
+        # Step 1: Generate chunk IR (planning phase)
+        chunks_src, chunks_tgt = map_to_chunk_ops(...)
+
+        # Step 2: Bind tensors (binding phase)
+        from etha.comm.chunk_ops import bind_tensors_to_chunks
+        bind_tensors_to_chunks(chunks_src, chunks_tgt, src_tensor, dst_tensor)
+
+        # Step 3: Execute transfer (execution phase)
+        m2m_communicate(chunks_src, chunks_tgt)
+
+        # Advanced: Batch multiple tensors
+        bind_tensors_to_chunks(chunks_a_src, chunks_a_tgt, tensor_a_src, tensor_a_dst)
+        bind_tensors_to_chunks(chunks_b_src, chunks_b_tgt, tensor_b_src, tensor_b_dst)
+
+        all_src = chunks_a_src + chunks_b_src
+        all_tgt = chunks_a_tgt + chunks_b_tgt
+        m2m_communicate(all_src, all_tgt)  # Execute all at once
     """
-    # Execute transfer
-    execute_naive(
-        source_chunks=source_chunks,
-        target_chunks=target_chunks,
-        source_local_tensor=source_local_tensor,
-        target_local_tensor=target_local_tensor,
-    )
+    execute_naive(source_chunks=source_chunks, target_chunks=target_chunks)
