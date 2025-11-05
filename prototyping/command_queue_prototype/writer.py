@@ -19,7 +19,7 @@ from multiprocessing.reduction import ForkingPickler
 import torch
 from shared import LMDB_QUEUE_PATH
 
-from etha.tensor_bus import CommandQueue, RegisterTensor
+from etha.tensor_bus import CommandQueue, RegisterTensorBatch
 
 # Constants for ptrace authorization
 PR_SET_PTRACER = 0x59616D61
@@ -64,13 +64,15 @@ def main():
     # Store tensor payload in LMDB storage
     payload = ForkingPickler.dumps(t)
 
-    # Send RegisterTensor command via CommandQueue
+    # Send RegisterTensorBatch command via CommandQueue
     queue = CommandQueue(LMDB_QUEUE_PATH)
-    msg = RegisterTensor(pair_name="pair_0", tensor_name=tensor_id, tensor_payload=payload, timestamp=time.time())
+    msg = RegisterTensorBatch(
+        pair_name="pair_0", tensor_name=[tensor_id], tensor_payload=[payload], timestamp=time.time()
+    )
     queue.enqueue(msg)
     queue.close()
 
-    print(f"[writer] ✅ Sent RegisterTensor via CommandQueue")
+    print(f"[writer] ✅ Sent RegisterTensorBatch via CommandQueue")
     print(f"  Message fields: pair_name, tensor_name, tensor_payload, timestamp")
     print(f"  Tensor metadata (shape, dtype, device, ptr) in pickled payload")
     print(f"\n[writer] Now start reader.py in another terminal:")

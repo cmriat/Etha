@@ -25,26 +25,10 @@ class Transfer(BaseCommand):
     transfer_type: Literal["send", "recv"]
 
 
-class RegisterTensor(BaseCommand):
-    """Register a tensor for zero-copy sharing between processes.
-
-    The tensor payload (pickled via PyTorch's ForkingPickler) is stored
-    in LMDB at tensor_name. The pickled payload contains all tensor
-    metadata (shape, dtype, device, CUDA pointer, etc.).
-
-    This message only contains the minimal metadata needed to locate
-    and authorize access to the tensor.
-    """
-
-    pair_name: str
-    tensor_name: str
-    tensor_payload: memoryview
-
-
 class RegisterTensorBatch(BaseCommand):
     """Register multiple tensors for zero-copy sharing between processes.
 
-    Batch version of RegisterTensor for improved efficiency when registering
+    Batch Register Tensors for improved efficiency when registering
     multiple tensors. Reduces LMDB cross-process communication overhead by
     sending all tensors in a single command instead of multiple individual commands.
     """
@@ -87,4 +71,4 @@ class QueryStatus(BaseCommand):
     state_name: str
 
 
-Message = Transfer | RegisterTensor | RegisterTensorBatch | RegisterPair | QueryStatus
+Message = Transfer | RegisterTensorBatch | RegisterPair | QueryStatus

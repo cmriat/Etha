@@ -18,7 +18,7 @@ from torch.distributed.tensor.placement_types import Placement
 from etha.comm import get_m2m_map, m2m_communicate
 from etha.comm.get_chunk_ir import map_to_chunk_ir
 
-from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensor, RegisterTensorBatch
+from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
 from .pair_state import M2MMap, PairState
 from .command_queue import CommandQueue
 
@@ -121,8 +121,6 @@ class TensorBusAgent:
                     self._handle_transfer(command)
                 case QueryStatus():
                     self._handle_query_status(command)
-                case RegisterTensor():
-                    self._handle_register_tensor(command)
                 case RegisterTensorBatch():
                     self._handle_register_tensor_batch(command)
                 case _:
@@ -450,58 +448,6 @@ class TensorBusAgent:
 
         with self.state_env.begin(write=True, db=self.state_db) as txn:
             txn.put(statedb_key, msgspec.msgpack.encode(state))
-
-    def _handle_register_tensor(self, msg: RegisterTensor):
-        pair_name = msg.pair_name
-        tensor_name = msg.tensor_name
-        tensor = ForkingPickler.loads(msg.tensor_payload)
-
-        if pair_name not in self.pairs:
-            raise ValueError(f"RegisterTensor for unknown pair: {pair_name}")
-
-        pair_state = self.pairs[pair_name]
-        pair_state.tensors[tensor_name] = tensor
-
-        # Generate IR for this tensor if p2p_map exists and IR not yet generated
-        if pair_state.m2m_map_send and pair_state.m2m_map_recv and tensor_name not in pair_state.tensor_irs:
-            tensor_shape = tensor.shape
-            logger.debug(
-                f"Agent {self.rank}: Generating IR for tensor '{tensor_name}' with shape {tensor_shape} in pair '{pair_name}'"
-            )
-
-            # Generate send IR
-            source_chunks_send, target_chunks_send = map_to_chunk_ir(
-                forward_map=pair_state.m2m_map_send.forward_map,
-                reverse_map=pair_state.m2m_map_send.reverse_map,
-                source_num_slicers=pair_state.m2m_map_send.source_num_slicers,
-                target_num_slicers=pair_state.m2m_map_send.target_num_slicers,
-                source_tensor_shape=tensor_shape,
-                target_tensor_shape=tensor_shape,
-                rank=self.rank,
-            )
-
-            # Generate recv IR
-            source_chunks_recv, target_chunks_recv = map_to_chunk_ir(
-                forward_map=pair_state.m2m_map_recv.forward_map,
-                reverse_map=pair_state.m2m_map_recv.reverse_map,
-                source_num_slicers=pair_state.m2m_map_recv.source_num_slicers,
-                target_num_slicers=pair_state.m2m_map_recv.target_num_slicers,
-                source_tensor_shape=tensor_shape,
-                target_tensor_shape=tensor_shape,
-                rank=self.rank,
-            )
-
-            # Store IR
-            pair_state.tensor_irs[tensor_name] = (
-                (source_chunks_send, target_chunks_send),
-                (source_chunks_recv, target_chunks_recv),
-            )
-
-            logger.debug(
-                f"Agent {self.rank}: Generated IR for tensor '{tensor_name}': "
-                f"send ({len(source_chunks_send)} src, {len(target_chunks_send)} tgt), "
-                f"recv ({len(source_chunks_recv)} src, {len(target_chunks_recv)} tgt)"
-            )
 
     def _handle_register_tensor_batch(self, msg: RegisterTensorBatch):
         """Handle RegisterTensorBatch command for batch tensor registration."""

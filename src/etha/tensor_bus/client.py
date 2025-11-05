@@ -19,7 +19,7 @@ import posix_ipc
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
-from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensor, RegisterTensorBatch
+from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
@@ -205,16 +205,6 @@ class TensorBusClient:
             else:
                 return False
 
-    def register_tensor(
-        self, pair_name: str, tensor_name: str, tensor: torch.Tensor, blocking: bool = True, timeout: float = 30.0
-    ):
-        msg = RegisterTensor(
-            pair_name=pair_name, tensor_name=tensor_name, tensor_payload=ForkingPickler.dumps(tensor.detach())
-        )
-        return self._execute_command_with_semaphore(
-            msg, "register_tensor", pair_name, blocking=blocking, timeout=timeout
-        )
-
     def register_tensor_batch(
         self,
         pair_name: str,
@@ -376,7 +366,9 @@ class PairHandler:
 
     def register_tensor(self, tensor_name: str, tensor: torch.Tensor, blocking: bool = False, timeout: float = 30.0):
         """Register a tensor to the pair."""
-        return self.client.register_tensor(self.pair_name, tensor_name, tensor, blocking=blocking, timeout=timeout)
+        return self.client.register_tensor_batch(
+            pair_name=self.pair_name, tensor_names=[tensor_name], tensors=[tensor], blocking=blocking, timeout=timeout
+        )
 
     def register_tensor_batch(
         self, tensor_names: list[str], tensors: list[torch.Tensor], blocking: bool = False, timeout: float = 30.0
