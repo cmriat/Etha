@@ -15,10 +15,10 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
-from etha.comm import m2m_communicate, get_m2m_transfers, transfers_to_chunks, bind_tensors_to_chunks
+from etha.comm import get_m2m_map, m2m_communicate, map_to_chunk_ops
 
-from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensor
-from .pair_state import PairState, M2MTransfers
+from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
+from .pair_state import M2MMap, PairState
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
@@ -259,10 +259,10 @@ class TensorBusAgent:
                 second_placements = local_placements
             logger.info(f"Agent {self.rank}: Generating M2M maps for pair '{pair_name}'")
 
-            # Generate M2M Transfers (topology layer, shape-independent)
+            # Generate M2M Maps (topology layer, shape-independent)
             # IMPORTANT: All ranks must call in the same order to avoid deadlock
             # First call: first_mesh -> second_mesh
-            transfers_1 = get_m2m_transfers(
+            map_1, src_slicers_1, tgt_slicers_1 = get_m2m_map(
                 source_mesh=first_mesh,
                 source_placements=first_placements,
                 target_mesh=second_mesh,
@@ -271,7 +271,7 @@ class TensorBusAgent:
                 device="cuda",
             )
             # Second call: second_mesh -> first_mesh
-            transfers_2 = get_m2m_transfers(
+            map_2, src_slicers_2, tgt_slicers_2 = get_m2m_map(
                 source_mesh=second_mesh,
                 source_placements=second_placements,
                 target_mesh=first_mesh,
@@ -282,11 +282,27 @@ class TensorBusAgent:
 
             # Assign to send/recv based on which mesh is local
             if local_is_first:
-                m2m_map_send = M2MTransfers(transfers_send=transfers_1)
-                m2m_map_recv = M2MTransfers(transfers_recv=transfers_2)
+                m2m_map_send = M2MMap(
+                    m2m_map=map_1,
+                    source_num_slicers=src_slicers_1,
+                    target_num_slicers=tgt_slicers_1,
+                )
+                m2m_map_recv = M2MMap(
+                    m2m_map=map_2,
+                    source_num_slicers=src_slicers_2,
+                    target_num_slicers=tgt_slicers_2,
+                )
             else:
-                m2m_map_send = M2MTransfers(transfers_send=transfers_2)
-                m2m_map_recv = M2MTransfers(transfers_recv=transfers_1)
+                m2m_map_send = M2MMap(
+                    m2m_map=map_2,
+                    source_num_slicers=src_slicers_2,
+                    target_num_slicers=tgt_slicers_2,
+                )
+                m2m_map_recv = M2MMap(
+                    m2m_map=map_1,
+                    source_num_slicers=src_slicers_1,
+                    target_num_slicers=tgt_slicers_1,
+                )
 
             logger.info(f"Agent {self.rank}: Generated P2P maps for pair '{pair_name}'")
         else:
@@ -303,8 +319,8 @@ class TensorBusAgent:
             local_group=dist.new_group(local_ranks),
             pair_group=pair_group,
             status="matched",
-            transfers_send=m2m_map_send,
-            transfers_recv=m2m_map_recv,
+            m2m_send=m2m_map_send,
+            m2m_recv=m2m_map_recv,
         )
         self.pairs[pair_name] = state
 
@@ -356,56 +372,24 @@ class TensorBusAgent:
 
         logger.info(f"Agent {self.rank}: All ranks ready for transfer")
 
-        # Transfer tensors using per-tensor IR if available, otherwise fall back to simple send/recv
+        # Transfer tensors using chunk IR if available, otherwise fall back to simple send/recv
         pair_state = self.pairs[pair_name]
 
-        if pair_state.tensor_irs:
+        if pair_state.send_chunks is not None and pair_state.recv_chunks is not None:
             logger.info(f"Agent {self.rank}: Using optimized P2P transfer for pair '{pair_name}'")
 
-            all_source_chunks = []
-            all_target_chunks = []
+            if transfer_type == "send":
+                chunks = pair_state.send_chunks
+            else:
+                chunks = pair_state.recv_chunks
 
-            for tensor_name, tensor in pair_state.tensors.items():
-                if tensor_name not in pair_state.tensor_irs:
-                    logger.warning(f"Agent {self.rank}: No IR for tensor '{tensor_name}', skipping")
-                    continue
-
-                logger.debug(
-                    f"Agent {self.rank}: Transferring tensor_name: '{tensor_name}' tensor: {tensor.shape} for pair '{pair_name}' using chunk IR"
-                )
-                send_ir, recv_ir = pair_state.tensor_irs[tensor_name]
-
-                if transfer_type == "send":
-                    source_chunks, target_chunks = send_ir
-                else:
-                    source_chunks, target_chunks = recv_ir
-
-                logger.debug(
-                    f"Agent {self.rank}: Binding {len(source_chunks)} source chunks, {len(target_chunks)} target chunks for tensor '{tensor_name}'"
-                )
-
-                # Bind tensor references to chunks
-                bind_tensors_to_chunks(
-                    source_chunks=source_chunks,
-                    target_chunks=target_chunks,
-                    source_tensor=tensor,
-                    target_tensor=tensor,
-                )
-
-                # Accumulate chunks for batch execution
-                all_source_chunks.extend(source_chunks)
-                all_target_chunks.extend(target_chunks)
-
-            # Execute all transfers in one batch
-            if all_source_chunks or all_target_chunks:
+            # Execute all transfers in one batch using new unified pipeline
+            if chunks:
                 logger.info(
-                    f"Agent {self.rank}: Executing batch transfer with {len(all_source_chunks)} source chunks, "
-                    f"{len(all_target_chunks)} target chunks for {len(pair_state.tensors)} tensors"
+                    f"Agent {self.rank}: Executing batch transfer with {len(chunks)} chunks "
+                    f"for {len(pair_state.tensors)} tensors"
                 )
-                m2m_communicate(
-                    source_chunks=all_source_chunks,
-                    target_chunks=all_target_chunks,
-                )
+                m2m_communicate(chunks=chunks)
                 logger.info(f"Agent {self.rank}: Batch transfer completed for pair '{pair_name}'")
         else:
             # Fall back to simple send/recv without P2P optimization
@@ -459,64 +443,53 @@ class TensorBusAgent:
 
         pair_state = self.pairs[pair_name]
 
-        # Generate IR for this tensor if p2p_map exists and IR not yet generated
-        if pair_state.transfers_send and pair_state.transfers_recv and tensor_name not in pair_state.tensor_irs:
-            tensor_shape = tensor.shape
-            logger.info(
-                f"Agent {self.rank}: Generating IR for tensor '{tensor_name}' with shape {tensor_shape} in pair '{pair_name}'"
-            )
+        logger.info(
+            f"Agent {self.rank}: Starting batch registration of {len(tensor_names)} tensors for pair '{pair_name}'"
+        )
 
-            # Generate send IR
-            source_chunks_send, target_chunks_send = transfers_to_chunks(
-                transfers=pair_state.transfers_send.transfers_send,
-                rank=self.rank,
-                source_tensor_shape=tensor_shape,
-                target_tensor_shape=tensor_shape,
-            )
+        # Unified chunk lists (no source/target separation)
+        all_send_chunks = []
+        all_recv_chunks = []
 
-            # Generate recv IR
-            source_chunks_recv, target_chunks_recv = transfers_to_chunks(
-                transfers=pair_state.transfers_recv.transfers_recv,
-                rank=self.rank,
-                source_tensor_shape=tensor_shape,
-                target_tensor_shape=tensor_shape,
-            )
+        for tensor_name, tensor_payload in zip(tensor_names, tensor_payloads, strict=True):
+            tensor = ForkingPickler.loads(tensor_payload)
+            pair_state.tensors[tensor_name] = tensor
 
-                # Generate send IR
-                source_chunks_send, target_chunks_send = map_to_chunk_ir(
-                    forward_map=pair_state.m2m_map_send.forward_map,
-                    reverse_map=pair_state.m2m_map_send.reverse_map,
-                    source_num_slicers=pair_state.m2m_map_send.source_num_slicers,
-                    target_num_slicers=pair_state.m2m_map_send.target_num_slicers,
-                    source_tensor_shape=tensor_shape,
-                    target_tensor_shape=tensor_shape,
-                    rank=self.rank,
-                )
-
-                # Generate recv IR
-                source_chunks_recv, target_chunks_recv = map_to_chunk_ir(
-                    forward_map=pair_state.m2m_map_recv.forward_map,
-                    reverse_map=pair_state.m2m_map_recv.reverse_map,
-                    source_num_slicers=pair_state.m2m_map_recv.source_num_slicers,
-                    target_num_slicers=pair_state.m2m_map_recv.target_num_slicers,
-                    source_tensor_shape=tensor_shape,
-                    target_tensor_shape=tensor_shape,
-                    rank=self.rank,
-                )
-
-                # Store IR
-                pair_state.tensor_irs[tensor_name] = (
-                    (source_chunks_send, target_chunks_send),
-                    (source_chunks_recv, target_chunks_recv),
-                )
-
+            if pair_state.m2m_send and pair_state.m2m_recv:
                 logger.debug(
-                    f"Agent {self.rank}: Generated IR for tensor '{tensor_name}': "
-                    f"send ({len(source_chunks_send)} src, {len(target_chunks_send)} tgt), "
-                    f"recv ({len(source_chunks_recv)} src, {len(target_chunks_recv)} tgt)"
+                    f"Agent {self.rank}: Generating chunks for tensor '{tensor_name}' with shape {tensor.shape}"
                 )
 
-        logger.info(f"Agent {self.rank}: Completed batch registration of {len(tensor_names)} tensors")
+                # Generate send chunks for this tensor
+                send_chunks = map_to_chunk_ops(
+                    m2m_map=pair_state.m2m_send.m2m_map,
+                    rank=self.rank,
+                    source_num_slicers=pair_state.m2m_send.source_num_slicers,
+                    target_num_slicers=pair_state.m2m_send.target_num_slicers,
+                    source_tensor=tensor,
+                    target_tensor=tensor,
+                )
+                all_send_chunks.extend(send_chunks)
+
+                # Generate recv chunks for this tensor
+                recv_chunks = map_to_chunk_ops(
+                    m2m_map=pair_state.m2m_recv.m2m_map,
+                    rank=self.rank,
+                    source_num_slicers=pair_state.m2m_recv.source_num_slicers,
+                    target_num_slicers=pair_state.m2m_recv.target_num_slicers,
+                    source_tensor=tensor,
+                    target_tensor=tensor,
+                )
+                all_recv_chunks.extend(recv_chunks)
+
+        # Store unified chunk lists directly on pair state
+        pair_state.send_chunks = all_send_chunks
+        pair_state.recv_chunks = all_recv_chunks
+
+        logger.info(
+            f"Agent {self.rank}: Completed batch registration of {len(tensor_names)} tensors for pair '{pair_name}': "
+            f"send ({len(all_send_chunks)} chunks), recv ({len(all_recv_chunks)} chunks)"
+        )
 
     def _collect_mesh_placement_info(
         self, pair_name: str, ranks: list[int]

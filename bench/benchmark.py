@@ -13,10 +13,9 @@ from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_t
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from etha.comm import (
+    get_m2m_map,
     m2m_communicate,
-    get_m2m_transfers,
-    transfers_to_chunks,
-    bind_tensors_to_chunks,
+    map_to_chunk_ops,
     gather_broadcast_communicate,
 )
 
@@ -110,8 +109,7 @@ def benchmark_single_shape(
     target_dist_tensor,  # noqa
     shape: tuple,
     origin_tensor: torch.Tensor,
-    source_chunks,
-    target_chunks,
+    chunks: list,
     current_source_mesh: DeviceMesh,
     current_target_mesh: DeviceMesh,
     source_specs: list,  # noqa
@@ -136,7 +134,7 @@ def benchmark_single_shape(
     # M2M method warmup
     dist.barrier()
     for _ in range(warmup_iter):
-        m2m_communicate(source_chunks, target_chunks, pipelined=True)
+        m2m_communicate(chunks=chunks)
     if device == "cuda":
         torch.cuda.synchronize()
     dist.barrier()
@@ -144,7 +142,7 @@ def benchmark_single_shape(
     # M2M method benchmark
     start_time = time.perf_counter()
     for _ in range(profile_iter):
-        m2m_communicate(source_chunks, target_chunks, pipelined=True)
+        m2m_communicate(chunks=chunks)
     if device == "cuda":
         torch.cuda.synchronize()
     dist.barrier()
@@ -374,7 +372,7 @@ def main():
             torch.cuda.synchronize()
         dist.barrier()
         start_time = time.perf_counter()
-        transfers = get_m2m_transfers(
+        m2m_map, source_num_slicers, target_num_slicers = get_m2m_map(
             source_mesh=current_source_mesh,
             source_placements=source_specs,
             target_mesh=current_target_mesh,
@@ -384,7 +382,7 @@ def main():
         )
         map_time = (time.perf_counter() - start_time) / profile_iter
         if rank == 0:
-            print(f"get_m2m_transfers time: {map_time}")
+            print(f"get_m2m_map time: {map_time}")
         for shape in tensor_shapes:
             print(f"  Benchmarking tensor shape: {shape}...")
             torch.manual_seed(0)
@@ -409,31 +407,19 @@ def main():
 
             start_time = time.perf_counter()
 
-            # Extract shape from actual distributed tensors
-            # Only use shape if tensor is non-empty (contains data)
-            # Empty tensors (shape contains 0) indicate rank not in mesh
-            source_tensor_shape = None
-            target_tensor_shape = None
-            if source_local_tensor is not None and 0 not in source_local_tensor.shape:
-                source_tensor_shape = tuple(source_local_tensor.shape)
-            if target_local_tensor is not None and 0 not in target_local_tensor.shape:
-                target_tensor_shape = tuple(target_local_tensor.shape)
-
-            source_chunks, target_chunks = transfers_to_chunks(
-                transfers=transfers,
+            chunks = map_to_chunk_ops(
+                m2m_map=m2m_map,
                 rank=rank,
-                source_tensor_shape=source_tensor_shape,
-                target_tensor_shape=target_tensor_shape,
+                source_num_slicers=source_num_slicers,
+                target_num_slicers=target_num_slicers,
+                source_tensor=source_local_tensor,
+                target_tensor=target_local_tensor,
             )
-            # For source ranks, they need a target tensor for self-copy operations
-            # Use the source tensor as target tensor for self-copy
-            effective_target_tensor = target_local_tensor if target_local_tensor is not None else source_local_tensor
-            bind_tensors_to_chunks(source_chunks, target_chunks, source_local_tensor, effective_target_tensor)
 
             ir_gen_time = (time.perf_counter() - start_time) / profile_iter
             if rank == 0:
                 print(f"    IR generation time: {ir_gen_time:.6f}s")
-                print(f"    Generated {len(source_chunks)} source chunks, {len(target_chunks)} target chunks")
+                print(f"    Generated {len(chunks)} chunks")
 
             result = benchmark_single_shape(
                 source_local_tensor,
@@ -442,8 +428,7 @@ def main():
                 target_dist_tensor,
                 shape,
                 origin_tensor,
-                source_chunks,
-                target_chunks,
+                chunks,
                 current_source_mesh,
                 current_target_mesh,
                 source_specs,
@@ -461,7 +446,7 @@ def main():
                 current_results.append(result)
 
             # Clean up tensors after each shape benchmark
-            del origin_tensor, source_dist_tensor, source_chunks, target_chunks
+            del origin_tensor, source_dist_tensor, chunks
             if device == "cuda":
                 torch.cuda.empty_cache()
 

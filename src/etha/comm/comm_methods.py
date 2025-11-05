@@ -8,7 +8,7 @@ from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
 from .ir import SourceChunk, TargetChunk
-from .comm_execution import execute_naive, execute_pipelined
+from .comm_execution import execute_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -47,26 +47,19 @@ def gather_broadcast_communicate(
 
 
 def m2m_communicate(
-    source_chunks: list[SourceChunk],
-    target_chunks: list[TargetChunk],
-    pipelined: bool = False,
+    chunks: list[SourceChunk | TargetChunk],
+    max_in_flight: int = 4,
 ) -> None:
     """Execute mesh-to-mesh communication using pre-compiled chunk IR.
 
-    This function performs the execution phase of mesh-to-mesh communication.
+    Uses polling-based producer-consumer pipeline for dynamic execution.
     Chunks must have tensor references bound before calling this function.
 
-    IMPORTANT: Call bind_tensors_to_chunks() before this function to attach
-    tensor references to chunks.
-
     Args:
-        source_chunks: Chunks to send (must have .tensor bound)
-        target_chunks: Chunks to receive (must have .tensor bound)
+        chunks: Unified list of SourceChunk and TargetChunk operations
+        max_in_flight: Maximum chunks in prepared+in_flight queues
 
     Returns:
         None (result is written to target tensor in-place)
     """
-    if pipelined:
-        execute_pipelined(source_chunks=source_chunks, target_chunks=target_chunks)
-    else:
-        execute_naive(source_chunks=source_chunks, target_chunks=target_chunks)
+    execute_pipeline(chunks=chunks, max_in_flight=max_in_flight)

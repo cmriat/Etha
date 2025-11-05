@@ -1,7 +1,5 @@
 """Communication Executor - Execute transfer operations."""
 
-from collections import defaultdict
-
 import torch.distributed as dist
 
 from .ir import SourceChunk, TargetChunk, TransferType
@@ -105,127 +103,100 @@ def _cleanup_send_chunk(chunk: SourceChunk) -> None:
     chunk.buffer = None
 
 
-def execute_naive(
-    source_chunks: list[SourceChunk],
-    target_chunks: list[TargetChunk],
-) -> None:
-    """Execute transfer in naive mode: prepare → launch all → wait all → assemble.
-
-    Pure function - all state is in chunk objects (including tensor references and work handles).
-
-    IMPORTANT: Chunks must have tensor references bound via bind_tensors_to_chunks()
-    before calling this function.
-
-    Args:
-        source_chunks: Chunks to send (must have .tensor bound)
-        target_chunks: Chunks to receive (must have .tensor bound)
-
-    Raises:
-        ValueError: If chunks do not have tensor references bound
-    """
-    # Sort chunks by (src_rank, dst_rank) to ensure consistent order across all ranks
-    # This prevents deadlocks in P2P communication
-    sorted_source_chunks = sorted(
-        source_chunks, key=lambda c: (c.src_rank, min(c.dst_ranks) if c.dst_ranks else c.src_rank)
-    )
-    sorted_target_chunks = sorted(target_chunks, key=lambda c: (c.src_rank, c.dst_rank))
-
-    # === Phase 1: Prepare buffers ===
-    for chunk in sorted_source_chunks:
+def _prepare_chunk(chunk: SourceChunk | TargetChunk) -> None:
+    """Prepare buffer for a chunk (polymorphic)."""
+    if isinstance(chunk, SourceChunk):
         _prepare_send_buffer(chunk)
-
-    for chunk in sorted_target_chunks:
+    else:
         _prepare_recv_buffer(chunk)
 
-    # === Phase 2: Launch all async operations ===
-    # Important: Launch all sends first, then all receives to avoid deadlock
-    for chunk in sorted_source_chunks:
-        _launch_send(chunk)
 
-    for chunk in sorted_target_chunks:
+def _launch_chunk(chunk: SourceChunk | TargetChunk) -> None:
+    """Launch async operation for a chunk (polymorphic)."""
+    if isinstance(chunk, SourceChunk):
+        _launch_send(chunk)
+    else:
         _launch_recv(chunk)
 
-    # === Phase 3: Wait for all receives first, then sends ===
-    # This ensures receivers are ready before senders complete
-    for chunk in sorted_target_chunks:
+
+def _cleanup_chunk(chunk: SourceChunk | TargetChunk) -> None:
+    """Cleanup and assemble chunk (polymorphic)."""
+    if isinstance(chunk, SourceChunk):
+        _cleanup_send_chunk(chunk)
+    else:
         _assemble_chunk(chunk)
 
-    for chunk in sorted_source_chunks:
-        _cleanup_send_chunk(chunk)
+
+def _is_complete(chunk: SourceChunk | TargetChunk) -> bool:
+    """Check if async operation is complete."""
+    if chunk.work is None:
+        return True
+    return chunk.work.is_completed()
 
 
-def execute_pipelined(
-    source_chunks: list[SourceChunk],
-    target_chunks: list[TargetChunk],
+def execute_pipeline(
+    chunks: list[SourceChunk | TargetChunk],
+    max_in_flight: int = 4,
 ) -> None:
-    """Execute transfer with pipelining based on chunk stage IDs.
+    """Execute chunks with polling-based producer-consumer pipeline.
 
-    Chunks are grouped by their stage_id field (assigned during planning).
-    Multiple stages can be in-flight simultaneously, with max_in_flight
-    controlling the pipeline depth for overlapped communication.
+    Three queues:
+    - candidate: chunks waiting to be prepared
+    - prepared: chunks with buffers ready, waiting to launch
+    - in_flight: chunks with async operations running
 
-    This implementation enables true overlap between prepare operations of stage N+1
-    and launch operations of stage N through simple 3-stage pipelining.
+    Constraint: len(prepared) + len(in_flight) <= max_in_flight
+
+    This enables true overlap between buffer preparation and async operations
+    without relying on stage_id grouping.
 
     Args:
-        source_chunks: Chunks to send (must have .tensor bound and .stage_id set)
-        target_chunks: Chunks to receive (must have .tensor bound and .stage_id set)
-        max_in_flight: Maximum number of stages in-flight simultaneously
-
-    Note:
-        stage_id is assigned during map_to_chunk_ops() via chunks_per_stage parameter.
-        Paired send/recv operations are guaranteed to be in the same stage.
+        chunks: Unified list of SourceChunk and TargetChunk operations
+        max_in_flight: Maximum combined size of prepared + in_flight queues
     """
-    # Group chunks by stage_id
-    src_by_stage = defaultdict(list)
-    for chunk in source_chunks:
-        src_by_stage[chunk.stage_id].append(chunk)
-
-    tgt_by_stage = defaultdict(list)
-    for chunk in target_chunks:
-        tgt_by_stage[chunk.stage_id].append(chunk)
-
-    # Get all stage IDs (sorted for deterministic execution)
-    all_stages = sorted(set(src_by_stage.keys()) | set(tgt_by_stage.keys()))
-
-    if not all_stages:
+    if not chunks:
         return
 
-    # === Prepare first stage buffers ===
-    first_stage_id = all_stages[0]
-    first_src = src_by_stage.get(first_stage_id, [])
-    first_tgt = tgt_by_stage.get(first_stage_id, [])
+    # Initialize three queues
+    candidate = chunks.copy()  # shallow copy
+    prepared: list[SourceChunk | TargetChunk] = []
+    in_flight: list[SourceChunk | TargetChunk] = []
 
-    for chunk in first_src:
-        _prepare_send_buffer(chunk)
-    for chunk in first_tgt:
-        _prepare_recv_buffer(chunk)
+    # Pre-fill prepared queue up to max_in_flight
+    while candidate and len(prepared) < max_in_flight:
+        chunk = candidate.pop(0)
+        _prepare_chunk(chunk)
+        prepared.append(chunk)
 
-    # === launch current, prepare next, wait current ===
-    for i in range(len(all_stages)):
-        current_stage_id = all_stages[i]
-        current_src = src_by_stage.get(current_stage_id, [])
-        current_tgt = tgt_by_stage.get(current_stage_id, [])
+    # Main polling loop
+    while prepared or in_flight or candidate:
+        # Launch prepared chunks if there's room in in_flight
+        while prepared:
+            chunk = prepared.pop(0)
+            _launch_chunk(chunk)
+            in_flight.append(chunk)
 
-        # Launch operations for current stage
-        for chunk in current_src:
-            _launch_send(chunk)
-        for chunk in current_tgt:
-            _launch_recv(chunk)
+        # Poll in_flight for completions (non-blocking)
+        completed_indices = []
+        for i, chunk in enumerate(in_flight):
+            if _is_complete(chunk):
+                completed_indices.append(i)
 
-        # Prepare next stage buffers while current stage is running (overlap!)
-        if i < len(all_stages) - 1:
-            next_stage_id = all_stages[i + 1]
-            next_src = src_by_stage.get(next_stage_id, [])
-            next_tgt = tgt_by_stage.get(next_stage_id, [])
+        # Clean up completed chunks (iterate in reverse to maintain indices)
+        for i in reversed(completed_indices):
+            chunk = in_flight.pop(i)
+            _cleanup_chunk(chunk)
 
-            for chunk in next_src:
-                _prepare_send_buffer(chunk)
-            for chunk in next_tgt:
-                _prepare_recv_buffer(chunk)
+        # Prepare more chunks if we have space
+        while candidate and len(prepared) < max_in_flight:
+            chunk = candidate.pop(0)
+            _prepare_chunk(chunk)
+            prepared.append(chunk)
 
-        # Wait for current stage operations to complete
-        for chunk in current_src:
-            _cleanup_send_chunk(chunk)
-        for chunk in current_tgt:
-            _assemble_chunk(chunk)
+        # If nothing completed and we still have work, wait for at least one to complete
+        if not completed_indices and in_flight:
+            # Block on the first in-flight chunk
+            chunk = in_flight[0]
+            if chunk.work is not None:
+                chunk.work.wait()
+            # Will be cleaned up in next iteration

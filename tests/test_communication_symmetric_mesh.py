@@ -10,10 +10,9 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 
 from etha.comm import (
+    get_m2m_map,
     m2m_communicate,
-    get_m2m_transfers,
-    transfers_to_chunks,
-    bind_tensors_to_chunks,
+    map_to_chunk_ops,
     gather_broadcast_communicate,
 )
 
@@ -67,10 +66,10 @@ def run_test_communication(
     logger.debug(f"[rank={rank}] Source mesh: {source_mesh.mesh}")
     logger.debug(f"[rank={rank}] Target mesh: {target_mesh.mesh}")
 
-    # Generate chunk IR using new Transfer-based API
-    # Step 1: Get transfers using the new API
+    # Generate chunk IR using new API
+    # Step 1: Get M2M map
     if is_in_source:
-        transfers = get_m2m_transfers(
+        m2m_map, source_num_slicers, target_num_slicers = get_m2m_map(
             source_mesh=source_mesh,
             source_placements=source_specs,
             target_mesh=target_mesh,
@@ -79,7 +78,7 @@ def run_test_communication(
             device=device,
         )
     else:
-        transfers = get_m2m_transfers(
+        m2m_map, source_num_slicers, target_num_slicers = get_m2m_map(
             source_mesh=target_mesh,
             source_placements=target_specs,
             target_mesh=source_mesh,
@@ -88,29 +87,21 @@ def run_test_communication(
             device=device,
         )
 
-    source_tensor_shape = None
-    target_tensor_shape = None
-    if source_local_tensor is not None and 0 not in source_local_tensor.shape:
-        source_tensor_shape = tuple(source_local_tensor.shape)
-    if target_local_tensor is not None and 0 not in target_local_tensor.shape:
-        target_tensor_shape = tuple(target_local_tensor.shape)
-
-    # Step 2: Convert transfers to chunks
-    source_chunks, target_chunks = transfers_to_chunks(
-        transfers=transfers,
+    # Step 2: Generate execution-ready chunks directly
+    chunks = map_to_chunk_ops(
+        m2m_map=m2m_map,
         rank=rank,
-        source_tensor_shape=source_tensor_shape,
-        target_tensor_shape=target_tensor_shape,
+        source_num_slicers=source_num_slicers,
+        target_num_slicers=target_num_slicers,
+        source_tensor=source_local_tensor,
+        target_tensor=target_local_tensor,
     )
 
     if rank == 0:
-        logger.info(f"Generated {len(source_chunks)} source chunks, {len(target_chunks)} target chunks")
+        logger.info(f"Generated {len(chunks)} chunks")
 
-    # Bind tensors to chunks
-    bind_tensors_to_chunks(source_chunks, target_chunks, source_local_tensor, target_local_tensor)
-
-    # Test M2M communication with IR
-    m2m_communicate(source_chunks, target_chunks)
+    # Test M2M communication with unified chunks
+    m2m_communicate(chunks=chunks)
 
     # Test Gather-Broadcast Method
     gather_broadcast_result = gather_broadcast_communicate(

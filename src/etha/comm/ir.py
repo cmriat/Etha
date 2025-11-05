@@ -18,32 +18,6 @@ class TransferType(Enum):
 
 
 @dataclass(slots=True, kw_only=True)
-class Transfer:
-    """Intermediate representation for a send operation.
-
-    Represents a logical transfer from one source to one or more destinations.
-    Used during planning phase before converting to execution-ready Chunks.
-    """
-
-    src_rank: int  # Source rank
-    src_idx: tuple  # Source multi-dimensional index
-    dst_list: list[tuple[int, tuple]]  # [(dst_rank, dst_idx), ...]
-    transfer_type: TransferType
-    stage_id: int = 0  # Pipeline stage
-
-    # Partitioning metadata for source and target tensors
-    source_num_slicers: list[int]  # How source tensor is partitioned
-    target_num_slicers: list[int]  # How target tensor is partitioned
-
-    def __repr__(self) -> str:
-        """Return a concise representation for debugging."""
-        dst_ranks = [r for r, _ in self.dst_list]
-        type_name = self.transfer_type.name if self.transfer_type else "???"
-        dst_summary = str(dst_ranks)
-        return f"Transfer(type={type_name}, src={self.src_rank}→{dst_summary}, stage={self.stage_id})"
-
-
-@dataclass(slots=True, kw_only=True)
 class BaseChunk:
     """Base class for transfer chunks."""
 
@@ -61,9 +35,6 @@ class BaseChunk:
 
     # Async work handle (None for SELF_COPY or before launch, populated during execution)
     work: "torch.distributed.Work | None" = None
-
-    # Pipeline stage ID (assigned during planning for pipelining support)
-    stage_id: int = 0
 
     slice_tuples: tuple[slice, ...] = ()  # Slice tuple for tensor indexing
 
@@ -91,8 +62,7 @@ class SourceChunk(BaseChunk):
             f"SourceChunk("
             f"type={self.transfer_type.name[:3] if self.transfer_type else '???'}, "
             f"src={self.src_rank}→{self.dst_ranks}, "
-            f"tensor={self.tensor is not None}, "
-            f"stage={self.stage_id})"
+            f"tensor={self.tensor is not None})"
         )
 
 
@@ -122,6 +92,5 @@ class TargetChunk(BaseChunk):
             f"TargetChunk("
             f"type={self.transfer_type.name[:3] if self.transfer_type else '???'}, "
             f"src={self.src_rank}→dst={self.dst_rank}, "
-            f"tensor={self.tensor is not None}, "
-            f"stage={self.stage_id})"
+            f"tensor={self.tensor is not None})"
         )
