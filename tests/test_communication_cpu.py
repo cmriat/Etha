@@ -122,22 +122,16 @@ def run_test_communication(
 @pytest.mark.parametrize(
     "source_mesh_shape, target_mesh_shape",
     [
-        # Same mesh shapes (identity)
-        ((2, 2, 2, 2), (2, 2, 2, 2)),
-        # Last dimension scaling (common case)
-        ((2, 2, 2, 2), (2, 2, 2, 4)),  # Scale up last dim
-        ((2, 2, 2, 4), (2, 2, 2, 2)),  # Scale down last dim
-        # Second-to-last dimension scaling
-        ((2, 2, 2, 2), (2, 2, 4, 2)),
-        ((2, 2, 4, 2), (2, 2, 2, 2)),
-        # Multiple dimension scaling
-        ((2, 2, 2, 2), (2, 2, 4, 4)),
-        ((2, 2, 4, 4), (2, 2, 2, 2)),
-        # First dimension scaling (edge case)
-        ((2, 2, 2, 2), (4, 2, 2, 2)),
-        # Complex mixed scaling
-        ((2, 2, 2, 4), (2, 4, 4, 2)),
-        ((2, 4, 2, 2), (2, 2, 4, 4)),
+        ((2, 2, 1, 1), (2, 1, 1, 2)),
+        ((2, 2, 1, 1), (2, 1, 2, 1)),
+        ((2, 1, 2, 1), (2, 1, 1, 2)),
+        ((2, 1, 1, 2), (1, 1, 2, 2)),
+        ((1, 2, 2, 1), (1, 2, 1, 2)),
+        ((1, 2, 1, 2), (1, 1, 2, 2)),
+        ((1, 1, 2, 2), (2, 1, 1, 2)),
+        ((4, 1, 1, 1), (1, 1, 1, 4)),
+        ((1, 4, 1, 1), (1, 1, 4, 1)),
+        ((1, 1, 4, 1), (1, 1, 1, 4)),
     ],
 )
 def test_communication_cpu(source_mesh_shape: tuple, target_mesh_shape: tuple):
