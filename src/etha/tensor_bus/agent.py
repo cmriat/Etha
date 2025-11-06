@@ -12,6 +12,7 @@ import torch
 import msgspec
 import posix_ipc
 import torch.distributed as dist
+from upath import UPath
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
@@ -42,7 +43,7 @@ class TensorBusAgent:
         tcpstore_host: str,
         tcpstore_port: int,
         lmdb_command_queue_path: str,
-        lmdb_state_path: str | None = None,
+        lmdb_state_path: str,
     ):
         """Initialize Agent.
 
@@ -52,7 +53,7 @@ class TensorBusAgent:
             tcpstore_host: TCPStore server address
             tcpstore_port: TCPStore server port
             lmdb_command_queue_path: Path to CommandQueue LMDB
-            lmdb_state_path: Path to State LMDB (optional, for Worker verification)
+            lmdb_state_path: Path to State LMDB
         """
         self.rank = rank
         self.world_size = world_size
@@ -68,7 +69,7 @@ class TensorBusAgent:
             port=tcpstore_port,
             world_size=world_size,
             is_master=(rank == 0),  # Rank 0 is master
-            timeout=timedelta(seconds=3600),  # 1 hour timeout
+            timeout=timedelta(seconds=3600),
             wait_for_workers=True,
         )
 
@@ -76,22 +77,20 @@ class TensorBusAgent:
         self.command_queue = CommandQueue(lmdb_command_queue_path)
 
         # Initialize State LMDB (for Worker verification)
-        self.state_env = None
-        self.state_db = None
-        if lmdb_state_path:
-            self.state_env = lmdb.open(
-                lmdb_state_path,
-                max_dbs=2,  # Allow multiple named databases
-                map_size=1 << 28,  # 256MB
-                subdir=False,
-                lock=True,
-            )
-            self.state_db = self.state_env.open_db(b"pair_state")
-            logger.info(f"Agent {rank}: State LMDB initialized at {lmdb_state_path}")
+        self.lmdb_state_path = UPath(lmdb_state_path)
+        self.state_env = lmdb.open(
+            lmdb_state_path,
+            max_dbs=2,  # Allow multiple named databases
+            map_size=1 << 28,  # 256MB
+            subdir=False,
+            lock=True,
+        )
+        self.state_db = self.state_env.open_db(b"pair_state")
+        logger.info(f"Agent {rank}: State LMDB initialized at {lmdb_state_path}")
 
-            # Write initial heartbeat (for connection validation)
-            self._update_heartbeat()
-            logger.info(f"Agent {rank}: Initial heartbeat written")
+        # Write initial heartbeat (for connection validation)
+        self._update_heartbeat()
+        logger.info(f"Agent {rank}: Initial heartbeat written")
 
         # Pair registry
         self.pairs: dict[str, PairState] = {}
@@ -333,12 +332,11 @@ class TensorBusAgent:
         logger.debug(f"Agent {self.rank}: Set {transfer_singal_key} = '0'")
 
         # Step 11: Write PairState to State LMDB (for Worker verification)
-        if self.state_env and self.state_db:
-            state_key = f"pair:{pair_name}/state:match".encode()
-            state_bytes = msgspec.msgpack.encode(state.status)
-            with self.state_env.begin(write=True, db=self.state_db) as txn:
-                txn.put(state_key, state_bytes)
-            logger.debug(f"Agent {self.rank}: Wrote PairState to State LMDB")
+        state_key = f"pair:{pair_name}/state:match".encode()
+        state_bytes = msgspec.msgpack.encode(state.status)
+        with self.state_env.begin(write=True, db=self.state_db) as txn:
+            txn.put(state_key, state_bytes)
+        logger.debug(f"Agent {self.rank}: Wrote PairState to State LMDB")
 
         logger.info(
             f"Agent {self.rank}: Pair '{pair_name}' matched! "
@@ -550,9 +548,8 @@ class TensorBusAgent:
         This allows Workers to verify the Agent is alive and responsive.
         Called on startup and every main loop iteration.
         """
-        if self.state_env and self.state_db:
-            with self.state_env.begin(write=True, db=self.state_db) as txn:
-                txn.put(b"agent:heartbeat", str(time.time()).encode())
+        with self.state_env.begin(write=True, db=self.state_db) as txn:
+            txn.put(b"agent:heartbeat", str(time.time()).encode())
 
     def _release_semaphore(self, semaphore_name: str):
         try:
@@ -574,9 +571,14 @@ class TensorBusAgent:
         except Exception as e:
             logger.error(f"Agent {self.rank}: Error closing or unlinking semaphore '{semaphore_name}': {e}")
 
-    def close(self):
+    def close(self, destroy: bool = True):
         """Cleanup resources."""
-        self.command_queue.close()
+        self.command_queue.close(destroy=destroy)
         if self.state_env:
             self.state_env.close()
+        if destroy:
+            try:
+                self.lmdb_state_path.unlink()
+            except Exception:
+                pass
         dist.destroy_process_group()

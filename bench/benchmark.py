@@ -516,6 +516,7 @@ def main():
         ((4, 1, 1, 2), (2, 1, 1, 4)),
         ((4, 1, 2, 1), (1, 1, 1, 8)),
         ((4, 2, 1, 1), (1, 1, 2, 4)),
+        ((1, 1, 1, 8), (1, 1, 1, 8)),
     ]
 
     print(f"Total {len(mesh_combinations)} different 16-device mesh combinations")
