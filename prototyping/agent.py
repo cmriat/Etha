@@ -50,7 +50,8 @@ def main():
         if "command" in path.name:
             sem_name = f"/cq_{path.stem}"
             space_sem_name = f"/cq_space_{path.stem}"
-            for sem in [sem_name, space_sem_name]:
+            ready_sem_name = f"/cq_ready_{path.stem}"
+            for sem in [sem_name, space_sem_name, ready_sem_name]:
                 try:
                     posix_ipc.unlink_semaphore(sem)
                     logger.debug(f"[Agent {rank}] Cleaned up semaphore: {sem}")

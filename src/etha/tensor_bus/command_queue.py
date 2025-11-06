@@ -30,29 +30,18 @@ class CommandQueue:
     def __init__(self, lmdb_path: str = "/tmp/tensor_bus.lmdb", capacity: int = 50000):
         self.lmdb_path = UPath(lmdb_path)
         self.capacity = capacity  # Fixed circular queue capacity
-        self.env = lmdb.open(
-            str(self.lmdb_path),
-            max_dbs=2,
-            map_size=1 << 30,
-            subdir=False,
-            lock=True,
-        )
 
-        # Command queue database
-        self.queue_db = self.env.open_db(b"command_queue")
-        self._init_pointers()
-
-        # POSIX semaphores:
-        # _sem: notify consumers that data is available (count = number of items)
-        # _space_sem: notify producers that space is available (count = number of free slots)
-        # _ready_sem: synchronization barrier for initialization (leader election)
-        self.sem_name = f"/cq_{self.lmdb_path.stem}"
-        self.space_sem_name = f"/cq_space_{self.lmdb_path.stem}"
-        self.ready_name = f"/cq_ready_{self.lmdb_path.stem}"
+        # Store semaphore names
+        self.sem_name = f"/cq_{self.lmdb_path.stem}"  # Semaphore for available items
+        self.space_sem_name = f"/cq_space_{self.lmdb_path.stem}"  # Semaphore for free space
+        self.ready_name = f"/cq_ready_{self.lmdb_path.stem}"  # Semaphore for initialization readiness (leader election)
 
         try:
             # Try to become leader (create ready semaphore)
             ready = posix_ipc.Semaphore(self.ready_name, flags=posix_ipc.O_CREAT | posix_ipc.O_EXCL, initial_value=0)
+
+            # Leader: open LMDB and initialize if needed
+            self._init_lmdb_environment()
 
             # Leader: create both resource semaphores atomically
             try:
@@ -84,15 +73,87 @@ class CommandQueue:
             ready.release()  # Release for other followers
             ready.close()
 
+            # Follower: open LMDB (should already be initialized)
+            self._init_lmdb_environment()
+
             self._sem = posix_ipc.Semaphore(self.sem_name)
             self._space_sem = posix_ipc.Semaphore(self.space_sem_name)
+
+    def _init_lmdb_environment(self):
+        """Initialize LMDB environment and queue database."""
+        self.env = lmdb.open(
+            str(self.lmdb_path),
+            max_dbs=2,
+            map_size=1 << 30,
+            subdir=False,
+            lock=True,
+        )
+
+        # Command queue database
+        self.queue_db = self.env.open_db(b"command_queue")
+        self._init_pointers()
 
     def _init_pointers(self):
         """Initialize queue head/tail pointers."""
         with self.env.begin(write=True, db=self.queue_db) as txn:
             if txn.get(b"__head__") is None:
-                txn.put(b"__head__", struct.pack("Q", 0))  # Read pointer
-                txn.put(b"__tail__", struct.pack("Q", 0))  # Write pointer
+                self._set_head(txn, 0)
+                self._set_tail(txn, 0)
+
+    def _get_head(self, txn) -> int:
+        """Helper: get head pointer from transaction."""
+        return struct.unpack("Q", txn.get(b"__head__"))[0]
+
+    def _get_tail(self, txn) -> int:
+        """Helper: get tail pointer from transaction."""
+        return struct.unpack("Q", txn.get(b"__tail__"))[0]
+
+    def _set_head(self, txn, value: int):
+        """Helper: set head pointer."""
+        txn.put(b"__head__", struct.pack("Q", value))
+
+    def _set_tail(self, txn, value: int):
+        """Helper: set tail pointer."""
+        txn.put(b"__tail__", struct.pack("Q", value))
+
+    def _increment_head(self, txn):
+        """Helper: increment head pointer (dequeue operation)."""
+        head = self._get_head(txn)
+        self._set_head(txn, head + 1)
+
+    def _increment_tail(self, txn):
+        """Helper: increment tail pointer (enqueue operation)."""
+        tail = self._get_tail(txn)
+        self._set_tail(txn, tail + 1)
+
+    def _circular_key(self, pos: int):
+        """Helper: calculate circular queue key for position."""
+        idx = pos % self.capacity
+        return struct.pack("Q", idx)
+
+    def _decode_message(self, data: bytes):
+        """Helper: decode message data, return None if corrupted."""
+        try:
+            return self._decoder.decode(data)
+        except msgspec.DecodeError:
+            return None
+
+    def _put_message(self, txn, pos: int, msg: Message):
+        """Helper: write message to logical position."""
+        key = self._circular_key(pos)
+        txn.put(key, self._encoder.encode(msg))
+
+    def _get_message(self, txn, pos: int) -> Message | None:
+        """Helper: read message from logical position, return None if not found or corrupted."""
+        key = self._circular_key(pos)
+        cmd_data = txn.get(key)
+        if cmd_data is None:
+            return None
+        return self._decode_message(cmd_data)
+
+    def _size(self, txn) -> int:
+        """Return queue length."""
+        return self._get_tail(txn) - self._get_head(txn)
 
     def enqueue(self, msg: Message, *, block: bool = True, timeout: float | None = None) -> int:
         """Enqueue a message.
@@ -123,19 +184,15 @@ class CommandQueue:
                 raise QueueFullError(f"Queue is full (capacity={self.capacity})") from None
 
         with self.env.begin(write=True, db=self.queue_db) as txn:
-            # Get current tail
-            tail_bytes = txn.get(b"__tail__")
-            tail = struct.unpack("Q", tail_bytes)[0]
+            # Get current tail and write message
+            tail = self._get_tail(txn)
+            self._put_message(txn, tail, msg)
 
-            # Circular indexing: key is always in [0, capacity)
-            idx = tail % self.capacity
-            key = struct.pack("Q", idx)
-            txn.put(key, self._encoder.encode(msg))
+            # Increment tail pointer
+            self._increment_tail(txn)
 
-            # Increment tail
-            txn.put(b"__tail__", struct.pack("Q", tail + 1))
-
-            self._sem.release()  # Notify consumers that data is available
+            # Notify consumers that data is available
+            self._sem.release()
             return tail
 
     def dequeue(self, *, block: bool = False, timeout: float | None = None) -> Message | None:
@@ -150,7 +207,19 @@ class CommandQueue:
         except posix_ipc.BusyError:
             return None
 
-        return self._try_dequeue_once()
+        with self.env.begin(write=True, db=self.queue_db) as txn:
+            head = self._get_head(txn)
+            if self._size(txn) <= 0:
+                return None
+
+            cmd = self._get_message(txn, head)
+
+            self._increment_head(txn)
+
+            if cmd is not None:
+                self._space_sem.release()
+
+            return cmd
 
     def dequeue_batch(self, max_count: int = 32) -> list[Message]:
         """Batch dequeue (improve throughput).
@@ -164,33 +233,20 @@ class CommandQueue:
         commands = []
 
         with self.env.begin(write=True, db=self.queue_db) as txn:
-            head_bytes = txn.get(b"__head__")
-            tail_bytes = txn.get(b"__tail__")
+            head = self._get_head(txn)
+            tail = self._get_tail(txn)
 
-            head = struct.unpack("Q", head_bytes)[0]
-            tail = struct.unpack("Q", tail_bytes)[0]
-
-            # Calculate actual dequeue count
             count = min(max_count, tail - head)
 
             for i in range(count):
-                # Circular indexing: key is always in [0, capacity)
-                idx = (head + i) % self.capacity
-                key = struct.pack("Q", idx)
-                cmd_data = txn.get(key)
+                # Get message data
+                cmd = self._get_message(txn, head + i)
+                if cmd:
+                    commands.append(cmd)
 
-                if cmd_data:
-                    try:
-                        cmd = self._decoder.decode(cmd_data)
-                        commands.append(cmd)
-                        # NO DELETE! Just increment head, let next enqueue overwrite
-                    except msgspec.DecodeError:
-                        # Skip corrupted data - still counts as freeing space
-                        continue
-
-            # Update head
+            # Update head pointer (batch update)
             if count > 0:
-                txn.put(b"__head__", struct.pack("Q", head + count))
+                self._set_head(txn, head + count)
 
         # Notify producers that space is now available for each dequeued item
         for _ in range(count):
@@ -201,9 +257,7 @@ class CommandQueue:
     def size(self) -> int:
         """Return queue length."""
         with self.env.begin(db=self.queue_db) as txn:
-            head = struct.unpack("Q", txn.get(b"__head__"))[0]
-            tail = struct.unpack("Q", txn.get(b"__tail__"))[0]
-            return tail - head
+            return self._size(txn)
 
     def is_empty(self) -> bool:
         """Check if queue is empty."""
@@ -212,39 +266,26 @@ class CommandQueue:
     def peek(self) -> Message | None:
         """View front message (without dequeuing)."""
         with self.env.begin(db=self.queue_db) as txn:
-            head_bytes = txn.get(b"__head__")
-            tail_bytes = txn.get(b"__tail__")
-
-            head = struct.unpack("Q", head_bytes)[0]
-            tail = struct.unpack("Q", tail_bytes)[0]
-
-            if head >= tail:
+            head = self._get_head(txn)
+            if self._size(txn) <= 0:
                 return None
 
-            # Circular indexing: key is always in [0, capacity)
-            idx = head % self.capacity
-            key = struct.pack("Q", idx)
-            cmd_data = txn.get(key)
+            # Get message data without dequeuing
+            return self._get_message(txn, head)
 
-            if cmd_data:
-                try:
-                    return self._decoder.decode(cmd_data)
-                except msgspec.DecodeError:
-                    return None
-            return None
-
-    def clear(self):
-        """Clear queue (for testing)."""
+    def clear(self, delete_commands: bool = True):
+        """Clear queue."""
         with self.env.begin(write=True, db=self.queue_db) as txn:
             # Reset pointers
-            txn.put(b"__head__", struct.pack("Q", 0))
-            txn.put(b"__tail__", struct.pack("Q", 0))
+            self._set_head(txn, 0)
+            self._set_tail(txn, 0)
 
-            # Delete all commands (optional but cleaner)
-            cursor = txn.cursor()
-            for key, _ in cursor:
-                if not key.startswith(b"__"):
-                    txn.delete(key)
+            # Delete all commands
+            if delete_commands:
+                cursor = txn.cursor()
+                for key, _ in cursor:
+                    if not key.startswith(b"__"):
+                        txn.delete(key)
 
         # Drain semaphore count to 0
         while True:
@@ -259,39 +300,10 @@ class CommandQueue:
                 self._space_sem.acquire(timeout=0)
             except posix_ipc.BusyError:
                 break
+
         # Re-fill space semaphore to full capacity
         for _ in range(self.capacity):
             self._space_sem.release()
-
-    def _try_dequeue_once(self) -> Message | None:
-        with self.env.begin(write=True, db=self.queue_db) as txn:
-            head_bytes = txn.get(b"__head__")
-            tail_bytes = txn.get(b"__tail__")
-
-            head = struct.unpack("Q", head_bytes)[0]
-            tail = struct.unpack("Q", tail_bytes)[0]
-
-            if head >= tail:
-                return None
-
-            # Circular indexing: key is always in [0, capacity)
-            idx = head % self.capacity
-            key = struct.pack("Q", idx)
-            cmd_data = txn.get(key)
-            if cmd_data is None:
-                txn.put(b"__head__", struct.pack("Q", head + 1))
-                return None
-
-            try:
-                cmd = self._decoder.decode(cmd_data)
-            except msgspec.DecodeError:
-                txn.put(b"__head__", struct.pack("Q", head + 1))
-                return None
-
-            txn.put(b"__head__", struct.pack("Q", head + 1))
-
-            self._space_sem.release()
-            return cmd
 
     def close(self, destroy: bool = True):
         """Close queue connection.
