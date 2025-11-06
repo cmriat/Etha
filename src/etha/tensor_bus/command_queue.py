@@ -33,7 +33,7 @@ class CommandQueue:
         self.env = lmdb.open(
             str(self.lmdb_path),
             max_dbs=2,
-            map_size=1 << 30,  # 1GB
+            map_size=1 << 30,
             subdir=False,
             lock=True,
         )
@@ -45,22 +45,47 @@ class CommandQueue:
         # POSIX semaphores:
         # _sem: notify consumers that data is available (count = number of items)
         # _space_sem: notify producers that space is available (count = number of free slots)
-        sem_name = f"/cq_{self.lmdb_path.stem}"
-        space_sem_name = f"/cq_space_{self.lmdb_path.stem}"
+        # _ready_sem: synchronization barrier for initialization (leader election)
+        self.sem_name = f"/cq_{self.lmdb_path.stem}"
+        self.space_sem_name = f"/cq_space_{self.lmdb_path.stem}"
+        self.ready_name = f"/cq_ready_{self.lmdb_path.stem}"
 
-        # Try to open existing semaphores first (for multi-process shared access)
         try:
-            self._sem = posix_ipc.Semaphore(sem_name)
-            self._space_sem = posix_ipc.Semaphore(space_sem_name)
+            # Try to become leader (create ready semaphore)
+            ready = posix_ipc.Semaphore(self.ready_name, flags=posix_ipc.O_CREAT | posix_ipc.O_EXCL, initial_value=0)
+
+            # Leader: create both resource semaphores atomically
+            try:
+                current_size = self.size()
+                self._sem = posix_ipc.Semaphore(
+                    self.sem_name, flags=posix_ipc.O_CREAT | posix_ipc.O_EXCL, initial_value=current_size
+                )
+                self._space_sem = posix_ipc.Semaphore(
+                    self.space_sem_name,
+                    flags=posix_ipc.O_CREAT | posix_ipc.O_EXCL,
+                    initial_value=capacity - current_size,
+                )
+                # Signal that resources are ready
+                ready.release()
+                ready.close()
+            except Exception:
+                # Leader failed during creation, cleanup everything
+                try:
+                    posix_ipc.unlink_semaphore(self.sem_name)
+                    posix_ipc.unlink_semaphore(self.space_sem_name)
+                    ready.unlink()
+                except Exception:
+                    pass
+                raise
         except posix_ipc.ExistentialError:
-            # Semaphores don't exist, create new ones
-            current_size = self.size()
-            self._sem = posix_ipc.Semaphore(
-                sem_name, flags=posix_ipc.O_CREAT | posix_ipc.O_EXCL, initial_value=current_size
-            )
-            self._space_sem = posix_ipc.Semaphore(
-                space_sem_name, flags=posix_ipc.O_CREAT | posix_ipc.O_EXCL, initial_value=capacity - current_size
-            )
+            # Follower: wait for leader to finish
+            ready = posix_ipc.Semaphore(self.ready_name)
+            ready.acquire()
+            ready.release()  # Release for other followers
+            ready.close()
+
+            self._sem = posix_ipc.Semaphore(self.sem_name)
+            self._space_sem = posix_ipc.Semaphore(self.space_sem_name)
 
     def _init_pointers(self):
         """Initialize queue head/tail pointers."""
@@ -316,6 +341,11 @@ class CommandQueue:
                     self._space_sem.unlink()
                 except posix_ipc.ExistentialError:
                     pass
+
+            try:
+                posix_ipc.unlink_semaphore(self.ready_name)
+            except posix_ipc.ExistentialError:
+                pass
 
         # Close semaphore handles (safe to call multiple times)
         if self._sem is not None:
