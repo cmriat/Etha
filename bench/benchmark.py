@@ -163,6 +163,7 @@ def benchmark_single_shape(
             profile_freq=profiling_config["profile_freq"],
             warmup_steps=profiling_config["warmup_steps"],
             active_steps=profiling_config["active_steps"],
+            enable_memory_snapshot=profiling_config["enable_memory_snapshot"],
         )
 
         with maybe_enable_profiling(m2m_profiling_spec, global_step=0) as profiler:
@@ -175,9 +176,9 @@ def benchmark_single_shape(
                     profiler.step()
                     m2m_communicate(chunks=chunks)
 
-                    # Memory snapshot if requested
+                    # Additional memory snapshot if requested
                     if (
-                        profiling_config.get("enable_memory_snapshot", False)
+                        profiling_config.get("extra_memory_snapshots", False)
                         and step >= m2m_profiling_spec.warmup_steps
                     ):
                         snapshot_dir = (
@@ -252,6 +253,7 @@ def benchmark_single_shape(
             profile_freq=profiling_config["profile_freq"],
             warmup_steps=profiling_config["warmup_steps"],
             active_steps=profiling_config["active_steps"],
+            enable_memory_snapshot=profiling_config["enable_memory_snapshot"],
         )
 
         with maybe_enable_profiling(gb_profiling_spec, global_step=0) as profiler:
@@ -276,8 +278,8 @@ def benchmark_single_shape(
                             source_world_size,
                         )
 
-                    # Memory snapshot if requested
-                    if profiling_config.get("enable_memory_snapshot", False) and step >= gb_profiling_spec.warmup_steps:
+                    # Additional memory snapshot if requested
+                    if profiling_config.get("extra_memory_snapshots", False) and step >= gb_profiling_spec.warmup_steps:
                         snapshot_dir = (
                             f"{profiling_config['dump_folder']}/memory_snapshots/{mesh_info}/shape_{shape}/rank_{rank}"
                         )
