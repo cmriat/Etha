@@ -9,6 +9,8 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import torch.distributed as dist
+from upath import UPath
+from utils import ProfilingSpec, dump_memory_snapshot, maybe_enable_profiling
 from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
 
@@ -119,10 +121,17 @@ def benchmark_single_shape(
     warmup_iter: int,
     profile_iter: int,
     gpus_per_node: int,
+    profiling_config: dict | None = None,
+    mesh_info: str = "",
 ):
     """Benchmark M2M vs Gather-Broadcast for a batch of tensors.
 
     Tests batch transfer of multiple tensors with unified chunk list.
+
+    Args:
+        ... (existing args) ...
+        profiling_config: Dict with profiling settings if enabled
+        mesh_info: String identifier for current mesh configuration
 
     Returns:
         dict with benchmark results if rank == 0, None otherwise.
@@ -130,6 +139,9 @@ def benchmark_single_shape(
     # Calculate total size of all tensors in batch
     total_tensor_size_bytes = sum(t.nelement() * t.element_size() for t in origin_tensors)
     num_tensors = len(origin_tensors)
+
+    # Check if we need to profile this shape
+    should_profile = profiling_config is not None and shape in profiling_config["profile_shapes"]
 
     # Chunks will be bound after they are created
 
@@ -141,14 +153,57 @@ def benchmark_single_shape(
         torch.cuda.synchronize()
     dist.barrier()
 
-    # M2M method benchmark
-    start_time = time.perf_counter()
-    for _ in range(profile_iter):
-        m2m_communicate(chunks=chunks)
-    if device == "cuda":
-        torch.cuda.synchronize()
-    dist.barrier()
-    m2m_time = (time.perf_counter() - start_time) / profile_iter
+    # M2M method with profiling if enabled
+    if should_profile:
+        # Setup profiling for M2M
+        m2m_profiling_spec = ProfilingSpec(
+            enable_profiling=True,
+            dump_folder=UPath(profiling_config["dump_folder"]),
+            save_traces_folder=UPath(f"traces/{mesh_info}/shape_{shape}/rank_{rank}/m2m_comm"),
+            profile_freq=profiling_config["profile_freq"],
+            warmup_steps=profiling_config["warmup_steps"],
+            active_steps=profiling_config["active_steps"],
+        )
+
+        with maybe_enable_profiling(m2m_profiling_spec, global_step=0) as profiler:
+            if profiler is not None:
+                # Profiled iterations
+                for step in range(m2m_profiling_spec.profile_freq):
+                    if device == "cuda":
+                        torch.cuda.synchronize()
+                    dist.barrier()
+                    profiler.step()
+                    m2m_communicate(chunks=chunks)
+
+                    # Memory snapshot if requested
+                    if (
+                        profiling_config.get("enable_memory_snapshot", False)
+                        and step >= m2m_profiling_spec.warmup_steps
+                    ):
+                        snapshot_dir = (
+                            f"{profiling_config['dump_folder']}/memory_snapshots/{mesh_info}/shape_{shape}/rank_{rank}"
+                        )
+                        dump_memory_snapshot(snapshot_dir, step, rank)
+            else:
+                pass
+
+        # Time measurement after profiling
+        start_time = time.perf_counter()
+        for _ in range(profile_iter):
+            m2m_communicate(chunks=chunks)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        dist.barrier()
+        m2m_time = (time.perf_counter() - start_time) / profile_iter
+    else:
+        # Regular M2M benchmark without profiling
+        start_time = time.perf_counter()
+        for _ in range(profile_iter):
+            m2m_communicate(chunks=chunks)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        dist.barrier()
+        m2m_time = (time.perf_counter() - start_time) / profile_iter
 
     # Gather-Broadcast method warmup (only test first tensor as reference)
     dist.barrier()
@@ -187,29 +242,96 @@ def benchmark_single_shape(
         torch.cuda.synchronize()
     dist.barrier()
 
-    # Gather-Broadcast method benchmark (only first tensor as reference)
-    start_time = time.perf_counter()
-    for _ in range(profile_iter):
-        if source_dist_tensors:
-            gather_broadcast_communicate(
-                current_target_mesh,
-                target_specs,
-                source_dist_tensors[0],
-                origin_tensors[0],
-                source_world_size,
-            )
-        else:
-            gather_broadcast_communicate(
-                current_target_mesh,
-                target_specs,
-                None,
-                origin_tensors[0],
-                source_world_size,
-            )
-    if device == "cuda":
-        torch.cuda.synchronize()
-    dist.barrier()
-    baseline_time = (time.perf_counter() - start_time) / profile_iter
+    # Gather-Broadcast method with profiling if enabled
+    if should_profile:
+        # Setup profiling for Gather-Broadcast
+        gb_profiling_spec = ProfilingSpec(
+            enable_profiling=True,
+            dump_folder=UPath(profiling_config["dump_folder"]),
+            save_traces_folder=UPath(f"traces/{mesh_info}/shape_{shape}/rank_{rank}/gather_broadcast_comm"),
+            profile_freq=profiling_config["profile_freq"],
+            warmup_steps=profiling_config["warmup_steps"],
+            active_steps=profiling_config["active_steps"],
+        )
+
+        with maybe_enable_profiling(gb_profiling_spec, global_step=0) as profiler:
+            if profiler is not None:
+                # Profiled iterations
+                for step in range(gb_profiling_spec.profile_freq):
+                    profiler.step()
+                    if source_dist_tensors:
+                        gather_broadcast_communicate(
+                            current_target_mesh,
+                            target_specs,
+                            source_dist_tensors[0],
+                            origin_tensors[0],
+                            source_world_size,
+                        )
+                    else:
+                        gather_broadcast_communicate(
+                            current_target_mesh,
+                            target_specs,
+                            None,
+                            origin_tensors[0],
+                            source_world_size,
+                        )
+
+                    # Memory snapshot if requested
+                    if profiling_config.get("enable_memory_snapshot", False) and step >= gb_profiling_spec.warmup_steps:
+                        snapshot_dir = (
+                            f"{profiling_config['dump_folder']}/memory_snapshots/{mesh_info}/shape_{shape}/rank_{rank}"
+                        )
+                        dump_memory_snapshot(snapshot_dir, step + 1000, rank)  # +1000 to distinguish from M2M
+            else:
+                pass
+
+        # Time measurement after profiling
+        start_time = time.perf_counter()
+        for _ in range(profile_iter):
+            if source_dist_tensors:
+                gather_broadcast_communicate(
+                    current_target_mesh,
+                    target_specs,
+                    source_dist_tensors[0],
+                    origin_tensors[0],
+                    source_world_size,
+                )
+            else:
+                gather_broadcast_communicate(
+                    current_target_mesh,
+                    target_specs,
+                    None,
+                    origin_tensors[0],
+                    source_world_size,
+                )
+            if device == "cuda":
+                torch.cuda.synchronize()
+            dist.barrier()
+            baseline_time = (time.perf_counter() - start_time) / profile_iter
+    else:
+        # Regular Gather-Broadcast benchmark without profiling
+        start_time = time.perf_counter()
+        for _ in range(profile_iter):
+            if source_dist_tensors:
+                gather_broadcast_communicate(
+                    current_target_mesh,
+                    target_specs,
+                    source_dist_tensors[0],
+                    origin_tensors[0],
+                    source_world_size,
+                )
+            else:
+                gather_broadcast_communicate(
+                    current_target_mesh,
+                    target_specs,
+                    None,
+                    origin_tensors[0],
+                    source_world_size,
+                )
+        if device == "cuda":
+            torch.cuda.synchronize()
+        dist.barrier()
+        baseline_time = (time.perf_counter() - start_time) / profile_iter
 
     if rank == 0:
         # Calculate ideal bytes that target ranks need to receive (for all tensors in batch)
@@ -311,18 +433,57 @@ def generate_result_plot(
 
 def main():
     """Run distributed communication benchmark."""
-    # Create results directory
-    os.makedirs("./results", exist_ok=True)
+    # ========================================
+    # PROFILING CONFIGURATION (modify here)
+    # ========================================
+    ENABLE_PROFILING = False  # Set to True to enable profiling
+    PROFILE_SHAPES = [(4096, 4096), (8192, 8192), (16384, 16384)]  # Shapes to profile
+    PROFILE_WARMUP = 2  # Warmup steps for profiling
+    PROFILE_ACTIVE = 3  # Active profiling steps
+    PROFILE_FREQ = 5  # Total frequency (warmup + active + wait)
+    ENABLE_MEMORY_SNAPSHOT = False  # Generate memory snapshot pickle files
 
     # Distributed setup - torchrun will set these automatically
     device = "cuda"
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
 
+    # Create results directory
+    os.makedirs("./results", exist_ok=True)
+
+    # Setup profiling configuration
+    profiling_config = None
+    if ENABLE_PROFILING:
+        profiling_config = {
+            "dump_folder": "./results",
+            "profile_shapes": PROFILE_SHAPES,
+            "warmup_steps": PROFILE_WARMUP,
+            "active_steps": PROFILE_ACTIVE,
+            "profile_freq": PROFILE_FREQ,
+            "enable_memory_snapshot": ENABLE_MEMORY_SNAPSHOT,
+        }
+
+        if rank == 0:
+            print(f"Profiling enabled for shapes: {PROFILE_SHAPES}")
+            print(f"Memory snapshot: {ENABLE_MEMORY_SNAPSHOT}")
+
     # Initialize process group
     dist.init_process_group(backend="nccl" if device == "cuda" else "gloo")
     if device == "cuda":
         torch.cuda.set_device(local_rank)
+
+    # Enable memory recording if memory snapshot is requested
+    if ENABLE_PROFILING and ENABLE_MEMORY_SNAPSHOT:
+        if device == "cuda":
+            try:
+                from utils import MEMORY_SNAPSHOT_MAX_ENTRIES
+
+                torch.cuda.memory._record_memory_history(max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES)
+                if rank == 0:
+                    print(f"Memory recording enabled with max_entries={MEMORY_SNAPSHOT_MAX_ENTRIES}")
+            except Exception as e:
+                if rank == 0:
+                    print(f"Warning: Failed to enable memory recording: {e}")
 
     # BENCHMARKING PARAMETERS
     warmup_iter = 5
@@ -342,7 +503,7 @@ def main():
         (24576, 24576),
     ]
 
-    num_tensors_per_batch = 5  # Number of tensors to send in each batch
+    num_tensors_per_batch = 10  # Number of tensors to send in each batch
 
     # Mesh combinations: source_mesh_shape -> target_mesh_shape (total 16 devices)
     # Each dimension must be power of 2: 1, 2, 4, 8
@@ -465,6 +626,11 @@ def main():
                     f"    Generated {len(all_chunks)} chunks total ({len(all_chunks) // num_tensors_per_batch} per tensor)"
                 )
 
+            # Create mesh info string for output directory organization
+            src = "_".join(map(str, source_mesh_shape))
+            tgt = "_".join(map(str, target_mesh_shape))
+            mesh_info = f"mesh_{mesh_idx + 1:02d}_{src}_{tgt}"
+
             result = benchmark_single_shape(
                 origin_tensors,
                 source_dist_tensors,
@@ -482,6 +648,8 @@ def main():
                 warmup_iter,
                 profile_iter,
                 gpus_per_node,
+                profiling_config,
+                mesh_info,
             )
 
             if result is not None:

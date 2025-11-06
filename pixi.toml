@@ -26,9 +26,9 @@ python-lmdb = "*"
 msgspec = "*"
 universal_pathlib = "*"
 posix_ipc = "*"
-transformers = "*"
 
 [feature.dev.dependencies]
+transformers = "*"
 matplotlib = "*"
 seaborn = "*"
 pandas = "*"
