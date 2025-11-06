@@ -36,12 +36,26 @@ def main():
     # Get LMDB paths
     command_queue_path, state_path = get_queue_state_paths(rank)
 
-    # Clean up old LMDB files (remove stale data and locks)
+    # Clean up old LMDB files and semaphores (remove stale data and locks)
+    import posix_ipc
+
     for path_str in [command_queue_path, state_path]:
         path = Path(path_str)
+        # Delete LMDB files
         for f in path.parent.glob(f"{path.name}*"):
             f.unlink(missing_ok=True)
             logger.debug(f"[Agent {rank}] Cleaned up: {f}")
+
+        # Delete associated semaphores (only for command queue)
+        if "command" in path.name:
+            sem_name = f"/cq_{path.stem}"
+            space_sem_name = f"/cq_space_{path.stem}"
+            for sem in [sem_name, space_sem_name]:
+                try:
+                    posix_ipc.unlink_semaphore(sem)
+                    logger.debug(f"[Agent {rank}] Cleaned up semaphore: {sem}")
+                except posix_ipc.ExistentialError:
+                    pass  # Semaphore doesn't exist, that's fine
 
     logger.info(f"[Agent {rank}] CommandQueue: {command_queue_path}")
     logger.info(f"[Agent {rank}] State LMDB: {state_path}\n")

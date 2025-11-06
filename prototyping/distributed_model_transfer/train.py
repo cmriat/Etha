@@ -87,50 +87,54 @@ def main():
     # Bootstrap TensorBusClient
     client, info = bootstrap_client(path_naming_fn=get_queue_state_paths)
 
-    logger.info(f"\n{'=' * 60}")
-    logger.info(f"Distributed Training Worker starting...")
-    logger.info(f"  Global rank: {info.global_rank}")
-    logger.info(f"  Agent rank: {info.agent_rank}")
-    logger.info(f"  CUDA device: {info.device}")
-    logger.info(f"  Distributed strategy: {DISTRIBUTED_STRATEGY}")
-    logger.info(f"{'=' * 60}\n")
+    try:
+        logger.info(f"\n{'=' * 60}")
+        logger.info(f"Distributed Training Worker starting...")
+        logger.info(f"  Global rank: {info.global_rank}")
+        logger.info(f"  Agent rank: {info.agent_rank}")
+        logger.info(f"  CUDA device: {info.device}")
+        logger.info(f"  Distributed strategy: {DISTRIBUTED_STRATEGY}")
+        logger.info(f"{'=' * 60}\n")
 
-    # Create distributed trainer
-    trainer = DistributedTrainer(info.global_rank, info.device)
+        # Create distributed trainer
+        trainer = DistributedTrainer(info.global_rank, info.device)
 
-    # Register pair for distributed tensor transfer
-    logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
-    handler = client.register_pair(
-        pair_name=PAIR_NAME,
-        local_name=LOCAL_NAME,
-        remote_name=REMOTE_NAME,
-        expected_world_size=EXPECTED_WORLD_SIZE,
-        device_mesh=trainer.device_mesh,
-        placements=tuple(trainer.placements),
-    )
-    logger.info(f"✅ Pair '{PAIR_NAME}' registered successfully!")
-    # Register the distributed tensor
-    tensor_names = []
-    tensor_data = []
-    for name, param in trainer.model.named_parameters():
-        if not isinstance(param, DTensor):
-            continue
-        tensor_names.append(name)
-        tensor_data.append(param.data.to_local())
+        # Register pair for distributed tensor transfer
+        logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
+        handler = client.register_pair(
+            pair_name=PAIR_NAME,
+            local_name=LOCAL_NAME,
+            remote_name=REMOTE_NAME,
+            expected_world_size=EXPECTED_WORLD_SIZE,
+            device_mesh=trainer.device_mesh,
+            placements=tuple(trainer.placements),
+        )
+        logger.info(f"✅ Pair '{PAIR_NAME}' registered successfully!")
+        # Register the distributed tensor
+        tensor_names = []
+        tensor_data = []
+        for name, param in trainer.model.named_parameters():
+            if not isinstance(param, DTensor):
+                continue
+            tensor_names.append(name)
+            tensor_data.append(param.data.to_local())
 
-    # Batch register all tensors
-    sem = handler.register_tensor_batch(
-        tensor_names=tensor_names,
-        tensors=tensor_data,
-        blocking=False,
-    )
-    sem.acquire()
-    sem.close()
+        # Batch register all tensors
+        sem = handler.register_tensor_batch(
+            tensor_names=tensor_names,
+            tensors=tensor_data,
+            blocking=False,
+        )
+        sem.acquire()
+        sem.close()
 
-    logger.info(f"✅Tensors for Pair '{PAIR_NAME}' registered successfully!")
+        logger.info(f"✅Tensors for Pair '{PAIR_NAME}' registered successfully!")
 
-    handler.transfer(transfer_type="send", blocking=True, timeout=60)
-    logger.info(f"✅ Sent distributed model")
+        handler.transfer(transfer_type="send", blocking=True, timeout=60)
+        logger.info(f"✅ Sent distributed model")
+    finally:
+        client.close()
+        logger.info("Distributed training worker shutdown complete")
 
 
 if __name__ == "__main__":
