@@ -1,9 +1,12 @@
 """Intermediate Representation for tensor transfer operations."""
 
+import logging
 from enum import Enum
 from dataclasses import dataclass
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class TransferType(Enum):
@@ -16,13 +19,7 @@ class TransferType(Enum):
 
 @dataclass(slots=True, kw_only=True)
 class BaseChunk:
-    """Base class for transfer chunks.
-
-    Shared fields for both send and receive operations.
-    """
-
-    # Identity
-    chunk_id: int  # Unique ID for this chunk
+    """Base class for transfer chunks."""
 
     # Shape info
     chunk_shape: tuple[int, ...]  # Shape of the data being transferred
@@ -30,8 +27,14 @@ class BaseChunk:
     # Transfer method
     transfer_type: TransferType
 
+    # Tensor reference (None during planning, populated during binding)
+    tensor: torch.Tensor | None = None
+
     # Buffer management
     buffer: torch.Tensor | None = None
+
+    # Async work handle (None for SELF_COPY or before launch, populated during execution)
+    work: "torch.distributed.Work | None" = None
 
     slice_tuples: tuple[slice, ...] = ()  # Slice tuple for tensor indexing
 
@@ -53,6 +56,15 @@ class SourceChunk(BaseChunk):
     # Broadcast info (None for self_copy and p2p)
     group_key: tuple[int, tuple[int, ...]] | None = None  # (src_rank, tuple(sorted(dst_ranks)))
 
+    def __repr__(self) -> str:
+        """Return a concise representation for debugging."""
+        return (
+            f"SourceChunk("
+            f"type={self.transfer_type.name[:3] if self.transfer_type else '???'}, "
+            f"src={self.src_rank}→{self.dst_ranks}, "
+            f"tensor={self.tensor is not None})"
+        )
+
 
 @dataclass(slots=True, kw_only=True)
 class TargetChunk(BaseChunk):
@@ -73,3 +85,12 @@ class TargetChunk(BaseChunk):
     group_key: tuple[int, tuple[int, ...]] | None = None  # (src_rank, tuple(sorted(dst_ranks)))
 
     src_slice_tuples: tuple[slice, ...] = ()  # Slice tuple for source tensor (self_copy only)
+
+    def __repr__(self) -> str:
+        """Return a concise representation for debugging."""
+        return (
+            f"TargetChunk("
+            f"type={self.transfer_type.name[:3] if self.transfer_type else '???'}, "
+            f"src={self.src_rank}→dst={self.dst_rank}, "
+            f"tensor={self.tensor is not None})"
+        )

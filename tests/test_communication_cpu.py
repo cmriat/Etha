@@ -13,7 +13,7 @@ from torch.distributed.tensor.placement_types import _StridedShard
 from etha.comm import (
     get_m2m_map,
     m2m_communicate,
-    map_to_chunk_ir,
+    map_to_chunk_ops,
     gather_broadcast_communicate,
 )
 
@@ -56,45 +56,32 @@ def run_test_communication(
     logger.debug(f"[rank={rank}] Source mesh: {source_mesh.mesh}")
     logger.debug(f"[rank={rank}] Target mesh: {target_mesh.mesh}")
 
-    # Generate chunk IR
+    # Generate chunk IR using new API
     # Step 1: Get M2M map
-    forward_map, reverse_map, source_slicers, target_slicers = get_m2m_map(
-        source_mesh,
-        source_specs,
-        target_mesh,
-        target_specs,
-        dist.group.WORLD,
-        device,
+    m2m_map, source_num_slicers, target_num_slicers = get_m2m_map(
+        source_mesh=source_mesh,
+        source_placements=source_specs,
+        target_mesh=target_mesh,
+        target_placements=target_specs,
+        group=dist.group.WORLD,
+        device=device,
     )
 
-    source_tensor_shape = None
-    target_tensor_shape = None
-    if source_local_tensor is not None and 0 not in source_local_tensor.shape:
-        source_tensor_shape = tuple(source_local_tensor.shape)
-    if target_local_tensor is not None and 0 not in target_local_tensor.shape:
-        target_tensor_shape = tuple(target_local_tensor.shape)
-
-    # Step 2: Generate chunk IR from map + actual tensor shapes
-    source_chunks, target_chunks = map_to_chunk_ir(
-        forward_map=forward_map,
-        reverse_map=reverse_map,
-        source_num_slicers=source_slicers,
-        target_num_slicers=target_slicers,
-        source_tensor_shape=source_tensor_shape,
-        target_tensor_shape=target_tensor_shape,
+    # Step 2: Generate execution-ready chunks directly
+    chunks = map_to_chunk_ops(
+        m2m_map=m2m_map,
         rank=rank,
+        source_num_slicers=source_num_slicers,
+        target_num_slicers=target_num_slicers,
+        source_tensor=source_local_tensor,
+        target_tensor=target_local_tensor,
     )
 
     if rank == 0:
-        logger.info(f"Generated {len(source_chunks)} source chunks, {len(target_chunks)} target chunks")
+        logger.info(f"Generated {len(chunks)} chunks")
 
-    # Test M2M communication with IR
-    m2m_communicate(
-        source_chunks,
-        target_chunks,
-        source_local_tensor,
-        target_local_tensor,
-    )
+    # Test M2M communication with unified chunks
+    m2m_communicate(chunks=chunks)
 
     # Test Gather-Broadcast Method
     gather_broadcast_result = gather_broadcast_communicate(
@@ -141,7 +128,16 @@ def test_communication_cpu(source_mesh_shape: tuple, target_mesh_shape: tuple):
     device = "cpu"
 
     os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29500"
+
+    # Find an available port dynamically
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+
+    os.environ["MASTER_PORT"] = str(port)
 
     # Use torch.multiprocessing.spawn to run the test in multiple processes
     # This is a common pattern for testing distributed PyTorch applications

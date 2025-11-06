@@ -10,7 +10,7 @@ from attr import dataclass
 from upath import UPath
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="[%(asctime)s] [Inference Worker %(process)d] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )

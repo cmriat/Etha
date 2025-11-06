@@ -4,16 +4,18 @@ import torch
 import msgspec
 import torch.distributed as dist
 
-from etha.comm.chunk_ir import SourceChunk, TargetChunk
+from etha.comm.ir import SourceChunk, TargetChunk
 
 
 class M2MMap(msgspec.Struct):
-    """Mesh to mesh topology map (shape-independent)."""
+    """Mesh to mesh topology using M2MMap (shape-independent).
 
-    forward_map: dict  # src_rank -> {src_idx: [(dst_rank, dst_idx), ...]}
-    reverse_map: dict  # dst_rank -> {dst_idx: [(src_rank, src_idx), ...]}
-    source_num_slicers: list[int]  # Number of slices per dimension for source
-    target_num_slicers: list[int]  # Number of slices per dimension for target
+    M2MMap structure: dict[src_rank, dict[src_idx, list[tuple[dst_rank, dst_idx]]]]
+    """
+
+    m2m_map: dict[int, dict[tuple, list[tuple[int, tuple]]]] | None = None
+    source_num_slicers: list[int] | None = None  # How source tensor is partitioned
+    target_num_slicers: list[int] | None = None  # How target tensor is partitioned
 
 
 class PairState(msgspec.Struct):
@@ -30,13 +32,12 @@ class PairState(msgspec.Struct):
     status: str  # "matched"
 
     # Topology layer: M2M maps (shape-independent, reusable)
-    m2m_map_send: M2MMap | None = None  # Map for sending (local -> remote)
-    m2m_map_recv: M2MMap | None = None  # Map for receiving (remote -> local)
+    m2m_send: M2MMap | None = None  # Map for sending (local -> remote)
+    m2m_recv: M2MMap | None = None  # Map for receiving (remote -> local)
 
     # Data layer: Per-tensor storage
     tensors: dict[str, torch.Tensor] = {}  # tensor_name -> tensor mapping
-    # Per-tensor IR: tensor_name -> (send_ir, recv_ir)
-    # Each IR is a tuple of (source_chunks, target_chunks)
-    tensor_irs: dict[
-        str, tuple[tuple[list[SourceChunk], list[TargetChunk]], tuple[list[SourceChunk], list[TargetChunk]]]
-    ] = {}
+
+    # Execution layer: Unified chunk lists (one pair per direction)
+    send_chunks: list[SourceChunk | TargetChunk] | None = None  # Unified send chunks
+    recv_chunks: list[SourceChunk | TargetChunk] | None = None  # Unified recv chunks

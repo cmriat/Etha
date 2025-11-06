@@ -7,8 +7,8 @@ import torch.distributed as dist
 from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
-from .chunk_ir import SourceChunk, TargetChunk
-from .comm_execution import execute_naive
+from .ir import SourceChunk, TargetChunk
+from .comm_execution import execute_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -47,30 +47,19 @@ def gather_broadcast_communicate(
 
 
 def m2m_communicate(
-    source_chunks: list[SourceChunk],
-    target_chunks: list[TargetChunk],
-    source_local_tensor: torch.Tensor | None,
-    target_local_tensor: torch.Tensor | None,
+    chunks: list[SourceChunk | TargetChunk],
+    max_in_flight: int = 8,
 ) -> None:
     """Execute mesh-to-mesh communication using pre-compiled chunk IR.
 
-    This is the execution phase - performs actual data transfer based on IR.
-
-    IMPORTANT: This function modifies target_local_tensor IN-PLACE.
+    Uses polling-based producer-consumer pipeline for dynamic execution.
+    Chunks must have tensor references bound before calling this function.
 
     Args:
-        source_chunks: Chunks this rank needs to SEND (from map_to_chunk_ir)
-        target_chunks: Chunks this rank needs to RECEIVE (from map_to_chunk_ir)
-        source_local_tensor: Local tensor to send from (can be None for receiver-only)
-        target_local_tensor: Local tensor to receive into (modified in-place, can be None for sender-only)
+        chunks: Unified list of SourceChunk and TargetChunk operations
+        max_in_flight: Maximum chunks in prepared+in_flight queues
 
     Returns:
-        None (result is written to target_local_tensor in-place)
+        None (result is written to target tensor in-place)
     """
-    # Execute transfer
-    execute_naive(
-        source_chunks=source_chunks,
-        target_chunks=target_chunks,
-        source_local_tensor=source_local_tensor,
-        target_local_tensor=target_local_tensor,
-    )
+    execute_pipeline(chunks=chunks, max_in_flight=max_in_flight)
