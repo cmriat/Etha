@@ -1,5 +1,6 @@
 """Communication Executor - Execute transfer operations."""
 
+import torch
 import torch.distributed as dist
 
 from .ir import SourceChunk, TargetChunk, TransferType
@@ -136,7 +137,7 @@ def _is_complete(chunk: SourceChunk | TargetChunk) -> bool:
 
 def execute_pipeline(
     chunks: list[SourceChunk | TargetChunk],
-    max_in_flight: int = 8,
+    max_in_flight: int = 4,
 ) -> None:
     """Execute chunks with polling-based producer-consumer pipeline.
 
@@ -163,37 +164,44 @@ def execute_pipeline(
     in_flight: list[SourceChunk | TargetChunk] = []
 
     # Pre-fill prepared queue up to max_in_flight
-    while candidate and len(prepared) < max_in_flight:
-        chunk = candidate.pop(0)
-        _prepare_chunk(chunk)
-        prepared.append(chunk)
-
-    # Main polling loop
-    while prepared or in_flight or candidate:
-        # Launch prepared chunks if there's room in in_flight
-        while prepared:
-            chunk = prepared.pop(0)
-            _launch_chunk(chunk)
-            in_flight.append(chunk)
-
-        # Poll in_flight for completions (non-blocking)
-        completed_indices = []
-        for i, chunk in enumerate(in_flight):
-            if _is_complete(chunk):
-                completed_indices.append(i)
-
-        # Clean up completed chunks (iterate in reverse to maintain indices)
-        for i in reversed(completed_indices):
-            chunk = in_flight.pop(i)
-            _cleanup_chunk(chunk)
-
-        # Prepare more chunks if we have space
+    with torch.profiler.record_function("m2m::prefill_prepare"):
         while candidate and len(prepared) < max_in_flight:
             chunk = candidate.pop(0)
             _prepare_chunk(chunk)
             prepared.append(chunk)
 
-        # If nothing completed and we still have work, wait for at least one to complete
-        if not completed_indices and in_flight:
-            chunk = in_flight.pop(0)
-            _cleanup_chunk(chunk)
+    # Main polling loop
+    with torch.profiler.record_function("m2m::polling_loop"):
+        while prepared or in_flight or candidate:
+            # Launch prepared chunks if there's room in in_flight
+            with torch.profiler.record_function("m2m::launch_phase"):
+                while prepared:
+                    chunk = prepared.pop(0)
+                    _launch_chunk(chunk)
+                    in_flight.append(chunk)
+
+            # Poll in_flight for completions (non-blocking)
+            with torch.profiler.record_function("m2m::poll_completions"):
+                completed_indices = []
+                for i, chunk in enumerate(in_flight):
+                    if _is_complete(chunk):
+                        completed_indices.append(i)
+
+            # Clean up completed chunks (iterate in reverse to maintain indices)
+            with torch.profiler.record_function("m2m::cleanup_phase"):
+                for i in reversed(completed_indices):
+                    chunk = in_flight.pop(i)
+                    _cleanup_chunk(chunk)
+
+            # Prepare more chunks if we have space
+            with torch.profiler.record_function("m2m::prepare_phase"):
+                while candidate and len(prepared) < max_in_flight:
+                    chunk = candidate.pop(0)
+                    _prepare_chunk(chunk)
+                    prepared.append(chunk)
+
+            # If nothing completed and we still have work, wait for at least one to complete
+            if not completed_indices and in_flight:
+                with torch.profiler.record_function("m2m::blocking_wait"):
+                    chunk = in_flight.pop(0)
+                    _cleanup_chunk(chunk)
