@@ -481,8 +481,9 @@ class TensorBusAgent:
                 all_recv_chunks.extend(recv_chunks)
 
         # Store unified chunk lists directly on pair state
-        pair_state.send_chunks = all_send_chunks
-        pair_state.recv_chunks = all_recv_chunks
+        if len(all_send_chunks) > 0:
+            pair_state.send_chunks = all_send_chunks
+            pair_state.recv_chunks = all_recv_chunks
 
         logger.info(
             f"Agent {self.rank}: Completed batch registration of {len(tensor_names)} tensors for pair '{pair_name}': "

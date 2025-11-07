@@ -111,6 +111,7 @@ def main():
         expected_world_size=EXPECTED_WORLD_SIZE,
         device_mesh=engine.device_mesh,
         placements=tuple(engine.placements),
+        timeout=100,
     )
     logger.info(f"✅ Pair '{PAIR_NAME}' registered successfully!")
     # Register the distributed tensor
@@ -132,8 +133,12 @@ def main():
     sem.close()
 
     logger.info(f"✅ Tensors for Pair '{PAIR_NAME}' registered successfully!")
-
-    handler.transfer(transfer_type="recv", blocking=True, timeout=60)
+    i = 0
+    while i < 50:
+        i += 1
+        logger.info(f"step {i} trnasfer begin")
+        handler.transfer(transfer_type="recv", blocking=True, timeout=60)
+        logger.info(f"step {i} transfer completed")
     logger.info(f"✅ Received distributed model")
 
     golden_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.bfloat16)

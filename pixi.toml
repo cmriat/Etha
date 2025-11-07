@@ -24,7 +24,7 @@ cuda = "12.9.*"
 pytorch = "*"
 python-lmdb = "*"
 msgspec = "*"
-universal_pathlib = "*"
+universal-pathlib = "*"
 posix_ipc = "*"
 
 [feature.dev.dependencies]
