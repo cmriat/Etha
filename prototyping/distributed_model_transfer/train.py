@@ -105,6 +105,7 @@ def main():
             expected_world_size=EXPECTED_WORLD_SIZE,
             device_mesh=trainer.device_mesh,
             placements=tuple(trainer.placements),
+            timeout=100,
         )
         logger.info(f"✅ Pair '{PAIR_NAME}' registered successfully!")
         # Register the distributed tensor
@@ -126,9 +127,12 @@ def main():
         sem.close()
 
         logger.info(f"✅Tensors for Pair '{PAIR_NAME}' registered successfully!")
-
-        handler.transfer(transfer_type="send", blocking=True, timeout=60)
-        logger.info(f"✅ Sent distributed model")
+        i = 0
+        while i < 50:
+            i += 1
+            logger.info(f"step {i} transfer begin")
+            handler.transfer(transfer_type="send", blocking=True, timeout=60)
+            logger.info(f"step {i} transfer completed")
     finally:
         client.close()
         logger.info("Distributed training worker shutdown complete")
