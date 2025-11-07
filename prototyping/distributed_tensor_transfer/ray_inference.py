@@ -36,9 +36,7 @@ logger = logging.getLogger(__name__)
 class DistributedInferenceEngine:
     """Inference engine with distributed tensor support."""
 
-    def __init__(
-        self, rank: int, device: torch.device, strategy: str, tensor_shape, get_mesh_config_fn, read_placement_fn
-    ):
+    def __init__(self, rank: int, device: torch.device, strategy: str, tensor_shape: torch.Size, MESH_CONFIGS: dict):
         self.rank = rank
         self.device = device
 
@@ -46,7 +44,9 @@ class DistributedInferenceEngine:
         self.base_tensor = torch.randn(tensor_shape, dtype=torch.float32, device=device)
 
         # Setup device mesh based on strategy
-        self.setup_device_mesh(strategy, get_mesh_config_fn, read_placement_fn)
+        self.MESH_CONFIGS = MESH_CONFIGS
+
+        self.setup_device_mesh(strategy)
 
         # Create distributed tensor
         self.distributed_param = distribute_tensor(self.base_tensor, self.device_mesh, tuple(self.placements))
@@ -54,10 +54,9 @@ class DistributedInferenceEngine:
         logger.info(f"Rank {rank}: Created distributed tensor with shape {self.distributed_param.shape}")
         logger.info(f"Rank {rank}: Local tensor shape: {self.distributed_param._local_tensor.shape}")
 
-    def setup_device_mesh(self, strategy: str, get_mesh_config_fn, read_placement_fn):
+    def setup_device_mesh(self, strategy: str):
         """Setup device mesh configuration."""
-        mesh_shape, placement_strs = get_mesh_config_fn(strategy)
-        self.placements = read_placement_fn(placement_strs)
+        mesh_shape, self.placements = self.MESH_CONFIGS[strategy]
         mesh_tensor = torch.arange(torch.prod(torch.tensor(mesh_shape))).view(mesh_shape)
         self.device_mesh = DeviceMesh("cuda", mesh_tensor)
         logger.info(f"Rank {self.rank}: Device mesh: {mesh_tensor}, placements: {self.placements}")
@@ -113,15 +112,14 @@ class InferenceActor:
             sys.path.insert(0, prototyping_dir)
 
         # Import common module here to ensure it's available in Ray worker
-        from common import PAIR_NAME, TENSOR_SHAPE, read_placement, get_mesh_config, get_queue_state_paths
+        from common import PAIR_NAME, MESH_CONFIGS, TENSOR_SHAPE, get_queue_state_paths
 
         from etha.tensor_bus import bootstrap_client
 
         # Store imports as instance variables for later use
         self.PAIR_NAME = PAIR_NAME
         self.TENSOR_SHAPE = TENSOR_SHAPE
-        self.read_placement = read_placement
-        self.get_mesh_config = get_mesh_config
+        self.MESH_CONFIGS = MESH_CONFIGS
         self.get_queue_state_paths = get_queue_state_paths
         self.bootstrap_client = bootstrap_client
 
@@ -141,14 +139,14 @@ class InferenceActor:
         self.client, self.info = self.bootstrap_client(path_naming_fn=self.get_queue_state_paths)
 
         # Manually set CUDA device (bootstrap no longer does this)
-        torch.cuda.set_device(self.info.device)
-        device = torch.device(self.info.device)
+        torch.cuda.set_device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+        device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
 
         logger.info(f"\n{'=' * 60}")
         logger.info(f"Ray Inference Actor initialized")
         logger.info(f"  Global rank: {self.info.global_rank}")
         logger.info(f"  Agent rank: {self.info.agent_rank}")
-        logger.info(f"  CUDA device: {self.info.device}")
+        logger.info(f"  CUDA device: {device}")
         logger.info(f"  Distributed strategy: {strategy}")
         logger.info(f"{'=' * 60}\n")
 
@@ -159,7 +157,7 @@ class InferenceActor:
 
         # Create distributed inference engine
         self.engine = DistributedInferenceEngine(
-            self.info.global_rank, device, strategy, self.TENSOR_SHAPE, self.get_mesh_config, self.read_placement
+            self.info.global_rank, device, strategy, self.TENSOR_SHAPE, self.MESH_CONFIGS
         )
 
         # Register pair for distributed tensor transfer

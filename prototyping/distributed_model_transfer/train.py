@@ -85,16 +85,20 @@ def main():
     client, info = bootstrap_client(path_naming_fn=get_queue_state_paths)
 
     try:
+        # Manually set CUDA device (bootstrap no longer does this)
+        device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+        torch.cuda.set_device(device)
+
         logger.info(f"\n{'=' * 60}")
         logger.info(f"Distributed Training Worker starting...")
         logger.info(f"  Global rank: {info.global_rank}")
         logger.info(f"  Agent rank: {info.agent_rank}")
-        logger.info(f"  CUDA device: {info.device}")
+        logger.info(f"  CUDA device: {device}")
         logger.info(f"  Distributed strategy: {DISTRIBUTED_STRATEGY}")
         logger.info(f"{'=' * 60}\n")
 
         # Create distributed trainer
-        trainer = DistributedTrainer(info.global_rank, info.device)
+        trainer = DistributedTrainer(info.global_rank, device)
 
         # Register pair for distributed tensor transfer
         logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")

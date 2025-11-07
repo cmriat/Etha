@@ -46,7 +46,6 @@ class BootstrapInfo:
     agent_rank: int
     global_rank: int
     rank_offset: int | None
-    device: str
     command_queue_path: str
     state_path: str
     method: str
@@ -85,7 +84,6 @@ def bootstrap_client(
     setup_ptrace()
     # Step 1: Determine agent_rank from environment
     global_rank = int(os.environ["RANK"])
-    local_rank = int(os.environ["LOCAL_RANK"])
     if "AGENT_RANK" in os.environ:
         # Priority 1: Direct specification
         rank_offset = None
@@ -125,14 +123,10 @@ def bootstrap_client(
     )
 
     # Step 4: Create BootstrapInfo
-    # NOTE: We only return the suggested device string, but don't call set_device().
-    # Users should call torch.cuda.set_device() themselves after bootstrap.
-    device = f"cuda:{local_rank}"
     info = BootstrapInfo(
         agent_rank=agent_rank,
         global_rank=global_rank,
         rank_offset=rank_offset,
-        device=device,
         command_queue_path=command_queue_path,
         state_path=state_path,
         method=method,

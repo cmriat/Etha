@@ -21,7 +21,7 @@ from etha.tensor_bus import bootstrap_client
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="[%(asctime)s] [Worker %(process)d] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -91,15 +91,14 @@ def main():
     # Bootstrap TensorBusClient
     client, info = bootstrap_client(path_naming_fn=get_queue_state_paths)
 
-    # Manually set CUDA device (bootstrap no longer does this)
-    torch.cuda.set_device(info.device)
-    device = torch.device(info.device)
+    torch.cuda.set_device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
 
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Distributed Inference Worker starting...")
     logger.info(f"  Global rank: {info.global_rank}")
     logger.info(f"  Agent rank: {info.agent_rank}")
-    logger.info(f"  CUDA device: {info.device}")
+    logger.info(f"  CUDA device: {device}")
     logger.info(f"  Distributed strategy: {DISTRIBUTED_STRATEGY}")
     logger.info(f"{'=' * 60}\n")
 

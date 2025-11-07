@@ -55,7 +55,7 @@ class DistributedTrainer:
         """Setup device mesh configuration."""
         mesh_shape, self.placements = MESH_CONFIGS[DISTRIBUTED_STRATEGY]
         mesh_tensor = torch.arange(torch.prod(torch.tensor(mesh_shape))).view(mesh_shape)
-        self.device_mesh = DeviceMesh(self.device, mesh_tensor)
+        self.device_mesh = DeviceMesh("cuda", mesh_tensor)
         logger.info(f"Rank {self.rank}: Device mesh: {mesh_tensor}, placements: {self.placements}")
 
     def forward_backward(self):
@@ -76,18 +76,19 @@ class DistributedTrainer:
 def main():
     # Bootstrap TensorBusClient
     client, info = bootstrap_client(path_naming_fn=get_queue_state_paths)
+    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
 
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Distributed Training Worker starting...")
     logger.info(f"  Global rank: {info.global_rank}")
     logger.info(f"  Agent rank: {info.agent_rank}")
-    logger.info(f"  CUDA device: {info.device}")
+    logger.info(f"  CUDA device: {device}")
 
     logger.info(f"  Distributed strategy: {DISTRIBUTED_STRATEGY}")
     logger.info(f"{'=' * 60}\n")
 
     # Create distributed trainer
-    trainer = DistributedTrainer(info.global_rank, info.device)
+    trainer = DistributedTrainer(info.global_rank, device)
 
     # Register pair for distributed tensor transfer
     logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")

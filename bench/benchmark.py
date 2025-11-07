@@ -178,7 +178,7 @@ def benchmark_single_shape(
 
                     # Memory snapshot if requested
                     if (
-                        profiling_config.get("enable_memory_snapshots", False)
+                        profiling_config.get("enable_memory_snapshot", False)
                         and step >= m2m_profiling_spec.warmup_steps
                     ):
                         snapshot_dir = (
@@ -279,10 +279,7 @@ def benchmark_single_shape(
                         )
 
                     # Additional memory snapshot if requested
-                    if (
-                        profiling_config.get("enable_memory_snapshots", False)
-                        and step >= gb_profiling_spec.warmup_steps
-                    ):
+                    if profiling_config.get("enable_memory_snapshot", False) and step >= gb_profiling_spec.warmup_steps:
                         snapshot_dir = (
                             f"{profiling_config['dump_folder']}/memory_snapshots/{mesh_info}/shape_{shape}/rank_{rank}"
                         )
