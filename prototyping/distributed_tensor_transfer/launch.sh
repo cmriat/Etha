@@ -3,26 +3,30 @@
 set -e
 echo "🧹 Cleaning up old log and LMDB files..."
 
-rm -rf ${PIXI_PROJECT_ROOT}/prototyping/distributed_tensor_transfer/logs/*
-mkdir -p ${PIXI_PROJECT_ROOT}/prototyping/distributed_tensor_transfer/logs
+export ROOT_BASE=${HOME}/etha/prototyping
+echo "ROOT_BASE: ${ROOT_BASE}"
 
-rm -rf /tmp/dbs/*
-mkdir -p /tmp/dbs
+export LMDB_ROOT=/tmp/dbs
+export LOG_ROOT=${ROOT_BASE}/logs
+rm -rf ${LMDB_ROOT}
+rm -rf ${LOG_ROOT}
+mkdir -p ${LMDB_ROOT}
+mkdir -p ${LOG_ROOT}
 
 echo "🚀 Starting Agent processes (ranks 0-7)..."
-pixi run torchrun --nproc_per_node=8 --master-port=39500 ${PIXI_PROJECT_ROOT}/prototyping/agent.py > ${PIXI_PROJECT_ROOT}/prototyping/distributed_tensor_transfer/logs/agent.log 2>&1 &
+pixi run torchrun --nproc_per_node=8 --master-port=39500 ${ROOT_BASE}/agent.py > ${LOG_ROOT}/agent.log 2>&1 &
 
 # Wait for agents to be ready
 echo "⏳ Waiting for agents to initialize..."
 sleep 8
 
 echo "🔥 Starting Training workers (ranks 0-3)..."
-TRAINING_STRATEGY=${TRAINING_STRATEGY:-"hybrid_dp_mp"} pixi run torchrun --nproc_per_node=4 --master-port=39501 \
-    ${PIXI_PROJECT_ROOT}/prototyping/distributed_tensor_transfer/train.py > ${PIXI_PROJECT_ROOT}/prototyping/distributed_tensor_transfer/logs/train.log 2>&1 &
+pixi run torchrun --nproc_per_node=4 --master-port=39501 \
+    ${ROOT_BASE}/distributed_tensor_transfer/train.py > ${LOG_ROOT}/train.log 2>&1 &
 
 echo "🔥 Starting Inference workers (ranks 0-3, connecting to agents 4-7)..."
-AGENT_RANK_OFFSET=4 INFERENCE_STRATEGY=${INFERENCE_STRATEGY:-"hybrid_dp_mp"} pixi run torchrun --nproc_per_node=4 --master-port=39502 \
-    ${PIXI_PROJECT_ROOT}/prototyping/distributed_tensor_transfer/inference.py > ${PIXI_PROJECT_ROOT}/prototyping/distributed_tensor_transfer/logs/inference.log 2>&1 &
+AGENT_RANK_OFFSET=4 pixi run torchrun --nproc_per_node=4 --master-port=39502 \
+    ${ROOT_BASE}/distributed_tensor_transfer/inference.py > ${LOG_ROOT}/inference.log 2>&1 &
 
 echo ""
 echo "✅ All processes started!"

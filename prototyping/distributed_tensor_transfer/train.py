@@ -9,7 +9,7 @@ import logging
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import torch
-from common import PAIR_NAME, TENSOR_SHAPE, read_placement, get_mesh_config, get_queue_state_paths
+from common import PAIR_NAME, MESH_CONFIGS, TENSOR_SHAPE, get_queue_state_paths
 from torch.distributed._tensor import DeviceMesh, distribute_tensor
 
 from etha.tensor_bus import bootstrap_client
@@ -53,8 +53,7 @@ class DistributedTrainer:
 
     def setup_device_mesh(self):
         """Setup device mesh configuration."""
-        mesh_shape, placement_strs = get_mesh_config(DISTRIBUTED_STRATEGY)
-        self.placements = read_placement(placement_strs)
+        mesh_shape, self.placements = MESH_CONFIGS[DISTRIBUTED_STRATEGY]
         mesh_tensor = torch.arange(torch.prod(torch.tensor(mesh_shape))).view(mesh_shape)
         self.device_mesh = DeviceMesh(self.device, mesh_tensor)
         logger.info(f"Rank {self.rank}: Device mesh: {mesh_tensor}, placements: {self.placements}")
