@@ -91,6 +91,10 @@ def main():
     # Bootstrap TensorBusClient
     client, info = bootstrap_client(path_naming_fn=get_queue_state_paths)
 
+    # Manually set CUDA device (bootstrap no longer does this)
+    torch.cuda.set_device(info.device)
+    device = torch.device(info.device)
+
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Distributed Inference Worker starting...")
     logger.info(f"  Global rank: {info.global_rank}")
@@ -100,7 +104,7 @@ def main():
     logger.info(f"{'=' * 60}\n")
 
     # Create distributed inference engine
-    engine = DistributedInferenceEngine(info.global_rank, info.device)
+    engine = DistributedInferenceEngine(info.global_rank, device)
 
     # Register pair for distributed tensor transfer
     logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
@@ -142,7 +146,7 @@ def main():
     logger.info(f"✅ Received distributed model")
 
     golden_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.bfloat16)
-    golden_model.to(info.device)
+    golden_model.to(device)
     for name, param in engine.model.named_parameters():
         if not isinstance(param, DTensor):  # Qwen-0.6B's lm_head
             continue

@@ -82,6 +82,7 @@ def main():
     logger.info(f"  Global rank: {info.global_rank}")
     logger.info(f"  Agent rank: {info.agent_rank}")
     logger.info(f"  CUDA device: {info.device}")
+
     logger.info(f"  Distributed strategy: {DISTRIBUTED_STRATEGY}")
     logger.info(f"{'=' * 60}\n")
 

@@ -8,13 +8,9 @@ import logging
 from dataclasses import dataclass
 from collections.abc import Callable
 
-import torch
-
 from .client import TensorBusClient
 
 logger = logging.getLogger(__name__)
-
-GPU_PER_NODE = 8
 
 
 def setup_ptrace():
@@ -129,11 +125,9 @@ def bootstrap_client(
     )
 
     # Step 4: Create BootstrapInfo
-    if rank_offset is not None and rank_offset < GPU_PER_NODE:
-        device = f"cuda:{agent_rank}"
-        torch.cuda.set_device(device)
-    else:
-        device = f"cuda:{local_rank}"
+    # NOTE: We only return the suggested device string, but don't call set_device().
+    # Users should call torch.cuda.set_device() themselves after bootstrap.
+    device = f"cuda:{local_rank}"
     info = BootstrapInfo(
         agent_rank=agent_rank,
         global_rank=global_rank,

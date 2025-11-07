@@ -18,6 +18,7 @@ from torch.distributed.tensor.placement_types import Placement
 
 from etha.comm import get_m2m_map, m2m_communicate, map_to_chunk_ops
 
+from .utils import setup_cuda_rebuild_patch
 from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
 from .pair_state import M2MMap, PairState
 from .command_queue import CommandQueue
@@ -94,6 +95,9 @@ class TensorBusAgent:
 
         # Pair registry
         self.pairs: dict[str, PairState] = {}
+
+        # Setup CUDA rebuild_cuda_tensor patch (once per process)
+        setup_cuda_rebuild_patch()
 
         logger.info(f"Agent {rank}: Initialized successfully")
 
