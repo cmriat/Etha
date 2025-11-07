@@ -13,7 +13,7 @@ import logging
 
 import torch
 import torch.nn as nn
-from common import PAIR_NAME, read_placement, get_mesh_config, get_queue_state_paths
+from common import PAIR_NAME, MESH_CONFIGS, EXPECTED_WORLD_SIZE, get_queue_state_paths
 from transformers import AutoModelForCausalLM
 from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 
@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 # Parameters
 LOCAL_NAME = "distributed_inference"
 REMOTE_NAME = "distributed_training"
-EXPECTED_WORLD_SIZE = 4
 
 # Distributed strategy configuration
 DISTRIBUTED_STRATEGY = os.environ.get("INFERENCE_STRATEGY", "hybrid_dp_mp")
@@ -66,8 +65,7 @@ class DistributedInferenceEngine:
 
     def setup_device_mesh(self):
         """Setup device mesh configuration."""
-        mesh_shape, placement_strs = get_mesh_config(DISTRIBUTED_STRATEGY)
-        self.placements = read_placement(placement_strs)
+        mesh_shape, self.placements = MESH_CONFIGS[DISTRIBUTED_STRATEGY]
         mesh_tensor = torch.arange(torch.prod(torch.tensor(mesh_shape))).view(mesh_shape)
         self.device_mesh = DeviceMesh("cuda", mesh_tensor)
         logger.info(f"Rank {self.rank}: Device mesh: {mesh_tensor}, placements: {self.placements}")
@@ -76,7 +74,6 @@ class DistributedInferenceEngine:
         """Distribute model."""
         for name, param in self.model.named_parameters():
             dist_param = nn.Parameter(distribute_tensor(param, self.device_mesh, tuple(self.placements)))
-
             self._assign_parameter(name, dist_param)
 
     def _assign_parameter(self, name: str, parameter: nn.Parameter) -> None:

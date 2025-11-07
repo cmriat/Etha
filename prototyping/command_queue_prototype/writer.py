@@ -67,7 +67,7 @@ def main():
     # Send RegisterTensorBatch command via CommandQueue
     queue = CommandQueue(LMDB_QUEUE_PATH)
     msg = RegisterTensorBatch(
-        pair_name="pair_0", tensor_name=[tensor_id], tensor_payload=[payload], timestamp=time.time()
+        pair_name="pair_0", tensor_names=[tensor_id], tensor_payloads=[payload], timestamp=time.time()
     )
     queue.enqueue(msg)
     queue.close()
@@ -79,7 +79,7 @@ def main():
     print(f"  pixi run -e dev python prototyping/command_queue_prototype/reader.py")
 
     # Wait for reader to start
-    input("\n[writer] Press Enter after reader starts...")
+    # input("\n[writer] Press Enter after reader starts...")
 
     # Continuously modify tensor values
     print("\n[writer] Starting tensor modification loop...")

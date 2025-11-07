@@ -13,7 +13,7 @@ import logging
 
 import torch
 import torch.nn as nn
-from common import PAIR_NAME, read_placement, get_mesh_config, get_queue_state_paths
+from common import PAIR_NAME, MESH_CONFIGS, EXPECTED_WORLD_SIZE, get_queue_state_paths
 from transformers import AutoModelForCausalLM
 from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 
@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 # Parameters
 LOCAL_NAME = "distributed_training"
 REMOTE_NAME = "distributed_inference"
-EXPECTED_WORLD_SIZE = 4
 
 # Distributed strategy configuration
 DISTRIBUTED_STRATEGY = os.environ.get("TRAINING_STRATEGY", "pure_mp")
@@ -44,7 +43,6 @@ class DistributedTrainer:
     def __init__(self, rank: int, device: torch.device):
         self.rank = rank
         self.device = device
-
         # Setup device mesh based on strategy
         self.setup_device_mesh()
 
@@ -60,8 +58,7 @@ class DistributedTrainer:
 
     def setup_device_mesh(self):
         """Setup device mesh configuration."""
-        mesh_shape, placement_strs = get_mesh_config(DISTRIBUTED_STRATEGY)
-        self.placements = read_placement(placement_strs)
+        mesh_shape, self.placements = MESH_CONFIGS[DISTRIBUTED_STRATEGY]
         mesh_tensor = torch.arange(torch.prod(torch.tensor(mesh_shape))).view(mesh_shape)
         self.device_mesh = DeviceMesh("cuda", mesh_tensor)
         logger.info(f"Rank {self.rank}: Device mesh: {mesh_tensor}, placements: {self.placements}")

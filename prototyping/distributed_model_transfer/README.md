@@ -23,7 +23,18 @@
 
 ## 🚀 快速开始
 
-### 基础用法
+### 使用kjob
+
+```bash
+# 首先清除db和log
+kdel jobs.batch --all; rm -rf *.out *.err; rm -rf prototyping/logs; rm -r prototyping/dbs
+
+# 然后运行
+pixi run submit prototyping/distributed_model_transfer/kjob.sh
+
+## kjob 默认启动两台8卡机器，一台训练，一台推理
+```
+### 使用workspace
 
 ```bash
 # 使用默认策略（训练混合DP+MP，推理纯MP）

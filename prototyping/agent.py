@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 
 import torch.distributed as dist
-from common import TCPSTORE_HOST, TCPSTORE_PORT, AGENT_WORLD_SIZE, get_queue_state_paths
+from common import TCPSTORE_HOST, TCPSTORE_PORT, get_queue_state_paths
 
 from etha.tensor_bus import TensorBusAgent
 
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 def main():
     # Get rank and world_size from environment (torchrun sets these)
     rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", AGENT_WORLD_SIZE))  # 4 training + 4 inference agents
+    world_size = int(os.environ.get("WORLD_SIZE"))
 
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Agent Rank {rank} starting...")
