@@ -21,7 +21,7 @@ from etha.tensor_bus import bootstrap_client
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="[%(asctime)s] [Worker %(process)d] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -91,16 +91,19 @@ def main():
     # Bootstrap TensorBusClient
     client, info = bootstrap_client(path_naming_fn=get_queue_state_paths)
 
+    torch.cuda.set_device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Distributed Inference Worker starting...")
     logger.info(f"  Global rank: {info.global_rank}")
     logger.info(f"  Agent rank: {info.agent_rank}")
-    logger.info(f"  CUDA device: {info.device}")
+    logger.info(f"  CUDA device: {device}")
     logger.info(f"  Distributed strategy: {DISTRIBUTED_STRATEGY}")
     logger.info(f"{'=' * 60}\n")
 
     # Create distributed inference engine
-    engine = DistributedInferenceEngine(info.global_rank, info.device)
+    engine = DistributedInferenceEngine(info.global_rank, device)
 
     # Register pair for distributed tensor transfer
     logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
@@ -142,7 +145,7 @@ def main():
     logger.info(f"✅ Received distributed model")
 
     golden_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.bfloat16)
-    golden_model.to(info.device)
+    golden_model.to(device)
     for name, param in engine.model.named_parameters():
         if not isinstance(param, DTensor):  # Qwen-0.6B's lm_head
             continue

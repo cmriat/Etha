@@ -18,6 +18,7 @@ from torch.distributed.tensor.placement_types import Placement
 
 from etha.comm import get_m2m_map, m2m_communicate, map_to_chunk_ops
 
+from .utils import setup_cuda_rebuild_patch
 from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
 from .pair_state import M2MMap, PairState
 from .command_queue import CommandQueue
@@ -94,6 +95,9 @@ class TensorBusAgent:
 
         # Pair registry
         self.pairs: dict[str, PairState] = {}
+
+        # Setup CUDA rebuild_cuda_tensor patch (once per process)
+        setup_cuda_rebuild_patch()
 
         logger.info(f"Agent {rank}: Initialized successfully")
 
@@ -373,7 +377,7 @@ class TensorBusAgent:
         # Transfer tensors using chunk IR if available, otherwise fall back to simple send/recv
         pair_state = self.pairs[pair_name]
 
-        if pair_state.send_chunks is not None and pair_state.recv_chunks is not None:
+        if pair_state.send_chunks or pair_state.recv_chunks:
             logger.info(f"Agent {self.rank}: Using optimized P2P transfer for pair '{pair_name}'")
 
             if transfer_type == "send":
@@ -481,9 +485,8 @@ class TensorBusAgent:
                 all_recv_chunks.extend(recv_chunks)
 
         # Store unified chunk lists directly on pair state
-        if len(all_send_chunks) > 0:
-            pair_state.send_chunks = all_send_chunks
-            pair_state.recv_chunks = all_recv_chunks
+        pair_state.send_chunks = all_send_chunks
+        pair_state.recv_chunks = all_recv_chunks
 
         logger.info(
             f"Agent {self.rank}: Completed batch registration of {len(tensor_names)} tensors for pair '{pair_name}': "
