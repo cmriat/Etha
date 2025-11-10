@@ -1,10 +1,4 @@
-"""Integration test for the distributed model transfer prototype.
-
-This test mirrors the launch script so it exercises the full Qwen3-30B hand-off
-across two 4-GPU workers. It is disabled by default; set
-RUN_DISTRIBUTED_MODEL_TRANSFER_TEST=1 when the required hardware, offline model
-cache, and agent infrastructure are available.
-"""
+"""Integration test for the distributed model transfer prototype."""
 
 from __future__ import annotations
 
@@ -38,10 +32,18 @@ def _terminate_process(proc: subprocess.Popen, timeout: float = 30.0) -> None:
 
 
 @pytest.mark.timeout(7200)
-def test_distributed_model_transfer_end_to_end():
+@pytest.mark.parametrize(
+    ("training_dtype", "inference_dtype"),
+    [
+        pytest.param("float32", "float32", id="float32_to_float32"),
+        pytest.param("float32", "bfloat16", id="float32_to_bfloat16"),
+    ],
+)
+def test_distributed_model_transfer_end_to_end(training_dtype: str, inference_dtype: str):
     project_root = Path(__file__).resolve().parents[1]
 
-    logs_dir = Path("./tests/distributed_model_transfer_logs")
+    logs_root = Path("./tests/distributed_model_transfer_logs")
+    logs_dir = logs_root / f"{training_dtype}_to_{inference_dtype}"
     if logs_dir.exists():
         shutil.rmtree(logs_dir)
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -79,6 +81,7 @@ def test_distributed_model_transfer_end_to_end():
     training_env = base_env.copy()
     training_env.setdefault("TRAINING_STRATEGY", "pure_mp")
     training_env.setdefault("MODEL_ID", "Qwen/Qwen3-0.6B")
+    training_env["MODEL_DTYPE"] = training_dtype
     training_cmd = [
         "torchrun",
         "--nproc_per_node=4",
@@ -92,6 +95,7 @@ def test_distributed_model_transfer_end_to_end():
     inference_env.setdefault("INFERENCE_STRATEGY", "hybrid_dp_mp")
     inference_env.setdefault("AGENT_RANK_OFFSET", "4")
     inference_env.setdefault("MODEL_ID", "Qwen/Qwen3-0.6B")
+    inference_env["MODEL_DTYPE"] = inference_dtype
     inference_cmd = [
         "torchrun",
         "--nproc_per_node=4",
@@ -120,4 +124,4 @@ def test_distributed_model_transfer_end_to_end():
         for proc, log_file in reversed(processes):
             _terminate_process(proc)
             log_file.close()
-        shutil.rmtree(logs_dir, ignore_errors=True)
+        shutil.rmtree(logs_root, ignore_errors=True)

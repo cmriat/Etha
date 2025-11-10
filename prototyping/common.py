@@ -45,3 +45,17 @@ def get_queue_state_paths(rank: int) -> tuple[str, str]:
         Tuple of CommandQueue and State LMDB paths
     """
     return (f"{LMDB_ROOT}/{rank}_command.lmdb", f"{LMDB_ROOT}/{rank}_state.lmdb")
+
+
+def get_model_dtype_from_env(env_var: str = "MODEL_DTYPE", default: str = "bfloat16") -> torch.dtype:
+    dtype_value = os.environ.get(env_var, default)
+    dtype_map = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+        "float64": torch.float64,
+    }
+    if dtype_value not in dtype_map:
+        valid = ", ".join(sorted(dtype_map.keys()))
+        raise ValueError(f"Unsupported dtype '{dtype_value}'. Set {env_var} to one of: {valid}")
+    return dtype_map[dtype_value]

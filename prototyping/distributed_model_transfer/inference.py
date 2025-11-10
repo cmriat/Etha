@@ -13,7 +13,7 @@ import logging
 
 import torch
 import torch.nn as nn
-from common import PAIR_NAME, MESH_CONFIGS, EXPECTED_WORLD_SIZE, get_queue_state_paths
+from common import PAIR_NAME, MESH_CONFIGS, EXPECTED_WORLD_SIZE, get_queue_state_paths, get_model_dtype_from_env
 from transformers import AutoModelForCausalLM
 from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 
@@ -36,6 +36,8 @@ REMOTE_NAME = "distributed_training"
 DISTRIBUTED_STRATEGY = os.environ.get("INFERENCE_STRATEGY", "hybrid_dp_mp")
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen3-30B-A3B")
 
+MODEL_DTYPE = get_model_dtype_from_env()
+
 
 def reset_parameters(module):
     if hasattr(module, "reset_parameters"):
@@ -52,7 +54,7 @@ class DistributedInferenceEngine:
         self.setup_device_mesh()
 
         # Create model
-        self.model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.bfloat16)
+        self.model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=MODEL_DTYPE)
         logger.info(f"Rank {rank}: Model created from pretrained model")
         self.model.to(device)
         logger.info(f"Rank {rank}: Model moved to device")
@@ -144,7 +146,7 @@ def main():
         logger.info(f"step {i} transfer completed")
     logger.info(f"✅ Received distributed model")
 
-    golden_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.bfloat16)
+    golden_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=MODEL_DTYPE)
     golden_model.to(device)
     for name, param in engine.model.named_parameters():
         if not isinstance(param, DTensor):  # Qwen-0.6B's lm_head
