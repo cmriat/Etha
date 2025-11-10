@@ -38,6 +38,8 @@ class BaseChunk:
 
     slice_tuples: tuple[slice, ...] = ()  # Slice tuple for tensor indexing
 
+    target_dtype: torch.dtype | None = None
+
 
 @dataclass(slots=True, kw_only=True)
 class SourceChunk(BaseChunk):

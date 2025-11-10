@@ -150,7 +150,7 @@ class TensorBusAgent:
         4. Poll TCPStore until my side is complete
         5. Poll TCPStore until remote side is complete
         6. Exchange and collect device mesh/placement info from all ranks
-        7. Create PairState(status="matched") with mesh/placement info
+        7. Create PairState with m2m maps info
         """
         pair_name = msg.pair_name
         local_name = msg.local_name
@@ -310,6 +310,12 @@ class TensorBusAgent:
             logger.info(f"Agent {self.rank}: Generated P2P maps for pair '{pair_name}'")
         else:
             logger.info(f"Agent {self.rank}: Skipping P2P map generation - missing or inconsistent mesh/placement info")
+        if local_is_first:
+            local_group = dist.new_group(local_ranks)
+            remote_group = dist.new_group(remote_ranks)
+        else:
+            remote_group = dist.new_group(remote_ranks)
+            local_group = dist.new_group(local_ranks)
 
         # Step 9: Create PairState
         state = PairState(
@@ -319,9 +325,9 @@ class TensorBusAgent:
             remote_name=remote_name,
             remote_ranks=remote_ranks,
             pair_size=expected_local + expected_remote,
-            local_group=dist.new_group(local_ranks),
+            local_group=local_group,
             pair_group=pair_group,
-            status="matched",
+            local_is_first=local_is_first,
             m2m_send=m2m_map_send,
             m2m_recv=m2m_map_recv,
         )
@@ -337,7 +343,7 @@ class TensorBusAgent:
 
         # Step 11: Write PairState to State LMDB (for Worker verification)
         state_key = f"pair:{pair_name}/state:match".encode()
-        state_bytes = msgspec.msgpack.encode(state.status)
+        state_bytes = msgspec.msgpack.encode("matched")
         with self.state_env.begin(write=True, db=self.state_db) as txn:
             txn.put(state_key, state_bytes)
         logger.debug(f"Agent {self.rank}: Wrote PairState to State LMDB")
@@ -392,7 +398,6 @@ class TensorBusAgent:
                     f"for {len(pair_state.tensors)} tensors"
                 )
                 m2m_communicate(chunks=chunks)
-                logger.info(f"Agent {self.rank}: Batch transfer completed for pair '{pair_name}'")
         else:
             # Fall back to simple send/recv without P2P optimization
             logger.info(
@@ -457,6 +462,23 @@ class TensorBusAgent:
             tensor = ForkingPickler.loads(tensor_payload)
             pair_state.tensors[tensor_name] = tensor
 
+            my_rank0 = pair_state.local_ranks[0]
+            target_rank0 = pair_state.remote_ranks[0]
+            my_dtype_list = [tensor.dtype]
+            target_dtype_list = [None]
+
+            if self.rank == my_rank0:
+                if pair_state.local_is_first:
+                    dist.send_object_list(my_dtype_list, dst=target_rank0)
+                    dist.recv_object_list(target_dtype_list, src=target_rank0)
+                else:
+                    dist.recv_object_list(target_dtype_list, src=target_rank0)
+                    dist.send_object_list(my_dtype_list, dst=target_rank0)
+
+            dist.broadcast_object_list(target_dtype_list, src=my_rank0, group=pair_state.local_group)
+            target_dtype = target_dtype_list[0]
+            logger.debug(f"Agent {self.rank}: target dtype {target_dtype}")
+
             if pair_state.m2m_send and pair_state.m2m_recv:
                 logger.debug(
                     f"Agent {self.rank}: Generating chunks for tensor '{tensor_name}' with shape {tensor.shape}"
@@ -470,6 +492,7 @@ class TensorBusAgent:
                     target_num_slicers=pair_state.m2m_send.target_num_slicers,
                     source_tensor=tensor,
                     target_tensor=tensor,
+                    target_dtype=target_dtype,
                 )
                 all_send_chunks.extend(send_chunks)
 
@@ -481,6 +504,7 @@ class TensorBusAgent:
                     target_num_slicers=pair_state.m2m_recv.target_num_slicers,
                     source_tensor=tensor,
                     target_tensor=tensor,
+                    target_dtype=target_dtype,
                 )
                 all_recv_chunks.extend(recv_chunks)
 

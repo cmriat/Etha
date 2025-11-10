@@ -76,6 +76,7 @@ def map_to_chunk_ops(
     target_num_slicers: list[int],
     source_tensor: torch.Tensor | None = None,
     target_tensor: torch.Tensor | None = None,
+    target_dtype: torch.dtype | None = None,
 ) -> list[SourceChunk | TargetChunk]:
     """Convert M2MMap directly to execution-ready chunks.
 
@@ -157,6 +158,7 @@ def map_to_chunk_ops(
                     group_key=group_key,
                     slice_tuples=slice_tuples,
                     tensor=source_tensor,
+                    target_dtype=target_dtype,
                 )
 
                 chunks.append(source_chunk)
@@ -200,6 +202,7 @@ def map_to_chunk_ops(
                         slice_tuples=slice_tuples,
                         src_slice_tuples=src_slice_tuples,
                         tensor=target_tensor,
+                        target_dtype=target_dtype,
                     )
 
                     chunks.append(target_chunk)

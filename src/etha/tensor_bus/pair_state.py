@@ -29,7 +29,7 @@ class PairState(msgspec.Struct):
     pair_size: int  # Total number of ranks in the pair
     local_group: dist.ProcessGroup  # Local process group
     pair_group: dist.ProcessGroup  # Pair process group
-    status: str  # "matched"
+    local_is_first: bool  # Whether local is first in the pair
 
     # Topology layer: M2M maps (shape-independent, reusable)
     m2m_send: M2MMap | None = None  # Map for sending (local -> remote)

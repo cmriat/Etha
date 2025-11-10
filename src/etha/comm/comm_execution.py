@@ -20,6 +20,10 @@ def _prepare_send_buffer(chunk: SourceChunk) -> None:
             if chunk.tensor is None:
                 raise ValueError("SourceChunk has no tensor bound. Call bind_tensors_to_chunks() first.")
             chunk.buffer = chunk.tensor[chunk.slice_tuples].contiguous()
+    if chunk.target_dtype != chunk.buffer.dtype:
+        if chunk.target_dtype == torch.float8_e4m3fn:
+            raise NotImplementedError("float8 not supported")
+        chunk.buffer = chunk.buffer.to(chunk.target_dtype)
 
 
 def _prepare_recv_buffer(chunk: TargetChunk) -> None:
