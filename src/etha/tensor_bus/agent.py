@@ -1,5 +1,6 @@
 """Tensor Bus Agent Process."""
 
+import os
 import time
 import base64
 import logging
@@ -58,6 +59,7 @@ class TensorBusAgent:
         """
         self.rank = rank
         self.world_size = world_size
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
         # Initialize torch.distributed
         logger.info(f"Agent {rank}: Initializing torch.distributed")
@@ -233,6 +235,12 @@ class TensorBusAgent:
         # Step 8: Generate P2P maps if validation passed
         m2m_map_send = None
         m2m_map_recv = None
+
+        # Determine canonical ordering to ensure all ranks call get_m2m_map in same order
+        # This prevents deadlock in collective operations within get_m2m_map
+        # We use alphabetical order of role names as the tie-breaker
+        local_is_first = local_name < remote_name
+
         if local_mesh_info and remote_mesh_info:
             # Get local mesh info (this process's mesh)
             local_mesh_shape, local_placements = local_mesh_info[0]
@@ -246,10 +254,6 @@ class TensorBusAgent:
             logger.info(f"Agent {self.rank}: Local mesh: {local_mesh_tensor} with placements: {local_placements}")
             logger.info(f"Agent {self.rank}: Remote mesh: {remote_mesh_tensor} with placements: {remote_placements}")
 
-            # Determine canonical ordering to ensure all ranks call get_m2m_map in same order
-            # This prevents deadlock in collective operations within get_m2m_map
-            # We use alphabetical order of role names as the tie-breaker
-            local_is_first = local_name < remote_name
             if local_is_first:
                 first_mesh = DeviceMesh("cuda", local_mesh_tensor)
                 second_mesh = DeviceMesh("cuda", remote_mesh_tensor)
