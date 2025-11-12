@@ -29,7 +29,7 @@ REMOTE_NAME = "distributed_inference"
 EXPECTED_WORLD_SIZE = 4
 
 # Distributed strategy configuration
-DISTRIBUTED_STRATEGY = os.environ.get("TRAINING_STRATEGY", "pure_mp")
+DISTRIBUTED_STRATEGY = os.environ.get("DISTRIBUTED_STRATEGY", "pure_mp")
 
 
 class DistributedTrainer:
@@ -103,7 +103,10 @@ def main():
 
     # Register the distributed tensor
     sem = handler.register_tensor(
-        tensor_name="distributed_param", tensor=trainer.distributed_param.to_local(), blocking=False
+        tensor_name="distributed_param",
+        tensor=trainer.distributed_param.to_local(),
+        bucket_size=256 * 1024 * 1024,
+        blocking=False,
     )
     sem.acquire()
     sem.close()

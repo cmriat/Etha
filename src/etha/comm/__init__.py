@@ -1,15 +1,15 @@
 """Communication utilities."""
 
+from .get_chunks import map_to_chunk_ops
+from .get_buckets import chunk_to_bucket_ops
 from .get_m2m_map import get_m2m_map
-from .comm_methods import m2m_communicate, gather_broadcast_communicate
-from .get_chunk_ops import map_to_chunk_ops, bind_tensors_to_chunks
-from .comm_execution import execute_pipeline
+from .comm_methods import chunk_comm, bucket_comm, gather_broadcast_comm
 
 __all__ = [
     "get_m2m_map",
     "map_to_chunk_ops",
-    "bind_tensors_to_chunks",
-    "m2m_communicate",
-    "gather_broadcast_communicate",
-    "execute_pipeline",
+    "chunk_to_bucket_ops",
+    "chunk_comm",
+    "bucket_comm",
+    "gather_broadcast_comm",
 ]

@@ -17,7 +17,13 @@ from upath import UPath
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
-from etha.comm import get_m2m_map, m2m_communicate, map_to_chunk_ops
+from etha.comm import (
+    chunk_comm,
+    bucket_comm,
+    get_m2m_map,
+    map_to_chunk_ops,
+    chunk_to_bucket_ops,
+)
 
 from .utils import setup_cuda_rebuild_patch
 from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
@@ -310,10 +316,13 @@ class TensorBusAgent:
                     source_num_slicers=src_slicers_1,
                     target_num_slicers=tgt_slicers_1,
                 )
-
-            logger.info(f"Agent {self.rank}: Generated P2P maps for pair '{pair_name}'")
+            logger.info(
+                f"Agent {self.rank}: Generated P2P maps for pair '{pair_name}'. m2m_map_send: {m2m_map_send} m2m_map_recv: {m2m_map_recv}"
+            )
         else:
             logger.info(f"Agent {self.rank}: Skipping P2P map generation - missing or inconsistent mesh/placement info")
+
+        # Step 9: Create PairState
         if local_is_first:
             local_group = dist.new_group(local_ranks)
             remote_group = dist.new_group(remote_ranks)
@@ -321,7 +330,6 @@ class TensorBusAgent:
             remote_group = dist.new_group(remote_ranks)
             local_group = dist.new_group(local_ranks)
 
-        # Step 9: Create PairState
         state = PairState(
             pair_name=pair_name,
             local_name=local_name,
@@ -386,22 +394,24 @@ class TensorBusAgent:
 
         # Transfer tensors using chunk IR if available, otherwise fall back to simple send/recv
         pair_state = self.pairs[pair_name]
-
         if pair_state.send_chunks or pair_state.recv_chunks:
-            logger.info(f"Agent {self.rank}: Using optimized P2P transfer for pair '{pair_name}'")
-
             if transfer_type == "send":
+                buckets = pair_state.send_buckets
                 chunks = pair_state.send_chunks
             else:
+                buckets = pair_state.recv_buckets
                 chunks = pair_state.recv_chunks
 
-            # Execute all transfers in one batch using new unified pipeline
-            if chunks:
+            if buckets:
                 logger.info(
-                    f"Agent {self.rank}: Executing batch transfer with {len(chunks)} chunks "
-                    f"for {len(pair_state.tensors)} tensors"
+                    f"Agent {self.rank}: Executing bucketized transfer with {len(buckets)} buckets for pair '{pair_name}'"
                 )
-                m2m_communicate(chunks=chunks)
+                bucket_comm(buckets=buckets)
+            elif chunks:
+                logger.info(
+                    f"Agent {self.rank}: Executing chunk-based transfer with {len(chunks)} chunks for pair '{pair_name}'"
+                )
+                chunk_comm(chunks=chunks)
         else:
             # Fall back to simple send/recv without P2P optimization
             logger.info(
@@ -448,6 +458,7 @@ class TensorBusAgent:
         pair_name = msg.pair_name
         tensor_names = msg.tensor_names
         tensor_payloads = msg.tensor_payloads
+        bucket_size = msg.bucket_size
 
         if pair_name not in self.pairs:
             raise ValueError(f"RegisterTensorBatch for unknown pair: {pair_name}")
@@ -511,14 +522,28 @@ class TensorBusAgent:
                     target_dtype=target_dtype,
                 )
                 all_recv_chunks.extend(recv_chunks)
-
+        logger.debug(f"Agent {self.rank}: all send chunks: {all_send_chunks} all recv chunks: {all_recv_chunks}")
+        logger.info(
+            f"Agent {self.rank}: all send chunks: {len(all_send_chunks)} all recv chunks: {len(all_recv_chunks)}"
+        )
         # Store unified chunk lists directly on pair state
         pair_state.send_chunks = all_send_chunks
         pair_state.recv_chunks = all_recv_chunks
 
+        if bucket_size:
+            pair_state.send_buckets = chunk_to_bucket_ops(
+                chunks=all_send_chunks,
+                bucket_size=bucket_size,
+            )
+            pair_state.recv_buckets = chunk_to_bucket_ops(
+                chunks=all_recv_chunks,
+                bucket_size=bucket_size,
+            )
+            logger.info(
+                f"Agent {self.rank}: send buckets: {len(pair_state.send_buckets)} recv buckets: {len(pair_state.recv_buckets)}"
+            )
         logger.info(
             f"Agent {self.rank}: Completed batch registration of {len(tensor_names)} tensors for pair '{pair_name}': "
-            f"send ({len(all_send_chunks)} chunks), recv ({len(all_recv_chunks)} chunks)"
         )
 
     def _collect_mesh_placement_info(

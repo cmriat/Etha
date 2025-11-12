@@ -210,6 +210,7 @@ class TensorBusClient:
         pair_name: str,
         tensor_names: list[str],
         tensors: list[torch.Tensor],
+        bucket_size: int | None = None,
         blocking: bool = True,
         timeout: float = 30.0,
     ):
@@ -219,6 +220,7 @@ class TensorBusClient:
             pair_name: pair name
             tensor_names: list of tensor names
             tensors: list of tensors
+            bucket_size: optional bucket size in bytes for chunk bucketing
             blocking: whether to block until completion
             timeout: timeout in seconds
         """
@@ -229,7 +231,12 @@ class TensorBusClient:
 
         tensor_payloads = [ForkingPickler.dumps(tensor.detach()) for tensor in tensors]
 
-        msg = RegisterTensorBatch(pair_name=pair_name, tensor_names=tensor_names, tensor_payloads=tensor_payloads)
+        msg = RegisterTensorBatch(
+            pair_name=pair_name,
+            tensor_names=tensor_names,
+            tensor_payloads=tensor_payloads,
+            bucket_size=bucket_size,
+        )
 
         return self._execute_command_with_semaphore(
             msg, "register_tensor_batch", pair_name, blocking=blocking, timeout=timeout
@@ -364,18 +371,40 @@ class PairHandler:
         """
         return self.client.query_transfer_signal(self.pair_name, blocking=blocking, timeout=timeout)
 
-    def register_tensor(self, tensor_name: str, tensor: torch.Tensor, blocking: bool = False, timeout: float = 30.0):
+    def register_tensor(
+        self,
+        tensor_name: str,
+        tensor: torch.Tensor,
+        bucket_size: int | None = None,
+        blocking: bool = False,
+        timeout: float = 30.0,
+    ):
         """Register a tensor to the pair."""
         return self.client.register_tensor_batch(
-            pair_name=self.pair_name, tensor_names=[tensor_name], tensors=[tensor], blocking=blocking, timeout=timeout
+            pair_name=self.pair_name,
+            tensor_names=[tensor_name],
+            tensors=[tensor],
+            bucket_size=bucket_size,
+            blocking=blocking,
+            timeout=timeout,
         )
 
     def register_tensor_batch(
-        self, tensor_names: list[str], tensors: list[torch.Tensor], blocking: bool = False, timeout: float = 30.0
+        self,
+        tensor_names: list[str],
+        tensors: list[torch.Tensor],
+        bucket_size: int | None = None,
+        blocking: bool = False,
+        timeout: float = 30.0,
     ):
         """Register multiple tensors in batch."""
         return self.client.register_tensor_batch(
-            pair_name=self.pair_name, tensor_names=tensor_names, tensors=tensors, blocking=blocking, timeout=timeout
+            pair_name=self.pair_name,
+            tensor_names=tensor_names,
+            tensors=tensors,
+            bucket_size=bucket_size,
+            blocking=blocking,
+            timeout=timeout,
         )
 
     def close(self):

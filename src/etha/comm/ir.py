@@ -96,3 +96,26 @@ class TargetChunk(BaseChunk):
             f"src={self.src_rank}→dst={self.dst_rank}, "
             f"tensor={self.tensor is not None})"
         )
+
+
+@dataclass(slots=True, kw_only=True)
+class Bucket:
+    """Bucket for transfer operations."""
+
+    transfer_type: TransferType
+    is_source: bool
+    dst_ranks: tuple[int, ...] | None = None
+    src_rank: int | None = None
+    group_key: tuple[int, tuple[int, ...]] | None = None
+    dtype: torch.dtype | None = None
+    device: torch.device | None = None
+    buffer: torch.Tensor | None = None
+    work: "torch.distributed.Work | None" = None
+    buffer_ready_event: torch.cuda.Event | None = None
+    offsets: list[tuple[int, int, BaseChunk, tuple[int, ...]]]
+
+    def __repr__(self) -> str:
+        """Return a concise representation for debugging."""
+        kind = "src" if self.is_source else "dst"
+        chunk_count = len(self.offsets)
+        return f"Bucket({kind}, chunks={chunk_count} src_rank={self.src_rank}→dst_ranks={self.dst_ranks})"

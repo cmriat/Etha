@@ -36,6 +36,7 @@ class RegisterTensorBatch(BaseCommand):
     pair_name: str
     tensor_names: list[str]
     tensor_payloads: list[memoryview]
+    bucket_size: int | None = None
 
 
 class RegisterPair(BaseCommand):

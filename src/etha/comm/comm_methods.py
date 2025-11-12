@@ -7,13 +7,14 @@ import torch.distributed as dist
 from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
-from .ir import SourceChunk, TargetChunk
-from .comm_execution import execute_pipeline
+from .ir import Bucket, SourceChunk, TargetChunk
+from .chunk_execution import execute_chunk_pipeline
+from .bucket_execution import execute_bucket_pipeline
 
 logger = logging.getLogger(__name__)
 
 
-def gather_broadcast_communicate(
+def gather_broadcast_comm(
     target_mesh: DeviceMesh,
     target_specs: tuple[Placement, ...],
     local_tensor: DTensor,
@@ -50,9 +51,9 @@ def gather_broadcast_communicate(
     return received_tensor
 
 
-def m2m_communicate(
+def chunk_comm(
     chunks: list[SourceChunk | TargetChunk],
-    max_in_flight: int = 4,
+    max_in_flight: int = 8,
 ) -> None:
     """Execute mesh-to-mesh communication using pre-compiled chunk IR.
 
@@ -66,4 +67,12 @@ def m2m_communicate(
     Returns:
         None (result is written to target tensor in-place)
     """
-    execute_pipeline(chunks=chunks, max_in_flight=max_in_flight)
+    execute_chunk_pipeline(chunks=chunks, max_in_flight=max_in_flight)
+
+
+def bucket_comm(
+    buckets: list[Bucket],
+    max_in_flight: int = 2,
+) -> None:
+    """Execute bucketized communication."""
+    execute_bucket_pipeline(buckets=buckets, max_in_flight=max_in_flight)

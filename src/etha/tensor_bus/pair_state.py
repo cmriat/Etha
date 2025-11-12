@@ -4,7 +4,7 @@ import torch
 import msgspec
 import torch.distributed as dist
 
-from etha.comm.ir import SourceChunk, TargetChunk
+from etha.comm.ir import Bucket, SourceChunk, TargetChunk
 
 
 class M2MMap(msgspec.Struct):
@@ -41,3 +41,6 @@ class PairState(msgspec.Struct):
     # Execution layer: Unified chunk lists (one pair per direction)
     send_chunks: list[SourceChunk | TargetChunk] | None = None  # Unified send chunks
     recv_chunks: list[SourceChunk | TargetChunk] | None = None  # Unified recv chunks
+
+    send_buckets: list[Bucket] | None = None
+    recv_buckets: list[Bucket] | None = None

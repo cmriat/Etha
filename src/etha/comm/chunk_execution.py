@@ -139,9 +139,9 @@ def _is_complete(chunk: SourceChunk | TargetChunk) -> bool:
     return chunk.work.is_completed()
 
 
-def execute_pipeline(
+def execute_chunk_pipeline(
     chunks: list[SourceChunk | TargetChunk],
-    max_in_flight: int = 4,
+    max_in_flight: int,
 ) -> None:
     """Execute chunks with polling-based producer-consumer pipeline.
 
@@ -167,17 +167,17 @@ def execute_pipeline(
     prepared: list[SourceChunk | TargetChunk] = []
     in_flight: list[SourceChunk | TargetChunk] = []
 
-    # Pre-fill prepared queue up to max_in_flight
-    with torch.profiler.record_function("m2m::prefill_prepare"):
-        while candidate and len(prepared) < max_in_flight:
-            chunk = candidate.pop(0)
-            _prepare_chunk(chunk)
-            prepared.append(chunk)
-
     # Main polling loop
     with torch.profiler.record_function("m2m::polling_loop"):
         while prepared or in_flight or candidate:
-            # Launch prepared chunks if there's room in in_flight
+            # Prepare chunks if there is space
+            with torch.profiler.record_function("m2m::prepare_phase"):
+                while candidate and len(prepared) + len(in_flight) < max_in_flight:
+                    chunk = candidate.pop(0)
+                    _prepare_chunk(chunk)
+                    prepared.append(chunk)
+
+            # Launch chunks in prepared queue
             with torch.profiler.record_function("m2m::launch_phase"):
                 while prepared:
                     chunk = prepared.pop(0)
@@ -196,13 +196,6 @@ def execute_pipeline(
                 for i in reversed(completed_indices):
                     chunk = in_flight.pop(i)
                     _cleanup_chunk(chunk)
-
-            # Prepare more chunks if we have space
-            with torch.profiler.record_function("m2m::prepare_phase"):
-                while candidate and len(prepared) < max_in_flight:
-                    chunk = candidate.pop(0)
-                    _prepare_chunk(chunk)
-                    prepared.append(chunk)
 
             # If nothing completed and we still have work, wait for at least one to complete
             if not completed_indices and in_flight:

@@ -10,8 +10,8 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 
 from etha.comm import (
+    chunk_comm,
     get_m2m_map,
-    m2m_communicate,
     map_to_chunk_ops,
 )
 
@@ -105,15 +105,15 @@ def run_test_communication(
 
     logger.info(f"[rank={rank}] Generated {len(chunks)} chunks")
 
-    logger.info(f"[rank={rank}] About to start m2m_communicate")
+    logger.info(f"[rank={rank}] About to start chunk_comm")
 
     for chunk in chunks:
         logger.info(f"[rank={rank}] Chunk: {chunk}")
 
     # Execute communication
-    m2m_communicate(chunks=chunks)
+    chunk_comm(chunks=chunks)
 
-    logger.info(f"[rank={rank}] Finished m2m_communicate")
+    logger.info(f"[rank={rank}] Finished chunk_comm")
 
     # Verify results for receiver side
     if not is_in_mesh_a:

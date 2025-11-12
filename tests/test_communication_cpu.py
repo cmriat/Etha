@@ -11,13 +11,15 @@ from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_t
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from etha.comm import (
+    chunk_comm,
+    bucket_comm,
     get_m2m_map,
-    m2m_communicate,
     map_to_chunk_ops,
-    gather_broadcast_communicate,
+    chunk_to_bucket_ops,
+    gather_broadcast_comm,
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
@@ -44,14 +46,15 @@ def run_test_communication(
     torch.manual_seed(0)
     shape = (64, 64)
     source_origin_tensor = torch.randn(shape, device=device)
-    target_origin_tensor = torch.randn(shape, device=device)
+    target_origin_tensor_chunk = torch.randn(shape, device=device)
+    target_origin_tensor_bucket = torch.randn(shape, device=device)
     is_in_source = rank < source_world_size
 
     source_dist_tensor = distribute_tensor(source_origin_tensor, source_mesh, source_specs)
     source_local_tensor = source_dist_tensor.to_local()
 
-    target_dist_tensor = distribute_tensor(target_origin_tensor, target_mesh, target_specs)
-    target_local_tensor = target_dist_tensor.to_local()
+    target_dist_tensor_chunk = distribute_tensor(target_origin_tensor_chunk, target_mesh, target_specs)
+    target_local_chunk = target_dist_tensor_chunk.to_local()
 
     logger.debug(f"[rank={rank}] Source mesh: {source_mesh.mesh}")
     logger.debug(f"[rank={rank}] Target mesh: {target_mesh.mesh}")
@@ -66,7 +69,8 @@ def run_test_communication(
         group=dist.group.WORLD,
         device=device,
     )
-
+    if rank == 0:
+        logger.info(f"Generated m2m map: {m2m_map}")
     # Step 2: Generate execution-ready chunks directly
     chunks = map_to_chunk_ops(
         m2m_map=m2m_map,
@@ -74,34 +78,48 @@ def run_test_communication(
         source_num_slicers=source_num_slicers,
         target_num_slicers=target_num_slicers,
         source_tensor=source_local_tensor,
-        target_tensor=target_local_tensor,
+        target_tensor=target_local_chunk,
     )
 
     if rank == 0:
         logger.info(f"Generated {len(chunks)} chunks")
 
     # Test M2M communication with unified chunks
-    m2m_communicate(chunks=chunks)
+    chunk_comm(chunks=chunks)
 
+    target_dist_tensor_bucket = distribute_tensor(target_origin_tensor_bucket, target_mesh, target_specs)
+    target_local_bucket = target_dist_tensor_bucket.to_local()
+    bucket_chunks = map_to_chunk_ops(
+        m2m_map=m2m_map,
+        rank=rank,
+        source_num_slicers=source_num_slicers,
+        target_num_slicers=target_num_slicers,
+        source_tensor=source_local_tensor,
+        target_tensor=target_local_bucket,
+    )
+    buckets = chunk_to_bucket_ops(
+        chunks=bucket_chunks,
+        bucket_size=256 * 1024,
+    )
+    logger.debug(f"[rank={rank}] Generated {len(buckets)} buckets")
+    bucket_comm(buckets=buckets)
+    logger.debug(f"[rank={rank}] Bucket communication completed")
     # Test Gather-Broadcast Method
-    gather_broadcast_result = gather_broadcast_communicate(
+    gather_broadcast_result = gather_broadcast_comm(
         target_mesh,
         target_specs,
         source_dist_tensor,
-        target_origin_tensor,
+        target_origin_tensor_chunk,
         source_world_size,
     )
     if not is_in_source:
-        full_m2m_result = target_dist_tensor.full_tensor()
-
-        assert torch.allclose(full_m2m_result, source_origin_tensor)
-        # Assert results are close (due to potential floating point differences in distributed ops)
-        if target_local_tensor is not None and gather_broadcast_result is not None:
-            assert torch.allclose(target_local_tensor, gather_broadcast_result.to_local())
-        else:
-            raise RuntimeError(
-                f"One result is None, the other is not. M2M: {target_local_tensor}, Gather-Broadcast: {gather_broadcast_result}"
-            )
+        chunk_result = target_dist_tensor_chunk.full_tensor()
+        bucket_result = target_dist_tensor_bucket.full_tensor()
+        assert torch.allclose(chunk_result, source_origin_tensor)
+        assert torch.allclose(bucket_result, source_origin_tensor)
+        if gather_broadcast_result is None:
+            raise RuntimeError("Gather-Broadcast result missing on target rank.")
+        assert torch.allclose(target_local_chunk, gather_broadcast_result.to_local())
 
     dist.destroy_process_group()
 
