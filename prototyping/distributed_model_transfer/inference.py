@@ -21,7 +21,7 @@ from etha.tensor_bus import bootstrap_client
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="[%(asctime)s] [Worker %(process)d] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -33,7 +33,7 @@ LOCAL_NAME = "distributed_inference"
 REMOTE_NAME = "distributed_training"
 
 # Distributed strategy configuration
-DISTRIBUTED_STRATEGY = os.environ.get("INFERENCE_STRATEGY", "hybrid_dp_mp")
+DISTRIBUTED_STRATEGY = os.environ.get("DISTRIBUTED_STRATEGY", "hybrid_dp_mp")
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen3-30B-A3B")
 
 MODEL_DTYPE = get_model_dtype_from_env()
@@ -116,7 +116,7 @@ def main():
         expected_world_size=EXPECTED_WORLD_SIZE,
         device_mesh=engine.device_mesh,
         placements=tuple(engine.placements),
-        timeout=100,
+        timeout=1000,
     )
     logger.info(f"✅ Pair '{PAIR_NAME}' registered successfully!")
     # Register the distributed tensor
@@ -132,6 +132,7 @@ def main():
     sem = handler.register_tensor_batch(
         tensor_names=tensor_names,
         tensors=tensor_data,
+        bucket_size=256 * 1024 * 1024,
         blocking=False,
     )
     sem.acquire()

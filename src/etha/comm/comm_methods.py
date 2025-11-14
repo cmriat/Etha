@@ -7,13 +7,14 @@ import torch.distributed as dist
 from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
-from .ir import SourceChunk, TargetChunk
-from .comm_execution import execute_pipeline
+from .ir import Bucket, SourceChunk, TargetChunk
+from .chunk_execution import execute_chunk_simple
+from .bucket_execution import execute_bucket_pipeline
 
 logger = logging.getLogger(__name__)
 
 
-def gather_broadcast_communicate(
+def gather_broadcast_comm(
     target_mesh: DeviceMesh,
     target_specs: tuple[Placement, ...],
     local_tensor: DTensor,
@@ -50,20 +51,15 @@ def gather_broadcast_communicate(
     return received_tensor
 
 
-def m2m_communicate(
+def chunk_comm(
     chunks: list[SourceChunk | TargetChunk],
-    max_in_flight: int = 4,
 ) -> None:
-    """Execute mesh-to-mesh communication using pre-compiled chunk IR.
+    """Execute chunked communication."""
+    execute_chunk_simple(chunks=chunks)
 
-    Uses polling-based producer-consumer pipeline for dynamic execution.
-    Chunks must have tensor references bound before calling this function.
 
-    Args:
-        chunks: Unified list of SourceChunk and TargetChunk operations
-        max_in_flight: Maximum chunks in prepared+in_flight queues
-
-    Returns:
-        None (result is written to target tensor in-place)
-    """
-    execute_pipeline(chunks=chunks, max_in_flight=max_in_flight)
+def bucket_comm(
+    buckets: list[Bucket],
+) -> None:
+    """Execute bucketized communication."""
+    execute_bucket_pipeline(buckets=buckets)

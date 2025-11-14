@@ -30,6 +30,7 @@ class ProfilingSpec:
     profile_freq: int
     warmup_steps: int
     active_steps: int
+    enable_memory_snapshot: bool
 
 
 @contextlib.contextmanager

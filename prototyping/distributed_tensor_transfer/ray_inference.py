@@ -173,7 +173,10 @@ class InferenceActor:
 
         # Register the distributed tensor
         sem = self.handler.register_tensor(
-            tensor_name="distributed_param", tensor=self.engine.distributed_param.to_local(), blocking=False
+            tensor_name="distributed_param",
+            tensor=self.engine.distributed_param.to_local(),
+            bucket_size=256 * 1024 * 1024,
+            blocking=False,
         )
         sem.acquire()
         sem.close()
@@ -242,7 +245,7 @@ def main():
     world_size = 4
     master_port = 39502
     agent_rank_offset = 4
-    strategy = os.environ.get("INFERENCE_STRATEGY", "hybrid_dp_mp")
+    strategy = os.environ.get("DISTRIBUTED_STRATEGY", "hybrid_dp_mp")
     os.environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 
     print("=" * 80)

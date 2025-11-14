@@ -38,25 +38,12 @@ class BaseChunk:
 
     slice_tuples: tuple[slice, ...] = ()  # Slice tuple for tensor indexing
 
-    target_dtype: torch.dtype | None = None
-
-
-@dataclass(slots=True, kw_only=True)
-class SourceChunk(BaseChunk):
-    """Source-side transfer chunk (send operations).
-
-    Represents a chunk of data to be sent from source rank to one or more target ranks.
-    """
-
     # Source info
     src_rank: int  # Rank that owns this data
     src_idx: tuple  # Multi-dimensional index in source tensor
 
     # Destination info
-    dst_ranks: list[int]  # Target ranks (len > 1 triggers broadcast)
-
-    # Broadcast info (None for self_copy and p2p)
-    group_key: tuple[int, tuple[int, ...]] | None = None  # (src_rank, tuple(sorted(dst_ranks)))
+    dst_ranks: tuple[int]  # Target ranks (len > 1 triggers broadcast)
 
     def __repr__(self) -> str:
         """Return a concise representation for debugging."""
@@ -69,6 +56,16 @@ class SourceChunk(BaseChunk):
 
 
 @dataclass(slots=True, kw_only=True)
+class SourceChunk(BaseChunk):
+    """Source-side transfer chunk (send operations).
+
+    Represents a chunk of data to be sent from source rank to one or more target ranks.
+    """
+
+    target_dtype: torch.dtype | None = None
+
+
+@dataclass(slots=True, kw_only=True)
 class TargetChunk(BaseChunk):
     """Target-side transfer chunk (receive + assemble operations).
 
@@ -76,23 +73,38 @@ class TargetChunk(BaseChunk):
     """
 
     # Target info
-    dst_rank: int  # Rank that will receive this data
     dst_idx: tuple  # Multi-dimensional index in target tensor
-
-    # Source info (where data comes from)
-    src_rank: int
-    src_idx: tuple  # Multi-dimensional index in source tensor
-
-    # Broadcast info (None for self_copy and p2p)
-    group_key: tuple[int, tuple[int, ...]] | None = None  # (src_rank, tuple(sorted(dst_ranks)))
 
     src_slice_tuples: tuple[slice, ...] = ()  # Slice tuple for source tensor (self_copy only)
 
+
+@dataclass(slots=True, kw_only=True)
+class BucketEntry:
+    """Bucket offset entry."""
+
+    offset: int
+    numel: int
+    chunk: SourceChunk | TargetChunk
+
+
+@dataclass(slots=True, kw_only=True)
+class Bucket:
+    """Bucket for transfer operations."""
+
+    transfer_type: TransferType
+    is_source: bool
+    dst_ranks: tuple[int, ...] | None = None
+    src_rank: int | None = None
+    dtype: torch.dtype | None = None
+    device: torch.device | None = None
+    buffer: torch.Tensor | None = None
+    work: "torch.distributed.Work | None" = None
+    buffer_ready_event: torch.cuda.Event | None = None
+    total_elems: int
+    key: tuple
+    entries: list[BucketEntry]
+
     def __repr__(self) -> str:
         """Return a concise representation for debugging."""
-        return (
-            f"TargetChunk("
-            f"type={self.transfer_type.name[:3] if self.transfer_type else '???'}, "
-            f"src={self.src_rank}→dst={self.dst_rank}, "
-            f"tensor={self.tensor is not None})"
-        )
+        kind = "src" if self.is_source else "dst"
+        return f"Bucket({kind}, key={self.key} entries_len={len(self.entries)} src_rank={self.src_rank}→dst_ranks={self.dst_ranks})"
