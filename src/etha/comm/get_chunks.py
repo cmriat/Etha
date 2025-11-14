@@ -59,9 +59,8 @@ def map_to_chunk_ops(
                 transfer_type = TransferType.BROADCAST
             else:
                 transfer_type = TransferType.P2P
-            dst_ranks = sorted({r for r, _ in dst_list})
+            dst_ranks = tuple(sorted({r for r, _ in dst_list}))
             if src_rank == rank:
-                group_key = (rank, tuple(dst_ranks)) if transfer_type == TransferType.BROADCAST else None
                 slice_tuples = ()
                 if source_slicer_tuples is not None:
                     slice_tuples = get_slice_from_multi_index(
@@ -73,7 +72,6 @@ def map_to_chunk_ops(
                     src_rank=rank,
                     src_idx=src_idx,
                     dst_ranks=dst_ranks,
-                    group_key=group_key,
                     slice_tuples=slice_tuples,
                     tensor=source_tensor,
                     target_dtype=target_dtype,
@@ -83,13 +81,8 @@ def map_to_chunk_ops(
                 if dst_rank == rank:
                     if src_rank == rank:
                         actual_transfer_type = TransferType.SELF_COPY
-                        group_key = None
                     else:
                         actual_transfer_type = transfer_type
-                        if transfer_type == TransferType.BROADCAST:
-                            group_key = (src_rank, tuple(dst_ranks))
-                        else:
-                            group_key = None
                     slice_tuples = ()
                     if target_slicer_tuples is not None:
                         slice_tuples = get_slice_from_multi_index(
@@ -103,15 +96,13 @@ def map_to_chunk_ops(
                     target_chunk = TargetChunk(
                         chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
                         transfer_type=actual_transfer_type,
-                        dst_rank=rank,
+                        dst_ranks=dst_ranks,
                         dst_idx=dst_idx,
                         src_rank=src_rank,
                         src_idx=src_idx,
-                        group_key=group_key,
                         slice_tuples=slice_tuples,
                         src_slice_tuples=src_slice_tuples,
                         tensor=target_tensor,
-                        target_dtype=target_dtype,
                     )
                     chunks.append(target_chunk)
     return chunks
