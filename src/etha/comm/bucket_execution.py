@@ -26,7 +26,7 @@ def _prepare_source_bucket(bucket: Bucket) -> None:
 
     for entry in bucket.entries:
         chunk = entry.chunk
-        _prepare_chunk(chunk)
+        _prepare_chunk(chunk, contiguous=False)
         flat = chunk.buffer.view(-1)
         bucket.buffer.narrow(0, entry.offset, entry.numel).copy_(flat, non_blocking=True)
         chunk.buffer = None
@@ -104,7 +104,9 @@ def _finalize_bucket(bucket: Bucket) -> list[torch.cuda.Event]:
 
     if not bucket.is_source:
         for entry in bucket.entries:
-            events.append(_finalize_chunk(entry.chunk))
+            event = _finalize_chunk(entry.chunk)
+            if event is not None:
+                events.append(event)
 
     bucket.buffer = None
 

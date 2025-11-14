@@ -7,13 +7,16 @@ from .ir import SourceChunk, TargetChunk, TransferType
 from .utils import get_or_create_process_group
 
 
-def _prepare_chunk(chunk: SourceChunk | TargetChunk) -> None:
+def _prepare_chunk(chunk: SourceChunk | TargetChunk, contiguous: bool = True) -> None:
     match chunk.transfer_type:
         case TransferType.SELF_COPY:
             if isinstance(chunk, TargetChunk):
                 chunk.buffer = chunk.tensor[chunk.src_slice_tuples]
         case _:
-            chunk.buffer = chunk.tensor[chunk.slice_tuples].contiguous()
+            if contiguous:
+                chunk.buffer = chunk.tensor[chunk.slice_tuples].contiguous()
+            else:
+                chunk.buffer = chunk.tensor[chunk.slice_tuples]
     if isinstance(chunk, SourceChunk) and chunk.target_dtype != chunk.buffer.dtype:
         chunk.buffer = chunk.buffer.to(chunk.target_dtype)
 
@@ -43,9 +46,10 @@ def _finalize_chunk(chunk: SourceChunk | TargetChunk) -> torch.cuda.Event:
 
     chunk.buffer = None
 
-    event = torch.cuda.Event()
-    event.record()
-
+    event = None
+    if chunk.tensor.device.type == "cuda":
+        event = torch.cuda.Event()
+        event.record()
     return event
 
 
@@ -56,4 +60,5 @@ def execute_chunk_simple(
         _prepare_chunk(chunk)
         _launch_chunk(chunk)
         event = _finalize_chunk(chunk)
-        event.wait()
+        if event is not None:
+            event.wait()
