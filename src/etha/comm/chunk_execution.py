@@ -36,7 +36,7 @@ def _launch_chunk(chunk: SourceChunk | TargetChunk) -> None:
                 chunk.work = dist.irecv(chunk.buffer, src=chunk.src_rank)
 
 
-def _finalize_chunk(chunk: SourceChunk | TargetChunk) -> torch.cuda.Event:
+def _finalize_chunk(chunk: SourceChunk | TargetChunk) -> None:
     if chunk.work is not None:
         chunk.work.wait()
         chunk.work = None
@@ -46,12 +46,6 @@ def _finalize_chunk(chunk: SourceChunk | TargetChunk) -> torch.cuda.Event:
 
     chunk.buffer = None
 
-    event = None
-    if chunk.tensor.device.type == "cuda":
-        event = torch.cuda.Event()
-        event.record()
-    return event
-
 
 def execute_chunk_simple(
     chunks: list[SourceChunk | TargetChunk],
@@ -59,6 +53,5 @@ def execute_chunk_simple(
     for chunk in chunks:
         _prepare_chunk(chunk)
         _launch_chunk(chunk)
-        event = _finalize_chunk(chunk)
-        if event is not None:
-            event.wait()
+        _finalize_chunk(chunk)
+        torch.cuda.synchronize()

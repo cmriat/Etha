@@ -96,21 +96,16 @@ def _is_bucket_complete(bucket: Bucket) -> bool:
     return bucket.work.is_completed()
 
 
-def _finalize_bucket(bucket: Bucket) -> list[torch.cuda.Event]:
-    events: list[torch.cuda.Event] = []
+def _finalize_bucket(bucket: Bucket) -> None:
     if bucket.work is not None:
         bucket.work.wait()
         bucket.work = None
 
     if not bucket.is_source:
         for entry in bucket.entries:
-            event = _finalize_chunk(entry.chunk)
-            if event is not None:
-                events.append(event)
+            _finalize_chunk(entry.chunk)
 
     bucket.buffer = None
-
-    return events
 
 
 def execute_bucket_pipeline(
@@ -137,7 +132,6 @@ def execute_bucket_pipeline(
                 return True
         return False
 
-    events: list[torch.cuda.Event] = []
     while _has_work():
         for state in key_states.values():
             candidate: deque = state["candidate"]
@@ -166,7 +160,5 @@ def execute_bucket_pipeline(
                 if not _is_bucket_complete(in_flight[0]):
                     break
                 logger.debug(f"[rank={rank}] Bucket execution: Finalizing bucket {in_flight[0]}")
-                events.extend(_finalize_bucket(in_flight.popleft()))
-
-    for event in events:
-        event.wait()
+                _finalize_bucket(in_flight.popleft())
+    torch.cuda.synchronize()
