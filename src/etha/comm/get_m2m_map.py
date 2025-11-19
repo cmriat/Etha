@@ -21,7 +21,7 @@ def _get_tensor_ndim(placements: tuple[Placement, ...]) -> int:
     return (
         max(
             (placement.dim for placement in placements if isinstance(placement, Shard)),
-            default=-1,
+            default=0,
         )
         + 1
     )

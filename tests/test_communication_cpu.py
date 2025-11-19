@@ -127,6 +127,7 @@ def run_test_communication(
 @pytest.mark.parametrize(
     "source_mesh_shape, target_mesh_shape",
     [
+        ((4, 1, 1, 1), (4, 1, 1, 1)),
         ((2, 2, 1, 1), (2, 1, 1, 2)),
         ((2, 2, 1, 1), (2, 1, 2, 1)),
         ((2, 1, 2, 1), (2, 1, 1, 2)),

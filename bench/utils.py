@@ -11,7 +11,7 @@ from attr import dataclass
 from upath import UPath
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="[%(asctime)s] [Worker %(process)d] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )

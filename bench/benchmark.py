@@ -162,7 +162,7 @@ def benchmark_single_shape(
         m2m_profiling_spec = ProfilingSpec(
             enable_profiling=True,
             dump_folder=UPath(profiling_config["dump_folder"]),
-            save_traces_folder=UPath(f"traces/{mesh_info}/shape_{shape[0]}/rank_{rank}/m2m_comm"),
+            save_traces_folder=UPath(f"traces/{mesh_info}/shape_{shape[0]}/rank_{rank}/chunk_comm"),
             profile_freq=profiling_config["profile_freq"],
             warmup_steps=profiling_config["warmup_steps"],
             active_steps=profiling_config["active_steps"],
@@ -460,8 +460,8 @@ def generate_result_plot(
     # Plot all methods including ideal bandwidth
     plot_configs = [
         ("ideal_bandwidth_gb_s", "Ideal (RDMA+NVLink)", "--", "green", None),
-        ("m2m_effective_throughput_gb_s", "M2M Effective", "o", "blue", 8),
-        ("bucket_effective_throughput_gb_s", "Bucket Effective", "s", "purple", 7),
+        ("m2m_effective_throughput_gb_s", "Chunk-Based", "o", "blue", 8),
+        ("bucket_effective_throughput_gb_s", "Bucket-Based", "s", "purple", 7),
         ("baseline_effective_throughput_gb_s", "Gather-Broadcast", "X", "orange", 8),
     ]
 
