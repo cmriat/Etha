@@ -271,15 +271,16 @@ class TensorBusClient:
         self,
         tensors: list[tuple[torch.Tensor, str]],
         bucket_size: int | None = None,
-        blocking: bool = True,
         timeout: float = 30.0,
     ) -> BatchHandler:
         """Register multiple tensors across pairs.
 
+        This operation always blocks until registration completes,
+        ensuring the returned BatchHandler is immediately usable.
+
         Args:
             tensors: list of (tensor, pair_name) tuples
             bucket_size: optional bucket size in bytes for bucketization optimization
-            blocking: whether to block until completion
             timeout: timeout in seconds
 
         Returns:
@@ -292,7 +293,7 @@ class TensorBusClient:
 
         msg = RegisterTensors(tensors=tensor_tuples, bucket_size=bucket_size)
 
-        sem = self._execute_command_with_semaphore(msg, "register_tensors", "batch", blocking=blocking, timeout=timeout)
+        self._execute_command_with_semaphore(msg, "register_tensors", "batch", blocking=True, timeout=timeout)
 
         unique_pair_names = list(dict.fromkeys(pair_name for _, pair_name in tensors))
         return BatchHandler(client=self, pair_names=unique_pair_names)
