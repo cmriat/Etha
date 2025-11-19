@@ -19,7 +19,7 @@ from multiprocessing.reduction import ForkingPickler
 import torch
 from shared import LMDB_QUEUE_PATH
 
-from etha.tensor_bus import CommandQueue, RegisterTensorBatch
+from etha.tensor_bus import CommandQueue, RegisterTensors
 
 # Constants for ptrace authorization
 PR_SET_PTRACER = 0x59616D61
@@ -66,7 +66,7 @@ def main():
 
     # Send RegisterTensorBatch command via CommandQueue
     queue = CommandQueue(LMDB_QUEUE_PATH)
-    msg = RegisterTensorBatch(
+    msg = RegisterTensors(
         pair_name="pair_0", tensor_names=[tensor_id], tensor_payloads=[payload], timestamp=time.time()
     )
     queue.enqueue(msg)

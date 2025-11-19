@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from etha.tensor_bus import Transfer, QueryStatus, CommandQueue, RegisterTensorBatch
+from etha.tensor_bus import Transfer, QueryStatus, CommandQueue, RegisterTensors
 from etha.tensor_bus.command_queue import QueueFullError
 
 
@@ -82,7 +82,7 @@ class TestCommandQueue:
         msgs = [
             Transfer(pair_name="t1", transfer_type="send", timestamp=1.0),
             QueryStatus(pair_name="t1", state_name="transfer_signal", timestamp=2.0),
-            RegisterTensorBatch(pair_name="t1", tensor_names=["t1"], tensor_payloads=[b""], timestamp=3.0),
+            RegisterTensors(tensors=[("t1", b"")], timestamp=3.0),
         ]
 
         # Enqueue mixed types
@@ -100,9 +100,9 @@ class TestCommandQueue:
         assert msg2.state_name == "transfer_signal"
 
         msg3 = queue.dequeue()
-        assert isinstance(msg3, RegisterTensorBatch)
-        assert msg3.pair_name == "t1"
-        assert msg3.tensor_names == ["t1"]
+        assert isinstance(msg3, RegisterTensors)
+        assert msg3.tensors[0][0] == "t1"  # (pair_name, payload)
+        assert len(msg3.tensors) == 1
 
     # ==================== Batch Operations ====================
 

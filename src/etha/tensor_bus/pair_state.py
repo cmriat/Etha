@@ -36,7 +36,7 @@ class PairState(msgspec.Struct):
     m2m_recv: M2MMap | None = None  # Map for receiving (remote -> local)
 
     # Data layer: Per-tensor storage
-    tensors: dict[str, torch.Tensor] = {}  # tensor_name -> tensor mapping
+    tensors: list[torch.Tensor] = msgspec.field(default_factory=list)  # List of registered tensors
 
     # Execution layer: Unified chunk lists (one pair per direction)
     send_chunks: list[SourceChunk | TargetChunk] | None = None  # Unified send chunks

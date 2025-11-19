@@ -26,7 +26,7 @@ from etha.comm import (
 )
 
 from .utils import setup_cuda_rebuild_patch
-from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
+from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensors
 from .pair_state import M2MMap, PairState
 from .command_queue import CommandQueue
 
@@ -131,8 +131,8 @@ class TensorBusAgent:
                     self._handle_transfer(command)
                 case QueryStatus():
                     self._handle_query_status(command)
-                case RegisterTensorBatch():
-                    self._handle_register_tensor_batch(command)
+                case RegisterTensors():
+                    self._handle_register_tensors(command)
                 case _:
                     logger.warning(f"Agent {self.rank}: Unknown command type: {type(command)}")
                     return  # Don't release semaphore for unknown commands
@@ -417,15 +417,15 @@ class TensorBusAgent:
             logger.info(
                 f"Agent {self.rank}: Using simple send/recv transfer for pair '{pair_name}' (no P2P map available)"
             )
-            for tensor_name, tensor in pair_state.tensors.items():
+            for i, tensor in enumerate(pair_state.tensors):
                 logger.debug(
-                    f"Agent {self.rank}: Transferring tensor_name: '{tensor_name}' tensor: {tensor.shape} for pair '{pair_name}' using simple send/recv"
+                    f"Agent {self.rank}: Transferring tensor {i} shape: {tensor.shape} for pair '{pair_name}' using simple send/recv"
                 )
                 if transfer_type == "send":
                     torch.distributed.send(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
                 elif transfer_type == "recv":
                     torch.distributed.recv(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
-                logger.debug(f"Agent {self.rank}: Transfered tensor_name: '{tensor_name}'")
+                logger.debug(f"Agent {self.rank}: Transfered tensor {i}")
 
         # Cleanup
         dist.barrier(group=pair_state.pair_group)
@@ -453,97 +453,112 @@ class TensorBusAgent:
         with self.state_env.begin(write=True, db=self.state_db) as txn:
             txn.put(statedb_key, msgspec.msgpack.encode(state))
 
-    def _handle_register_tensor_batch(self, msg: RegisterTensorBatch):
-        """Handle RegisterTensorBatch command for batch tensor registration."""
-        pair_name = msg.pair_name
-        tensor_names = msg.tensor_names
-        tensor_payloads = msg.tensor_payloads
+    def _handle_register_tensors(self, msg: RegisterTensors):
+        """Handle RegisterTensors command for batch tensor registration."""
+        tensors = msg.tensors  # list[tuple[str, memoryview]]
         bucket_size = msg.bucket_size
 
-        if pair_name not in self.pairs:
-            raise ValueError(f"RegisterTensorBatch for unknown pair: {pair_name}")
+        logger.info(f"Agent {self.rank}: Starting batch registration of {len(tensors)} tensors")
 
-        pair_state = self.pairs[pair_name]
+        # Group tensors by pair_name
+        grouped: dict[str, list[memoryview]] = {}
+        for pair_name, tensor_payload in tensors:
+            if pair_name not in grouped:
+                grouped[pair_name] = []
+            grouped[pair_name].append(tensor_payload)
 
-        logger.info(
-            f"Agent {self.rank}: Starting batch registration of {len(tensor_names)} tensors for pair '{pair_name}'"
-        )
+        # Process each pair
+        for pair_name, tensor_payloads in grouped.items():
+            if pair_name not in self.pairs:
+                raise ValueError(f"RegisterTensors for unknown pair: {pair_name}")
 
-        # Unified chunk lists (no source/target separation)
-        all_send_chunks = []
-        all_recv_chunks = []
+            pair_state = self.pairs[pair_name]
 
-        for tensor_name, tensor_payload in zip(tensor_names, tensor_payloads, strict=True):
-            tensor = ForkingPickler.loads(tensor_payload)
-            pair_state.tensors[tensor_name] = tensor
+            logger.info(f"Agent {self.rank}: Registering {len(tensor_payloads)} tensors for pair '{pair_name}'")
 
-            my_rank0 = pair_state.local_ranks[0]
-            target_rank0 = pair_state.remote_ranks[0]
-            my_dtype_list = [tensor.dtype]
-            target_dtype_list = [None]
+            # Unified chunk lists (no source/target separation)
+            all_send_chunks = []
+            all_recv_chunks = []
 
-            if self.rank == my_rank0:
-                if pair_state.local_is_first:
-                    dist.send_object_list(my_dtype_list, dst=target_rank0)
-                    dist.recv_object_list(target_dtype_list, src=target_rank0)
-                else:
-                    dist.recv_object_list(target_dtype_list, src=target_rank0)
-                    dist.send_object_list(my_dtype_list, dst=target_rank0)
+            for i, tensor_payload in enumerate(tensor_payloads):
+                tensor = ForkingPickler.loads(tensor_payload)
+                pair_state.tensors.append(tensor)
 
-            dist.broadcast_object_list(target_dtype_list, src=my_rank0, group=pair_state.local_group)
-            target_dtype = target_dtype_list[0]
-            logger.debug(f"Agent {self.rank}: target dtype {target_dtype}")
+                # Exchange dtype information between rank0s
+                my_rank0 = pair_state.local_ranks[0]
+                target_rank0 = pair_state.remote_ranks[0]
+                my_dtype_list = [tensor.dtype]
+                target_dtype_list = [None]
 
-            if pair_state.m2m_send and pair_state.m2m_recv:
-                logger.debug(
-                    f"Agent {self.rank}: Generating chunks for tensor '{tensor_name}' with shape {tensor.shape}"
-                )
+                if self.rank == my_rank0:
+                    if pair_state.local_is_first:
+                        dist.send_object_list(my_dtype_list, dst=target_rank0)
+                        dist.recv_object_list(target_dtype_list, src=target_rank0)
+                    else:
+                        dist.recv_object_list(target_dtype_list, src=target_rank0)
+                        dist.send_object_list(my_dtype_list, dst=target_rank0)
 
-                # Generate send chunks for this tensor
-                send_chunks = map_to_chunk_ops(
-                    m2m_map=pair_state.m2m_send.m2m_map,
-                    rank=self.rank,
-                    source_num_slicers=pair_state.m2m_send.source_num_slicers,
-                    target_num_slicers=pair_state.m2m_send.target_num_slicers,
-                    source_tensor=tensor,
-                    target_tensor=tensor,
-                    target_dtype=target_dtype,
-                )
-                all_send_chunks.extend(send_chunks)
+                dist.broadcast_object_list(target_dtype_list, src=my_rank0, group=pair_state.local_group)
+                target_dtype = target_dtype_list[0]
+                logger.debug(f"Agent {self.rank}: target dtype {target_dtype}")
 
-                # Generate recv chunks for this tensor
-                recv_chunks = map_to_chunk_ops(
-                    m2m_map=pair_state.m2m_recv.m2m_map,
-                    rank=self.rank,
-                    source_num_slicers=pair_state.m2m_recv.source_num_slicers,
-                    target_num_slicers=pair_state.m2m_recv.target_num_slicers,
-                    source_tensor=tensor,
-                    target_tensor=tensor,
-                    target_dtype=target_dtype,
-                )
-                all_recv_chunks.extend(recv_chunks)
-        logger.debug(f"Agent {self.rank}: all send chunks: {all_send_chunks} all recv chunks: {all_recv_chunks}")
-        logger.info(
-            f"Agent {self.rank}: all send chunks: {len(all_send_chunks)} all recv chunks: {len(all_recv_chunks)}"
-        )
-        # Store unified chunk lists directly on pair state
-        pair_state.send_chunks = all_send_chunks
-        pair_state.recv_chunks = all_recv_chunks
+                if pair_state.m2m_send and pair_state.m2m_recv:
+                    logger.debug(f"Agent {self.rank}: Generating chunks for tensor {i} with shape {tensor.shape}")
 
-        if bucket_size:
-            pair_state.send_buckets = chunk_to_bucket_ops(
-                chunks=all_send_chunks,
-                bucket_size=bucket_size,
-            )
-            pair_state.recv_buckets = chunk_to_bucket_ops(
-                chunks=all_recv_chunks,
-                bucket_size=bucket_size,
-            )
+                    # Generate send chunks for this tensor
+                    send_chunks = map_to_chunk_ops(
+                        m2m_map=pair_state.m2m_send.m2m_map,
+                        rank=self.rank,
+                        source_num_slicers=pair_state.m2m_send.source_num_slicers,
+                        target_num_slicers=pair_state.m2m_send.target_num_slicers,
+                        source_tensor=tensor,
+                        target_tensor=tensor,
+                        target_dtype=target_dtype,
+                    )
+                    all_send_chunks.extend(send_chunks)
+
+                    # Generate recv chunks for this tensor
+                    recv_chunks = map_to_chunk_ops(
+                        m2m_map=pair_state.m2m_recv.m2m_map,
+                        rank=self.rank,
+                        source_num_slicers=pair_state.m2m_recv.source_num_slicers,
+                        target_num_slicers=pair_state.m2m_recv.target_num_slicers,
+                        source_tensor=tensor,
+                        target_tensor=tensor,
+                        target_dtype=target_dtype,
+                    )
+                    all_recv_chunks.extend(recv_chunks)
+
+            logger.debug(f"Agent {self.rank}: all send chunks: {all_send_chunks} all recv chunks: {all_recv_chunks}")
             logger.info(
-                f"Agent {self.rank}: send buckets: {len(pair_state.send_buckets)} recv buckets: {len(pair_state.recv_buckets)}"
+                f"Agent {self.rank}: all send chunks: {len(all_send_chunks)} all recv chunks: {len(all_recv_chunks)}"
             )
+
+            # Store unified chunk lists directly on pair state
+            pair_state.send_chunks = all_send_chunks
+            pair_state.recv_chunks = all_recv_chunks
+
+            # Convert chunks to buckets if bucket_size is specified
+            if bucket_size:
+                pair_state.send_buckets = chunk_to_bucket_ops(
+                    chunks=all_send_chunks,
+                    bucket_size=bucket_size,
+                )
+                pair_state.recv_buckets = chunk_to_bucket_ops(
+                    chunks=all_recv_chunks,
+                    bucket_size=bucket_size,
+                )
+                logger.info(
+                    f"Agent {self.rank}: send buckets: {len(pair_state.send_buckets)} recv buckets: {len(pair_state.recv_buckets)}"
+                )
+
+            logger.info(
+                f"Agent {self.rank}: Completed registration for pair '{pair_name}': "
+                f"send ({len(all_send_chunks)} chunks), recv ({len(all_recv_chunks)} chunks)"
+            )
+
         logger.info(
-            f"Agent {self.rank}: Completed batch registration of {len(tensor_names)} tensors for pair '{pair_name}': "
+            f"Agent {self.rank}: Completed batch registration of {len(tensors)} tensors across {len(grouped)} pairs"
         )
 
     def _collect_mesh_placement_info(

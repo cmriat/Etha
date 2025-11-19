@@ -25,18 +25,18 @@ class Transfer(BaseCommand):
     transfer_type: Literal["send", "recv"]
 
 
-class RegisterTensorBatch(BaseCommand):
+class RegisterTensors(BaseCommand):
     """Register multiple tensors for zero-copy sharing between processes.
 
     Batch Register Tensors for improved efficiency when registering
     multiple tensors. Reduces LMDB cross-process communication overhead by
     sending all tensors in a single command instead of multiple individual commands.
+
+    Supports optional bucketization for optimizing large tensor transfers.
     """
 
-    pair_name: str
-    tensor_names: list[str]
-    tensor_payloads: list[memoryview]
-    bucket_size: int | None = None
+    tensors: list[tuple[str, memoryview]]  # (pair_name, tensor_payload)
+    bucket_size: int | None = None  # Optional bucket size in bytes
 
 
 class RegisterPair(BaseCommand):
@@ -72,4 +72,4 @@ class QueryStatus(BaseCommand):
     state_name: str
 
 
-Message = Transfer | RegisterTensorBatch | RegisterPair | QueryStatus
+Message = Transfer | RegisterTensors | RegisterPair | QueryStatus

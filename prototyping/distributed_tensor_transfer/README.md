@@ -126,15 +126,19 @@ distributed_tensor = distribute_tensor(
 
 ### P2P注册
 ```python
-# 注册设备网格和放置配置以进行优化
-handler = client.register_pair(
+# 1. 注册 pair（初始化行为）
+client.register_pair(
     pair_name=PAIR_NAME,
     local_name=LOCAL_NAME,
     remote_name=REMOTE_NAME,
-    tensor=distributed_tensor,
     device_mesh=device_mesh,
     placements=tuple(placements),
 )
+
+# 2. 注册 tensors（获取handler用于细粒度调度）
+handler = client.register_tensors([
+    (distributed_tensor.to_local(), PAIR_NAME)
+])
 ```
 
 ## 🔍 调试技巧

@@ -162,7 +162,7 @@ class InferenceActor:
 
         # Register pair for distributed tensor transfer
         logger.info(f"Registering pair '{self.PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
-        self.handler = self.client.register_pair(
+        self.client.register_pair(
             pair_name=self.PAIR_NAME,
             local_name=LOCAL_NAME,
             remote_name=REMOTE_NAME,
@@ -171,15 +171,8 @@ class InferenceActor:
             placements=tuple(self.engine.placements),
         )
 
-        # Register the distributed tensor
-        sem = self.handler.register_tensor(
-            tensor_name="distributed_param",
-            tensor=self.engine.distributed_param.to_local(),
-            bucket_size=256 * 1024 * 1024,
-            blocking=False,
-        )
-        sem.acquire()
-        sem.close()
+        # Register the distributed tensor and get handler
+        self.handler = self.client.register_tensors([(self.engine.distributed_param.to_local(), self.PAIR_NAME)])
         logger.info(f"✅ Pair '{self.PAIR_NAME}' registered successfully!")
 
     def _print_env_debug(self):

@@ -92,7 +92,7 @@ def main():
 
     # Register pair for distributed tensor transfer
     logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
-    handler = client.register_pair(
+    client.register_pair(
         pair_name=PAIR_NAME,
         local_name=LOCAL_NAME,
         remote_name=REMOTE_NAME,
@@ -101,15 +101,8 @@ def main():
         placements=tuple(trainer.placements),
     )
 
-    # Register the distributed tensor
-    sem = handler.register_tensor(
-        tensor_name="distributed_param",
-        tensor=trainer.distributed_param.to_local(),
-        bucket_size=256 * 1024 * 1024,
-        blocking=False,
-    )
-    sem.acquire()
-    sem.close()
+    # Register the distributed tensor and get handler
+    handler = client.register_tensors([(trainer.distributed_param.to_local(), PAIR_NAME)])
     logger.info(f"✅ Pair '{PAIR_NAME}' registered successfully!")
 
     # Training loop with distributed weight transfer
