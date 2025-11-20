@@ -18,7 +18,7 @@ from multiprocessing.reduction import ForkingPickler
 import torch
 from shared import LMDB_QUEUE_PATH
 
-from etha.tensor_bus import CommandQueue, RegisterTensorBatch
+from etha.tensor_bus import CommandQueue, RegisterTensors
 
 
 def main():
@@ -38,7 +38,7 @@ def main():
         print("[reader] Make sure writer.py is running first.")
         return
 
-    if not isinstance(msg, RegisterTensorBatch):
+    if not isinstance(msg, RegisterTensors):
         print(f"[reader] ❌ Unexpected message type: {type(msg)}")
         print(f"[reader] Expected RegisterTensor, got {msg}")
         return

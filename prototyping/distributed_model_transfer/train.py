@@ -104,7 +104,7 @@ def main():
 
         # Register pair for distributed tensor transfer
         logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
-        handler = client.register_pair(
+        client.init_pair(
             pair_name=PAIR_NAME,
             local_name=LOCAL_NAME,
             remote_name=REMOTE_NAME,
@@ -114,32 +114,25 @@ def main():
             timeout=1000,
         )
         logger.info(f"✅ Pair '{PAIR_NAME}' registered successfully!")
-        # Register the distributed tensor
-        tensor_names = []
-        tensor_data = []
-        for name, param in trainer.model.named_parameters():
+
+        # Register the distributed tensors
+        tensors_to_register = []
+        for _, param in trainer.model.named_parameters():
             if not isinstance(param, DTensor):
                 continue
-            tensor_names.append(name)
-            tensor_data.append(param.data.to_local())
+            tensors_to_register.append((param.data.to_local(), PAIR_NAME))
 
-        # Batch register all tensors
-        sem = handler.register_tensor_batch(
-            tensor_names=tensor_names,
-            tensors=tensor_data,
-            bucket_size=256 * 1024 * 1024,
-            blocking=False,
-        )
-        sem.acquire()
-        sem.close()
-
-        logger.info(f"✅Tensors for Pair '{PAIR_NAME}' registered successfully!")
+        # Transfer loop - register batch for each step
         i = 0
         while i < 50:
-            i += 1
+            batch_id = f"transfer_step_{i}"
+            handler = client.register_tensors(batch_id=batch_id, tensors=tensors_to_register)
+            logger.info(f"✅ Batch '{batch_id}' registered successfully!")
+
             logger.info(f"step {i} transfer begin")
             handler.transfer(transfer_type="send", blocking=True, timeout=60)
             logger.info(f"step {i} transfer completed")
+            i += 1
     finally:
         client.close()
         logger.info("Distributed training worker shutdown complete")

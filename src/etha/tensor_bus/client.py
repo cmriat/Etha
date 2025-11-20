@@ -3,6 +3,8 @@
 Host processes use TensorBusClient to register pairs and communicate with Agents.
 """
 
+from __future__ import annotations
+
 import os
 import time
 import uuid
@@ -19,10 +21,90 @@ import posix_ipc
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
-from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
+from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
+
+
+class BatchHandler:
+    """Handler for batch tensor operations across multiple pairs."""
+
+    def __init__(self, client: TensorBusClient, batch_id: str, pair_names: list[str]):
+        """Initialize BatchHandler.
+
+        Args:
+            client: TensorBusClient instance
+            batch_id: Unique identifier for this batch
+            pair_names: List of pair names managed by this handler
+        """
+        self._client_ref = weakref.ref(client)
+        self.batch_id = batch_id
+        self.pair_names = pair_names
+
+    @property
+    def client(self) -> TensorBusClient:
+        """Get client from weak reference.
+
+        Raises:
+            RuntimeError: If client has been garbage collected
+        """
+        client = self._client_ref()
+        if client is None:
+            raise RuntimeError(f"TensorBusClient has been garbage collected. BatchHandler is no longer valid.")
+        return client
+
+    def transfer(
+        self, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
+    ) -> posix_ipc.Semaphore:
+        """Transfer all tensors in this batch atomically.
+
+        Sends a single Transfer command to execute all pairs in the batch simultaneously
+        using flattened chunks/buckets for optimal performance.
+
+        Args:
+            transfer_type: "send" or "recv"
+            blocking: If True, block until transfer completes
+            timeout: Timeout in seconds
+
+        Returns:
+            Semaphore for operation completion
+        """
+        msg = Transfer(batch_id=self.batch_id, transfer_type=transfer_type)
+        return self.client._execute_command_with_semaphore(
+            msg, "transfer", f"batch_{self.batch_id}_{transfer_type}", blocking=blocking, timeout=timeout
+        )
+
+    def query_transfer_signal(self, blocking: bool = True, timeout: float = 30.0) -> bool:
+        """Query transfer signal status for this batch.
+
+        Returns:
+            Transfer signal status (True if sender has completed transfer)
+        """
+        return self.client.query_transfer_signal(self.batch_id, blocking=blocking, timeout=timeout)
+
+    def close(self, blocking: bool = True, timeout: float = 30.0):
+        """Explicitly cleanup batch state in agent.
+
+        Sends a CleanupBatch command to free resources associated with this batch.
+        After calling close(), this handler should not be used.
+
+        Args:
+            blocking: If True, block until cleanup completes
+            timeout: Timeout in seconds
+        """
+        msg = CleanupBatch(batch_id=self.batch_id)
+        self.client._execute_command_with_semaphore(
+            msg, "cleanup_batch", f"batch_{self.batch_id}", blocking=blocking, timeout=timeout
+        )
+
+    def __del__(self):
+        """Best-effort cleanup on handler destruction."""
+        try:
+            # Use non-blocking cleanup in destructor to avoid hanging during shutdown
+            self.close(blocking=False)
+        except Exception:
+            pass
 
 
 def generate_semaphore_name(command_type: str, pair_name: str) -> str:
@@ -63,7 +145,6 @@ class TensorBusClient:
             )
 
         self.agent_state_lmdb_path = agent_state_lmdb_path
-        self.handlers: dict[str, PairHandler] = {}
 
         self.state_env = None
         self.state_db = None
@@ -103,7 +184,7 @@ class TensorBusClient:
 
         return sem
 
-    def register_pair(
+    def init_pair(
         self,
         pair_name: str,
         local_name: str,
@@ -113,19 +194,16 @@ class TensorBusClient:
         placements: tuple[Placement, ...] | None = None,
         blocking: bool = True,
         timeout: float = 30.0,
-    ) -> "PairHandler":
-        """Register a pair and return handler.
+    ) -> None:
+        """Register a pair for communication.
 
         Args:
             pair_name: Unique identifier for this pair
             local_name: Name of local peer
             remote_name: Name of remote peer
-            tensor: Local tensor to be registered
             expected_world_size: Number of ranks for local peer
             device_mesh: Local device mesh configuration
             placements: Local tensor placement strategy
-        Returns:
-            PairHandler for this pair
 
         Blocks until:
             - Agent registers to TCPStore
@@ -147,7 +225,7 @@ class TensorBusClient:
             placements_bytes = ForkingPickler.dumps(placements)
             placements_payload = memoryview(placements_bytes)
 
-        msg = RegisterPair(
+        msg = InitPair(
             pair_name=pair_name,
             local_name=local_name,
             expected_world_size=expected_world_size,
@@ -169,13 +247,7 @@ class TensorBusClient:
                 else:
                     logger.info(f"TensorBusClient[{self.agent_rank}]: Pair '{pair_name}' matched! ")
 
-        # Create PairHandler
-        handler = PairHandler(client=self, pair_name=pair_name)
-        self.handlers[pair_name] = handler
-
         logger.info(f"TensorBusClient[{self.agent_rank}]: Pair '{pair_name}' registered successfully")
-
-        return handler
 
     def transfer(
         self, pair_name: str, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
@@ -186,61 +258,61 @@ class TensorBusClient:
         )
         return self._execute_command_with_semaphore(msg, "transfer", pair_name, blocking=blocking, timeout=timeout)
 
-    def query_transfer_signal(self, pair_name: str, blocking: bool = True, timeout: float = 30.0) -> bool:
-        query_msg = QueryStatus(pair_name=pair_name, state_name="transfer_signal")
-        logger.info(f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for pair '{pair_name}'")
+    def query_transfer_signal(self, batch_id: str, blocking: bool = True, timeout: float = 30.0) -> bool:
+        query_msg = QueryStatus(batch_id=batch_id, state_name="transfer_signal")
+        logger.info(f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for batch '{batch_id}'")
         # Execute with semaphore synchronization (blocking)
-        self._execute_command_with_semaphore(query_msg, "query", pair_name, blocking=blocking, timeout=timeout)
+        self._execute_command_with_semaphore(
+            query_msg, "query", f"batch_{batch_id}", blocking=blocking, timeout=timeout
+        )
 
         # Get the status from LMDB
-        state_key = f"pair:{pair_name}/state:transfer_signal".encode()
+        state_key = f"batch:{batch_id}/state:transfer_signal".encode()
         with self.state_env.begin(db=self.state_db) as txn:
             state_bytes = txn.get(state_key)
             if state_bytes:
                 state = msgspec.msgpack.Decoder(bool).decode(state_bytes)
                 logger.info(
-                    f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for pair '{pair_name}': {state}"
+                    f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for batch '{batch_id}': {state}"
                 )
                 return state
             else:
                 return False
 
-    def register_tensor_batch(
+    def register_tensors(
         self,
-        pair_name: str,
-        tensor_names: list[str],
-        tensors: list[torch.Tensor],
+        batch_id: str,
+        tensors: list[tuple[torch.Tensor, str]],
         bucket_size: int | None = None,
-        blocking: bool = True,
         timeout: float = 30.0,
-    ):
-        """Register multiple tensors in batch.
+    ) -> BatchHandler:
+        """Register multiple tensors across pairs.
+
+        This operation always blocks until registration completes,
+        ensuring the returned BatchHandler is immediately usable.
 
         Args:
-            pair_name: pair name
-            tensor_names: list of tensor names
-            tensors: list of tensors
-            bucket_size: optional bucket size in bytes for chunk bucketing
-            blocking: whether to block until completion
+            batch_id: Unique identifier for this batch (must be same on both send/recv sides)
+            tensors: list of (tensor, pair_name) tuples
+            bucket_size: optional bucket size in bytes for bucketization optimization
             timeout: timeout in seconds
+
+        Returns:
+            BatchHandler for managing the registered tensors
         """
-        if len(tensor_names) != len(tensors):
-            raise ValueError(
-                f"tensor_names and tensors must have same length, got {len(tensor_names)} and {len(tensors)}"
-            )
+        if not tensors:
+            raise ValueError("tensors list cannot be empty")
 
-        tensor_payloads = [ForkingPickler.dumps(tensor.detach()) for tensor in tensors]
+        tensor_tuples = [(pair_name, (ForkingPickler.dumps(tensor.detach()))) for tensor, pair_name in tensors]
 
-        msg = RegisterTensorBatch(
-            pair_name=pair_name,
-            tensor_names=tensor_names,
-            tensor_payloads=tensor_payloads,
-            bucket_size=bucket_size,
+        msg = RegisterTensors(batch_id=batch_id, tensors=tensor_tuples, bucket_size=bucket_size)
+
+        self._execute_command_with_semaphore(
+            msg, "register_tensors", f"batch_{batch_id}", blocking=True, timeout=timeout
         )
 
-        return self._execute_command_with_semaphore(
-            msg, "register_tensor_batch", pair_name, blocking=blocking, timeout=timeout
-        )
+        unique_pair_names = list(dict.fromkeys(pair_name for _, pair_name in tensors))
+        return BatchHandler(client=self, batch_id=batch_id, pair_names=unique_pair_names)
 
     def _connect_agent(self, path: str, timeout: float):
         """Connect to Agent.
@@ -321,92 +393,3 @@ class TensorBusClient:
         if self.state_env is not None:
             self.state_env.close()
         logger.info(f"TensorBusClient[{self.agent_rank}]: Closed")
-
-
-class PairHandler:
-    """Lightweight handler for a single Pair."""
-
-    def __init__(self, client: TensorBusClient, pair_name: str):
-        """Initialize PairHandler.
-
-        Args:
-            client: TensorBusClient instance
-            pair_name: Pair name
-        """
-        self._client_ref = weakref.ref(client)  # Weak reference to avoid circular ref
-        self.pair_name = pair_name
-
-    @property
-    def client(self) -> TensorBusClient:
-        """Get client from weak reference.
-
-        Raises:
-            RuntimeError: If client has been garbage collected
-        """
-        client = self._client_ref()
-        if client is None:
-            raise RuntimeError(
-                f"TensorBusClient[{self.client.agent_rank}]: has been garbage collected. PairHandler '{self.pair_name}' is no longer valid."
-            )
-        return client
-
-    def transfer(
-        self, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
-    ) -> posix_ipc.Semaphore:
-        """Transfer tensor to remote side.
-
-        Args:
-            blocking: If True, block until send completes
-
-        Returns:
-            Semaphore for operation completion
-        """
-        return self.client.transfer(self.pair_name, transfer_type, blocking=blocking, timeout=timeout)
-
-    def query_transfer_signal(self, blocking: bool = True, timeout: float = 30.0) -> bool:
-        """Query transfer signal status of the pair.
-
-        Returns:
-            if the transfer signal is active
-        """
-        return self.client.query_transfer_signal(self.pair_name, blocking=blocking, timeout=timeout)
-
-    def register_tensor(
-        self,
-        tensor_name: str,
-        tensor: torch.Tensor,
-        bucket_size: int | None = None,
-        blocking: bool = False,
-        timeout: float = 30.0,
-    ):
-        """Register a tensor to the pair."""
-        return self.client.register_tensor_batch(
-            pair_name=self.pair_name,
-            tensor_names=[tensor_name],
-            tensors=[tensor],
-            bucket_size=bucket_size,
-            blocking=blocking,
-            timeout=timeout,
-        )
-
-    def register_tensor_batch(
-        self,
-        tensor_names: list[str],
-        tensors: list[torch.Tensor],
-        bucket_size: int | None = None,
-        blocking: bool = False,
-        timeout: float = 30.0,
-    ):
-        """Register multiple tensors in batch."""
-        return self.client.register_tensor_batch(
-            pair_name=self.pair_name,
-            tensor_names=tensor_names,
-            tensors=tensors,
-            bucket_size=bucket_size,
-            blocking=blocking,
-            timeout=timeout,
-        )
-
-    def close(self):
-        """Cleanup (placeholder for future use)."""
-        pass

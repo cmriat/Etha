@@ -18,6 +18,7 @@ export NCCL_SOCKET_IFNAME="eth0"
 export NCCL_IB_GID_INDEX="3"
 export NCCL_IB_QPS_PER_CONNECTION="2"
 export NCCL_IB_TIME_OUT="22"
+export NCCL_IB_ECE_ENABLE="1"
 # export NCCL_DEBUG="INFO"
 
 # Distributed training environment variables

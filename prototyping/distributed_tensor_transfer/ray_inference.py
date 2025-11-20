@@ -15,7 +15,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import ray
 import torch
-import torch.distributed as dist
 
 # Note: common module and etha.tensor_bus imports moved to InferenceActor.__init__ to avoid Ray worker import errors
 from torch.distributed._tensor import DeviceMesh, distribute_tensor
@@ -162,7 +161,7 @@ class InferenceActor:
 
         # Register pair for distributed tensor transfer
         logger.info(f"Registering pair '{self.PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
-        self.handler = self.client.register_pair(
+        self.client.init_pair(
             pair_name=self.PAIR_NAME,
             local_name=LOCAL_NAME,
             remote_name=REMOTE_NAME,
@@ -171,15 +170,6 @@ class InferenceActor:
             placements=tuple(self.engine.placements),
         )
 
-        # Register the distributed tensor
-        sem = self.handler.register_tensor(
-            tensor_name="distributed_param",
-            tensor=self.engine.distributed_param.to_local(),
-            bucket_size=256 * 1024 * 1024,
-            blocking=False,
-        )
-        sem.acquire()
-        sem.close()
         logger.info(f"✅ Pair '{self.PAIR_NAME}' registered successfully!")
 
     def _print_env_debug(self):
@@ -213,17 +203,32 @@ class InferenceActor:
         logger.info("=" * 80 + "\n")
 
     def run(self):
-        """Run the inference loop."""
+        """Run the inference loop.
+
+        Synchronizes with train side using matching batch_id pattern.
+        Each step waits for train side to send data before receiving.
+        """
         logger.info(f"Starting inference loop for rank {self.info.global_rank}...")
 
         try:
-            while True:
-                dist.barrier()
-                status = self.client.query_transfer_signal(self.PAIR_NAME)
-                if status == True:
-                    self.engine.stop()
-                    self.handler.transfer(transfer_type="recv", blocking=True)
-                    self.engine.resume()
+            for step in range(50):
+                # Register tensors with unique batch_id matching train side
+                # MUST register before waiting for signal to avoid deadlock
+                batch_id = f"transfer_step_{step}"
+                handler = self.client.register_tensors(
+                    batch_id=batch_id, tensors=[(self.engine.distributed_param.to_local(), self.PAIR_NAME)]
+                )
+
+                # Wait for train side to signal it has sent data for this step
+                while not handler.query_transfer_signal():
+                    time.sleep(0.1)
+
+                self.engine.stop()
+
+                # Receive updated distributed tensor
+                handler.transfer(transfer_type="recv", blocking=True)
+
+                self.engine.resume()
                 self.engine.step()
 
         except KeyboardInterrupt:

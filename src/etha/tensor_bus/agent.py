@@ -26,8 +26,9 @@ from etha.comm import (
 )
 
 from .utils import setup_cuda_rebuild_patch
-from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensorBatch
+from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors
 from .pair_state import M2MMap, PairState
+from .batch_state import BatchState
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
@@ -36,13 +37,7 @@ TIME_INTERVAL = 0.001  # 1ms
 
 
 class TensorBusAgent:
-    """Tensor Bus Agent.
-
-    Responsibilities:
-    1. Listen to CommandQueue for Host commands
-    2. Handle RegisterPair: write to TCPStore, poll until both sides ready
-    3. Handle Send/Recv: execute m2m communication
-    """
+    """Tensor Bus Agent."""
 
     def __init__(
         self,
@@ -101,8 +96,11 @@ class TensorBusAgent:
         self._update_heartbeat()
         logger.info(f"Agent {rank}: Initial heartbeat written")
 
-        # Pair registry
+        # Topology registry
         self.pairs: dict[str, PairState] = {}
+
+        # Batch registry
+        self.batches: dict[str, BatchState] = {}
 
         # Setup CUDA rebuild_cuda_tensor patch (once per process)
         setup_cuda_rebuild_patch()
@@ -125,14 +123,16 @@ class TensorBusAgent:
         """Dispatch command to appropriate handler and handle semaphore release."""
         try:
             match command:
-                case RegisterPair():
-                    self._handle_register_pair(command)
+                case InitPair():
+                    self._handle_init_pair(command)
                 case Transfer():
                     self._handle_transfer(command)
                 case QueryStatus():
                     self._handle_query_status(command)
-                case RegisterTensorBatch():
-                    self._handle_register_tensor_batch(command)
+                case RegisterTensors():
+                    self._handle_register_tensors(command)
+                case CleanupBatch():
+                    self._handle_cleanup_batch(command)
                 case _:
                     logger.warning(f"Agent {self.rank}: Unknown command type: {type(command)}")
                     return  # Don't release semaphore for unknown commands
@@ -148,7 +148,7 @@ class TensorBusAgent:
                 self._release_semaphore(command.semaphore_name)
             raise
 
-    def _handle_register_pair(self, msg: RegisterPair):
+    def _handle_init_pair(self, msg: InitPair):
         """Handle RegisterPair command.
 
         Flow:
@@ -168,59 +168,65 @@ class TensorBusAgent:
         logger.info(f"Agent {self.rank}: RegisterPair pair={pair_name}, local={local_name} -> remote={remote_name}")
 
         # Step 1: Write local registration to TCPStore
+        logger.info(f"Agent {self.rank}: About to write local registration to TCPStore")
         local_key = f"pair:{pair_name}/rank:{self.rank}/{local_name}"
         self.store.set(local_key, "1")
-        logger.debug(f"Agent {self.rank}: Wrote {local_key} = '1' to TCPStore")
+        logger.info(f"Agent {self.rank}: Wrote {local_key} = '1' to TCPStore")
 
         # Step 2: Write expected_world_size (all ranks write the same value, idempotent)
+        logger.info(f"Agent {self.rank}: About to write expected_world_size")
         expected_key = f"pair:{pair_name}/{local_name}/expected_world_size"
         self.store.set(expected_key, str(expected_local))
-        logger.debug(f"Agent {self.rank}: Wrote {expected_key}={expected_local}")
+        logger.info(f"Agent {self.rank}: Wrote {expected_key}={expected_local}")
 
         # Step 3: Write device mesh and placement info to TCPStore
         if msg.mesh_shape_payload is not None and msg.placements_payload is not None:
+            logger.info(f"Agent {self.rank}: About to write device mesh info")
             # Convert memoryview to bytes, then to base64 string for TCPStore
             mesh_shape_key = f"pair:{pair_name}/rank:{self.rank}/mesh_shape"
             mesh_shape_bytes = bytes(msg.mesh_shape_payload)
-            self.store.set(mesh_shape_key, base64.b64encode(mesh_shape_bytes).decode("ascii"))
+            mesh_shape_b64 = base64.b64encode(mesh_shape_bytes).decode("ascii")
+            logger.info(f"Agent {self.rank}: mesh_shape_b64 length: {len(mesh_shape_b64)}, about to store.set")
+            self.store.set(mesh_shape_key, mesh_shape_b64)
+            logger.info(f"Agent {self.rank}: Wrote mesh_shape to TCPStore")
 
             placements_key = f"pair:{pair_name}/rank:{self.rank}/placements"
             placements_bytes = bytes(msg.placements_payload)
-            self.store.set(placements_key, base64.b64encode(placements_bytes).decode("ascii"))
-
-            logger.debug(f"Agent {self.rank}: Wrote device mesh and placement info to TCPStore")
+            placements_b64 = base64.b64encode(placements_bytes).decode("ascii")
+            logger.info(f"Agent {self.rank}: placements_b64 length: {len(placements_b64)}, about to store.set")
+            self.store.set(placements_key, placements_b64)
+            logger.info(f"Agent {self.rank}: Wrote placements to TCPStore")
+        else:
+            logger.info(f"Agent {self.rank}: No mesh/placement info to write")
 
         # Step 4: Poll until local peer is complete
-        logger.debug(
-            f"Agent {self.rank}: Waiting for local peer '{local_name}' to complete (expected={expected_local})"
+        logger.info(f"Agent {self.rank}: Waiting for local peer '{local_name}' to complete (expected={expected_local})")
+        local_ranks = self._wait_until_ranks_ready(
+            key_pattern=f"pair:{pair_name}/rank:{{rank}}/{local_name}",
+            candidate_ranks=set(range(self.world_size)),
+            expected_count=expected_local,
+            description=f"Waiting for local peer '{local_name}'",
         )
-        local_ranks = []
-        while True:
-            local_ranks = self._scan_peer_ranks(pair_name, local_name)
-            if len(local_ranks) < expected_local:
-                time.sleep(TIME_INTERVAL)
-            else:
-                break
-
         logger.info(f"Agent {self.rank}: Local peer complete: {local_ranks}")
 
         # Step 5: Poll until remote peer is complete
         logger.info(f"Agent {self.rank}: Waiting for remote peer '{remote_name}'")
 
-        # First, wait for remote peer to write expected_world_size
         remote_expected_key = f"pair:{pair_name}/{remote_name}/expected_world_size"
+
+        while not self.store.check([remote_expected_key]):
+            time.sleep(TIME_INTERVAL)
 
         expected_remote = int(self.store.get(remote_expected_key).decode())
         logger.debug(f"Agent {self.rank}: Remote peer '{remote_name}' expects {expected_remote} ranks")
 
         # Then, wait for all remote ranks to register
-        remote_ranks = []
-        while True:
-            remote_ranks = self._scan_peer_ranks(pair_name, remote_name)
-            if len(remote_ranks) < expected_remote:
-                time.sleep(TIME_INTERVAL)
-            else:
-                break
+        remote_ranks = self._wait_until_ranks_ready(
+            key_pattern=f"pair:{pair_name}/rank:{{rank}}/{remote_name}",
+            candidate_ranks=set(range(self.world_size)),
+            expected_count=expected_remote,
+            description=f"Waiting for remote peer '{remote_name}'",
+        )
 
         logger.info(f"Agent {self.rank}: Remote peer '{remote_name}' complete: {remote_ranks}")
         logger.debug(f"Agent {self.rank}: Creating pair group with ranks: {local_ranks + remote_ranks}")
@@ -366,86 +372,116 @@ class TensorBusAgent:
         )
 
     def _handle_transfer(self, msg: Transfer):
-        pair_name = msg.pair_name
+        """Handle Transfer command for batch tensor transfer."""
+        batch_id = msg.batch_id
         transfer_type = msg.transfer_type
-        logger.info(f"Agent {self.rank}: Handling transfer for pair '{pair_name}'")
+        logger.info(f"Agent {self.rank}: Handling transfer for batch '{batch_id}' ({transfer_type})")
 
-        # Set transfer ready flag for this rank
-        transfer_ready_key = f"pair:{pair_name}/rank:{self.rank}/state:ready"
+        if batch_id not in self.batches:
+            raise ValueError(f"Transfer for unknown batch: {batch_id}")
+
+        batch_state = self.batches[batch_id]
+
+        # Batch-scoped synchronization: set ready flag with batch_id
+        transfer_ready_key = f"batch:{batch_id}/rank:{self.rank}/state:ready"
         self.store.set(transfer_ready_key, "1")
         logger.debug(f"Agent {self.rank}: Set {transfer_ready_key} = '1'")
 
-        transfer_singal_key = f"pair:{pair_name}/state:transfer_signal"
-        self.store.set(transfer_singal_key, "1")
-        logger.debug(f"Agent {self.rank}: Set {transfer_singal_key} = '1'")
+        transfer_signal_key = f"batch:{batch_id}/state:transfer_signal"
+        self.store.set(transfer_signal_key, "1")
+        logger.debug(f"Agent {self.rank}: Set {transfer_signal_key} = '1'")
 
-        # Wait for all ranks to be ready
-        logger.info(f"Agent {self.rank}: Waiting for all ranks to be ready for transfer")
+        # Collect all ranks involved in this batch (across all pairs)
+        all_ranks = set()
+        for pair_name in batch_state.pair_names:
+            pair_state = self.pairs[pair_name]
+            all_ranks.update(pair_state.local_ranks)
+            all_ranks.update(pair_state.remote_ranks)
 
-        ready_ranks = []
-        while True:
-            ready_ranks = self._scan_peer_ranks(pair_name, "state:ready")
-            if len(ready_ranks) < self.pairs[pair_name].pair_size:
-                time.sleep(TIME_INTERVAL)
-            else:
-                break
+        total_ranks = len(all_ranks)
+        logger.info(
+            f"Agent {self.rank}: Batch {batch_id}: Waiting for {total_ranks} ranks across {len(batch_state.pair_names)} pairs"
+        )
 
-        logger.info(f"Agent {self.rank}: All ranks ready for transfer")
+        # Wait for all ranks to be ready (batch-scoped)
+        key_pattern = f"batch:{batch_id}/rank:{{rank}}/state:ready"
+        self._wait_until_ranks_ready(
+            key_pattern=key_pattern,
+            candidate_ranks=all_ranks,
+            expected_count=total_ranks,
+            description=f"Batch {batch_id}",
+        )
+        logger.info(f"Agent {self.rank}: Batch {batch_id}: All {total_ranks} ranks ready for transfer")
 
-        # Transfer tensors using chunk IR if available, otherwise fall back to simple send/recv
-        pair_state = self.pairs[pair_name]
-        if pair_state.send_chunks or pair_state.recv_chunks:
+        # Execute transfer using flattened chunks/buckets
+        if batch_state.send_chunks or batch_state.recv_chunks:
             if transfer_type == "send":
-                buckets = pair_state.send_buckets
-                chunks = pair_state.send_chunks
+                buckets = batch_state.send_buckets
+                chunks = batch_state.send_chunks
             else:
-                buckets = pair_state.recv_buckets
-                chunks = pair_state.recv_chunks
+                buckets = batch_state.recv_buckets
+                chunks = batch_state.recv_chunks
 
             if buckets:
                 logger.info(
-                    f"Agent {self.rank}: Executing bucketized transfer with {len(buckets)} buckets for pair '{pair_name}'"
+                    f"Agent {self.rank}: Batch {batch_id}: Executing bucketized transfer with {len(buckets)} buckets"
                 )
                 bucket_comm(buckets=buckets)
             elif chunks:
                 logger.info(
-                    f"Agent {self.rank}: Executing chunk-based transfer with {len(chunks)} chunks for pair '{pair_name}'"
+                    f"Agent {self.rank}: Batch {batch_id}: Executing chunk-based transfer with {len(chunks)} chunks"
                 )
                 chunk_comm(chunks=chunks)
         else:
             # Fall back to simple send/recv without P2P optimization
-            logger.info(
-                f"Agent {self.rank}: Using simple send/recv transfer for pair '{pair_name}' (no P2P map available)"
-            )
-            for tensor_name, tensor in pair_state.tensors.items():
-                logger.debug(
-                    f"Agent {self.rank}: Transferring tensor_name: '{tensor_name}' tensor: {tensor.shape} for pair '{pair_name}' using simple send/recv"
-                )
-                if transfer_type == "send":
-                    torch.distributed.send(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
-                elif transfer_type == "recv":
-                    torch.distributed.recv(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
-                logger.debug(f"Agent {self.rank}: Transfered tensor_name: '{tensor_name}'")
+            logger.info(f"Agent {self.rank}: Batch {batch_id}: Using simple send/recv transfer (no P2P map available)")
+            for pair_name in batch_state.pair_names:
+                pair_state = self.pairs[pair_name]
+                for i, tensor in enumerate(batch_state.pair_tensors[pair_name]):
+                    logger.debug(
+                        f"Agent {self.rank}: Batch {batch_id}: Transferring tensor {i} shape: {tensor.shape} for pair '{pair_name}' using simple send/recv"
+                    )
+                    if transfer_type == "send":
+                        torch.distributed.send(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
+                    elif transfer_type == "recv":
+                        torch.distributed.recv(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
+                    logger.debug(f"Agent {self.rank}: Batch {batch_id}: Transfered tensor {i}")
 
-        # Cleanup
-        dist.barrier(group=pair_state.pair_group)
+        # Barrier on all pair_groups involved
+        for pair_name in batch_state.pair_names:
+            pair_state = self.pairs[pair_name]
+            dist.barrier(group=pair_state.pair_group)
+
+        # Cleanup batch-scoped flags
         self.store.set(transfer_ready_key, "0")
-        self.store.set(transfer_singal_key, "0")
-        logger.info(f"Agent {self.rank}: Transfer completed for pair '{pair_name}'")
+        self.store.set(transfer_signal_key, "0")
+        logger.info(f"Agent {self.rank}: Batch {batch_id}: Transfer complete")
 
     def _handle_query_status(self, msg: QueryStatus):
-        pair_name = msg.pair_name
+        batch_id = msg.batch_id
         state_name = msg.state_name  # e.g. "transfer_signal"
-        tcpstore_state_key = f"pair:{pair_name}/state:{state_name}"
-        statedb_key = f"pair:{pair_name}/state:{state_name}".encode()
+        tcpstore_state_key = f"batch:{batch_id}/state:{state_name}"
+        statedb_key = f"batch:{batch_id}/state:{state_name}".encode()
 
+        if batch_id not in self.batches:
+            logger.error(f"Agent {self.rank}: QueryStatus for unknown batch: {batch_id}")
+            return
+
+        batch_state = self.batches[batch_id]
+
+        # Synchronize with local group of the first pair in batch
+        first_pair_name = batch_state.pair_names[0]
         torch.cuda.synchronize()
-        dist.barrier(group=self.pairs[pair_name].local_group)  # ensure all ranks read the same state
+        dist.barrier(group=self.pairs[first_pair_name].local_group)  # ensure all ranks read the same state
 
         if state_name == "transfer_signal":
-            logger.debug(f"Agent {self.rank}: Query {state_name} status for pair '{pair_name}'")
-            state = self.store.get(tcpstore_state_key) == b"1"
-            logger.debug(f"Agent {self.rank}: Query {state_name} status for pair '{pair_name}': {state}")
+            logger.debug(f"Agent {self.rank}: Query {state_name} status for batch '{batch_id}'")
+            # Check if key exists in TCPStore
+            if self.store.check([tcpstore_state_key]):
+                state = self.store.get(tcpstore_state_key) == b"1"
+            else:
+                state = False
+            logger.debug(f"Agent {self.rank}: Query {state_name} status for batch '{batch_id}': {state}")
         else:
             logger.error(f"Agent {self.rank}: Invalid state name: {state_name}")
             return
@@ -453,97 +489,161 @@ class TensorBusAgent:
         with self.state_env.begin(write=True, db=self.state_db) as txn:
             txn.put(statedb_key, msgspec.msgpack.encode(state))
 
-    def _handle_register_tensor_batch(self, msg: RegisterTensorBatch):
-        """Handle RegisterTensorBatch command for batch tensor registration."""
-        pair_name = msg.pair_name
-        tensor_names = msg.tensor_names
-        tensor_payloads = msg.tensor_payloads
+    def _handle_cleanup_batch(self, msg: CleanupBatch):
+        """Handle CleanupBatch command to free batch state resources."""
+        batch_id = msg.batch_id
+
+        if batch_id in self.batches:
+            del self.batches[batch_id]
+            logger.info(f"Agent {self.rank}: Cleaned up batch {batch_id}")
+        else:
+            logger.warning(f"Agent {self.rank}: Cleanup requested for unknown batch {batch_id}")
+
+    def _handle_register_tensors(self, msg: RegisterTensors):
+        """Handle RegisterTensors command for batch tensor registration.
+
+        Creates a new BatchState with flattened chunks/buckets across all pairs.
+        """
+        batch_id = msg.batch_id
+        tensors = msg.tensors  # list[tuple[str, memoryview]]
         bucket_size = msg.bucket_size
 
-        if pair_name not in self.pairs:
-            raise ValueError(f"RegisterTensorBatch for unknown pair: {pair_name}")
+        logger.info(f"Agent {self.rank}: Starting batch {batch_id}: {len(tensors)} tensors")
 
-        pair_state = self.pairs[pair_name]
+        # Group tensors by pair_name
+        grouped: dict[str, list[memoryview]] = {}
+        for pair_name, tensor_payload in tensors:
+            if pair_name not in grouped:
+                grouped[pair_name] = []
+            grouped[pair_name].append(tensor_payload)
 
-        logger.info(
-            f"Agent {self.rank}: Starting batch registration of {len(tensor_names)} tensors for pair '{pair_name}'"
+        batch_state = BatchState(
+            batch_id=batch_id,
+            pair_names=list(grouped.keys()),
+            bucket_size=bucket_size,
         )
+        self.batches[batch_id] = batch_state
 
-        # Unified chunk lists (no source/target separation)
         all_send_chunks = []
         all_recv_chunks = []
+        all_send_buckets = []
+        all_recv_buckets = []
 
-        for tensor_name, tensor_payload in zip(tensor_names, tensor_payloads, strict=True):
-            tensor = ForkingPickler.loads(tensor_payload)
-            pair_state.tensors[tensor_name] = tensor
+        # Process each pair
+        for pair_name, tensor_payloads in grouped.items():
+            if pair_name not in self.pairs:
+                raise ValueError(f"RegisterTensors for unknown pair: {pair_name}")
 
-            my_rank0 = pair_state.local_ranks[0]
-            target_rank0 = pair_state.remote_ranks[0]
-            my_dtype_list = [tensor.dtype]
-            target_dtype_list = [None]
+            pair_state = self.pairs[pair_name]
 
-            if self.rank == my_rank0:
-                if pair_state.local_is_first:
-                    dist.send_object_list(my_dtype_list, dst=target_rank0)
-                    dist.recv_object_list(target_dtype_list, src=target_rank0)
-                else:
-                    dist.recv_object_list(target_dtype_list, src=target_rank0)
-                    dist.send_object_list(my_dtype_list, dst=target_rank0)
-
-            dist.broadcast_object_list(target_dtype_list, src=my_rank0, group=pair_state.local_group)
-            target_dtype = target_dtype_list[0]
-            logger.debug(f"Agent {self.rank}: target dtype {target_dtype}")
-
-            if pair_state.m2m_send and pair_state.m2m_recv:
-                logger.debug(
-                    f"Agent {self.rank}: Generating chunks for tensor '{tensor_name}' with shape {tensor.shape}"
-                )
-
-                # Generate send chunks for this tensor
-                send_chunks = map_to_chunk_ops(
-                    m2m_map=pair_state.m2m_send.m2m_map,
-                    rank=self.rank,
-                    source_num_slicers=pair_state.m2m_send.source_num_slicers,
-                    target_num_slicers=pair_state.m2m_send.target_num_slicers,
-                    source_tensor=tensor,
-                    target_tensor=tensor,
-                    target_dtype=target_dtype,
-                )
-                all_send_chunks.extend(send_chunks)
-
-                # Generate recv chunks for this tensor
-                recv_chunks = map_to_chunk_ops(
-                    m2m_map=pair_state.m2m_recv.m2m_map,
-                    rank=self.rank,
-                    source_num_slicers=pair_state.m2m_recv.source_num_slicers,
-                    target_num_slicers=pair_state.m2m_recv.target_num_slicers,
-                    source_tensor=tensor,
-                    target_tensor=tensor,
-                    target_dtype=target_dtype,
-                )
-                all_recv_chunks.extend(recv_chunks)
-        logger.debug(f"Agent {self.rank}: all send chunks: {all_send_chunks} all recv chunks: {all_recv_chunks}")
-        logger.info(
-            f"Agent {self.rank}: all send chunks: {len(all_send_chunks)} all recv chunks: {len(all_recv_chunks)}"
-        )
-        # Store unified chunk lists directly on pair state
-        pair_state.send_chunks = all_send_chunks
-        pair_state.recv_chunks = all_recv_chunks
-
-        if bucket_size:
-            pair_state.send_buckets = chunk_to_bucket_ops(
-                chunks=all_send_chunks,
-                bucket_size=bucket_size,
-            )
-            pair_state.recv_buckets = chunk_to_bucket_ops(
-                chunks=all_recv_chunks,
-                bucket_size=bucket_size,
-            )
             logger.info(
-                f"Agent {self.rank}: send buckets: {len(pair_state.send_buckets)} recv buckets: {len(pair_state.recv_buckets)}"
+                f"Agent {self.rank}: Batch {batch_id}: Registering {len(tensor_payloads)} tensors for pair '{pair_name}'"
             )
+
+            # Initialize per-pair lists in BatchState
+            batch_state.pair_tensors[pair_name] = []
+            batch_state.pair_target_dtypes[pair_name] = []
+
+            # Per-pair chunk lists (for bucketization)
+            pair_send_chunks = []
+            pair_recv_chunks = []
+
+            for i, tensor_payload in enumerate(tensor_payloads):
+                tensor = ForkingPickler.loads(tensor_payload)
+                batch_state.pair_tensors[pair_name].append(tensor)
+
+                # Exchange dtype information between rank0s
+                my_rank0 = pair_state.local_ranks[0]
+                target_rank0 = pair_state.remote_ranks[0]
+                my_dtype_list = [tensor.dtype]
+                target_dtype_list = [None]
+
+                if self.rank == my_rank0:
+                    if pair_state.local_is_first:
+                        dist.send_object_list(my_dtype_list, dst=target_rank0)
+                        dist.recv_object_list(target_dtype_list, src=target_rank0)
+                    else:
+                        dist.recv_object_list(target_dtype_list, src=target_rank0)
+                        dist.send_object_list(my_dtype_list, dst=target_rank0)
+
+                dist.broadcast_object_list(target_dtype_list, src=my_rank0, group=pair_state.local_group)
+                target_dtype = target_dtype_list[0]
+                batch_state.pair_target_dtypes[pair_name].append(target_dtype)
+                logger.debug(f"Agent {self.rank}: Batch {batch_id}: tensor {i} target dtype {target_dtype}")
+
+                if pair_state.m2m_send and pair_state.m2m_recv:
+                    logger.debug(
+                        f"Agent {self.rank}: Batch {batch_id}: Generating chunks for tensor {i} with shape {tensor.shape}"
+                    )
+
+                    # Generate send chunks for this tensor
+                    send_chunks = map_to_chunk_ops(
+                        m2m_map=pair_state.m2m_send.m2m_map,
+                        rank=self.rank,
+                        source_num_slicers=pair_state.m2m_send.source_num_slicers,
+                        target_num_slicers=pair_state.m2m_send.target_num_slicers,
+                        source_tensor=tensor,
+                        target_tensor=tensor,
+                        target_dtype=target_dtype,
+                    )
+                    pair_send_chunks.extend(send_chunks)
+
+                    # Generate recv chunks for this tensor
+                    recv_chunks = map_to_chunk_ops(
+                        m2m_map=pair_state.m2m_recv.m2m_map,
+                        rank=self.rank,
+                        source_num_slicers=pair_state.m2m_recv.source_num_slicers,
+                        target_num_slicers=pair_state.m2m_recv.target_num_slicers,
+                        source_tensor=tensor,
+                        target_tensor=tensor,
+                        target_dtype=target_dtype,
+                    )
+                    pair_recv_chunks.extend(recv_chunks)
+
+            # Per-pair bucketization
+            if bucket_size:
+                pair_send_buckets = chunk_to_bucket_ops(
+                    chunks=pair_send_chunks,
+                    bucket_size=bucket_size,
+                )
+                pair_recv_buckets = chunk_to_bucket_ops(
+                    chunks=pair_recv_chunks,
+                    bucket_size=bucket_size,
+                )
+                all_send_buckets.extend(pair_send_buckets)
+                all_recv_buckets.extend(pair_recv_buckets)
+                logger.debug(
+                    f"Agent {self.rank}: Batch {batch_id}: Pair '{pair_name}': "
+                    f"send ({len(pair_send_buckets)} buckets), recv ({len(pair_recv_buckets)} buckets)"
+                )
+
+            # Accumulate to flattened lists
+            all_send_chunks.extend(pair_send_chunks)
+            all_recv_chunks.extend(pair_recv_chunks)
+
+            logger.info(f"Agent {self.rank}: Batch {batch_id}: Completed registration for pair '{pair_name}'")
+
+        # Store flattened chunks and buckets in BatchState
+        batch_state.send_chunks = all_send_chunks
+        batch_state.recv_chunks = all_recv_chunks
+
         logger.info(
-            f"Agent {self.rank}: Completed batch registration of {len(tensor_names)} tensors for pair '{pair_name}': "
+            f"Agent {self.rank}: Batch {batch_id}: Flattened chunks: "
+            f"send ({len(all_send_chunks)}), recv ({len(all_recv_chunks)})"
+        )
+
+        # Store flattened buckets (per-pair bucketization already done)
+        if bucket_size:
+            batch_state.send_buckets = all_send_buckets
+            batch_state.recv_buckets = all_recv_buckets
+            logger.info(
+                f"Agent {self.rank}: Batch {batch_id}: Flattened buckets (per-pair): "
+                f"send ({len(all_send_buckets)} buckets), recv ({len(all_recv_buckets)} buckets)"
+            )
+
+        logger.info(
+            f"Agent {self.rank}: Batch {batch_id}: Registration complete - "
+            f"{len(tensors)} tensors across {len(grouped)} pairs"
         )
 
     def _collect_mesh_placement_info(
@@ -582,22 +682,46 @@ class TensorBusAgent:
                 f"Agent {self.rank}: rank {i} mesh info {mesh_info} != reference {mesh_info_list[0]}"
             )
 
-    def _scan_peer_ranks(self, pair_name: str, status_key: str) -> list[int]:
-        """Scan TCPStore for all ranks of a given peer.
+    def _wait_until_ranks_ready(
+        self,
+        key_pattern: str,
+        candidate_ranks: set[int],
+        expected_count: int,
+        description: str = "",
+    ) -> list[int]:
+        """Wait until expected number of ranks are ready with incremental scanning.
 
         Args:
-            pair_name: Pair name
-            status_key: Status key (e.g. "state:ready", "state:transfer_signal")
+            key_pattern: Key pattern with {rank} placeholder (e.g. "pair:{name}/rank:{rank}/{side}")
+            candidate_ranks: Set of ranks to check
+            expected_count: Expected number of ready ranks
+            description: Optional description for logging progress
 
         Returns:
-            List of ranks that have the given status
+            Sorted list of ready ranks
         """
-        ranks = []
-        for r in range(self.world_size):
-            key = f"pair:{pair_name}/rank:{r}/{status_key}"
-            if self.store.check([key]) and self.store.get(key) == b"1":
-                ranks.append(r)
-        return ranks
+        known_ready: set[int] = set()
+        pending = candidate_ranks.copy()
+
+        while len(known_ready) < expected_count:
+            # Only scan pending ranks
+            for r in list(pending):  # Convert to list to avoid modification during iteration
+                key = key_pattern.format(rank=r)
+                if self.store.check([key]):
+                    try:
+                        if self.store.get(key) == b"1":
+                            known_ready.add(r)
+                            pending.remove(r)
+                    except KeyError:
+                        pass
+
+            if description:
+                logger.info(f"Agent {self.rank}: {description}: {len(known_ready)}/{expected_count} ranks ready")
+
+            if len(known_ready) < expected_count:
+                time.sleep(TIME_INTERVAL)
+
+        return sorted(known_ready)
 
     def _update_heartbeat(self):
         """Update heartbeat timestamp in State LMDB.
