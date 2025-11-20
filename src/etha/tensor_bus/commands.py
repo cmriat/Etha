@@ -19,34 +19,27 @@ class BaseCommand(msgspec.Struct, tag=True, kw_only=True):
 
 
 class Transfer(BaseCommand):
-    """Transfer tensor command."""
+    """Transfer tensor command for a specific batch."""
 
-    pair_name: str
+    batch_id: str
     transfer_type: Literal["send", "recv"]
 
 
 class RegisterTensors(BaseCommand):
     """Register multiple tensors for zero-copy sharing between processes.
 
-    Batch Register Tensors for improved efficiency when registering
-    multiple tensors. Reduces LMDB cross-process communication overhead by
-    sending all tensors in a single command instead of multiple individual commands.
-
-    Supports optional bucketization for optimizing large tensor transfers.
+    Creates a new batch with a unique batch_id. Multiple tensors can be
+    registered across different pairs in a single batch, enabling efficient
+    cross-pair execution via flattened chunks/buckets.
     """
 
+    batch_id: str
     tensors: list[tuple[str, memoryview]]  # (pair_name, tensor_payload)
     bucket_size: int | None = None  # Optional bucket size in bytes
 
 
-class RegisterPair(BaseCommand):
-    """Register to a Pair (peer-to-peer communication endpoint).
-
-    Design:
-    - Pair is symmetric: both peers can send() or recv()
-    - Similar to RDMA Queue Pair (QP)
-    - Registration writes to TCPStore and polls until both peers are ready
-    - Includes local device mesh and placement information for optimized tensor transfer
+class InitPair(BaseCommand):
+    """Init a Device Mesh + Placement to Device Mesh + Placement pair.
 
     Args:
         pair_name: Unique identifier for this pair (e.g., "obs", "action")
@@ -66,10 +59,16 @@ class RegisterPair(BaseCommand):
 
 
 class QueryStatus(BaseCommand):
-    """Query status for a pair."""
+    """Query status for a batch."""
 
-    pair_name: str
+    batch_id: str
     state_name: str
 
 
-Message = Transfer | RegisterTensors | RegisterPair | QueryStatus
+class CleanupBatch(BaseCommand):
+    """Cleanup a batch's state in the agent."""
+
+    batch_id: str
+
+
+Message = Transfer | RegisterTensors | InitPair | QueryStatus | CleanupBatch

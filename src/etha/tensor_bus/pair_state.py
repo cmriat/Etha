@@ -1,10 +1,7 @@
 """State."""
 
-import torch
 import msgspec
 import torch.distributed as dist
-
-from etha.comm.ir import Bucket, SourceChunk, TargetChunk
 
 
 class M2MMap(msgspec.Struct):
@@ -19,7 +16,12 @@ class M2MMap(msgspec.Struct):
 
 
 class PairState(msgspec.Struct):
-    """State of a registered Pair (stored in Daemon)."""
+    """State of a registered Pair.
+
+    PairState is created once per pair via register_pair() and represents
+    the communication topology. It contains NO tensor data or execution state.
+    All tensor data and execution plans are now stored in BatchState.
+    """
 
     pair_name: str
     local_name: str  # Local peer name (e.g., "inference", "training")
@@ -31,16 +33,6 @@ class PairState(msgspec.Struct):
     pair_group: dist.ProcessGroup  # Pair process group
     local_is_first: bool  # Whether local is first in the pair
 
-    # Topology layer: M2M maps (shape-independent, reusable)
+    # Topology layer: M2M maps (shape-independent, reusable across batches)
     m2m_send: M2MMap | None = None  # Map for sending (local -> remote)
     m2m_recv: M2MMap | None = None  # Map for receiving (remote -> local)
-
-    # Data layer: Per-tensor storage
-    tensors: list[torch.Tensor] = msgspec.field(default_factory=list)  # List of registered tensors
-
-    # Execution layer: Unified chunk lists (one pair per direction)
-    send_chunks: list[SourceChunk | TargetChunk] | None = None  # Unified send chunks
-    recv_chunks: list[SourceChunk | TargetChunk] | None = None  # Unified recv chunks
-
-    send_buckets: list[Bucket] | None = None
-    recv_buckets: list[Bucket] | None = None

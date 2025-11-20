@@ -104,7 +104,7 @@ def main():
 
         # Register pair for distributed tensor transfer
         logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
-        client.register_pair(
+        client.init_pair(
             pair_name=PAIR_NAME,
             local_name=LOCAL_NAME,
             remote_name=REMOTE_NAME,
@@ -122,16 +122,17 @@ def main():
                 continue
             tensors_to_register.append((param.data.to_local(), PAIR_NAME))
 
-        # Batch register all tensors and get handler
-        handler = client.register_tensors(tensors_to_register)
-
-        logger.info(f"✅Tensors for Pair '{PAIR_NAME}' registered successfully!")
+        # Transfer loop - register batch for each step
         i = 0
         while i < 50:
-            i += 1
+            batch_id = f"transfer_step_{i}"
+            handler = client.register_tensors(batch_id=batch_id, tensors=tensors_to_register)
+            logger.info(f"✅ Batch '{batch_id}' registered successfully!")
+
             logger.info(f"step {i} transfer begin")
             handler.transfer(transfer_type="send", blocking=True, timeout=60)
             logger.info(f"step {i} transfer completed")
+            i += 1
     finally:
         client.close()
         logger.info("Distributed training worker shutdown complete")

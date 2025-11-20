@@ -44,7 +44,7 @@ class TestCommandQueue:
 
     def test_enqueue_dequeue_single(self, queue):
         """Test single message enqueue and dequeue."""
-        msg = Transfer(pair_name="t1", transfer_type="send", timestamp=time.time())
+        msg = Transfer(batch_id="batch1", transfer_type="send", timestamp=time.time())
 
         # Enqueue
         msg_id = queue.enqueue(msg)
@@ -54,7 +54,7 @@ class TestCommandQueue:
         # Dequeue
         dequeued = queue.dequeue()
         assert isinstance(dequeued, Transfer)
-        assert dequeued.pair_name == "t1"
+        assert dequeued.batch_id == "batch1"
         assert queue.size() == 0
 
     def test_dequeue_empty_queue(self, queue):
@@ -64,7 +64,7 @@ class TestCommandQueue:
 
     def test_fifo_order(self, queue):
         """Test FIFO ordering guarantee."""
-        msgs = [Transfer(pair_name=f"t{i}", transfer_type="send", timestamp=time.time()) for i in range(5)]
+        msgs = [Transfer(batch_id=f"batch{i}", transfer_type="send", timestamp=time.time()) for i in range(5)]
 
         # Enqueue all
         for msg in msgs:
@@ -73,16 +73,16 @@ class TestCommandQueue:
         # Dequeue and verify order
         for i in range(5):
             dequeued = queue.dequeue()
-            assert dequeued.pair_name == f"t{i}"
+            assert dequeued.batch_id == f"batch{i}"
 
     # ==================== Message Type Handling ====================
 
     def test_mixed_message_types(self, queue):
         """Test mixed message types (Tagged Union)."""
         msgs = [
-            Transfer(pair_name="t1", transfer_type="send", timestamp=1.0),
-            QueryStatus(pair_name="t1", state_name="transfer_signal", timestamp=2.0),
-            RegisterTensors(tensors=[("t1", b"")], timestamp=3.0),
+            Transfer(batch_id="batch1", transfer_type="send", timestamp=1.0),
+            QueryStatus(batch_id="batch1", state_name="transfer_signal", timestamp=2.0),
+            RegisterTensors(batch_id="batch2", tensors=[("t1", b"")], timestamp=3.0),
         ]
 
         # Enqueue mixed types
@@ -92,15 +92,16 @@ class TestCommandQueue:
         # Verify type identification
         msg1 = queue.dequeue()
         assert isinstance(msg1, Transfer)
-        assert msg1.pair_name == "t1"
+        assert msg1.batch_id == "batch1"
 
         msg2 = queue.dequeue()
         assert isinstance(msg2, QueryStatus)
-        assert msg2.pair_name == "t1"
+        assert msg2.batch_id == "batch1"
         assert msg2.state_name == "transfer_signal"
 
         msg3 = queue.dequeue()
         assert isinstance(msg3, RegisterTensors)
+        assert msg3.batch_id == "batch2"
         assert msg3.tensors[0][0] == "t1"  # (pair_name, payload)
         assert len(msg3.tensors) == 1
 
@@ -110,7 +111,7 @@ class TestCommandQueue:
         """Test batch dequeue operation."""
         # Enqueue 10 messages
         for i in range(10):
-            queue.enqueue(Transfer(pair_name=f"t{i}", transfer_type="send", timestamp=time.time()))
+            queue.enqueue(Transfer(batch_id=f"batch{i}", transfer_type="send", timestamp=time.time()))
 
         # Batch dequeue 5 messages
         batch = queue.dequeue_batch(max_count=5)
@@ -119,13 +120,13 @@ class TestCommandQueue:
 
         # Verify order
         for i, msg in enumerate(batch):
-            assert msg.pair_name == f"t{i}"
+            assert msg.batch_id == f"batch{i}"
 
     def test_dequeue_batch_exceeds_size(self, queue):
         """Test batch dequeue when max_count > queue size."""
         # Enqueue 3 messages
         for i in range(3):
-            queue.enqueue(Transfer(pair_name=f"t{i}", transfer_type="recv", timestamp=1.0))
+            queue.enqueue(Transfer(batch_id=f"t{i}", transfer_type="recv", timestamp=1.0))
 
         # Request 10 but only 3 available
         batch = queue.dequeue_batch(max_count=10)
@@ -134,14 +135,14 @@ class TestCommandQueue:
 
     def test_peek(self, queue):
         """Test peek does not modify queue."""
-        msg = Transfer(pair_name="t1", transfer_type="recv", timestamp=1.0)
+        msg = Transfer(batch_id="t1", transfer_type="recv", timestamp=1.0)
         queue.enqueue(msg)
 
         # Peek multiple times
         peeked1 = queue.peek()
         peeked2 = queue.peek()
-        assert peeked1.pair_name == "t1"
-        assert peeked2.pair_name == "t1"
+        assert peeked1.batch_id == "t1"
+        assert peeked2.batch_id == "t1"
 
         # Queue unchanged
         assert queue.size() == 1
@@ -155,7 +156,7 @@ class TestCommandQueue:
         """Test clearing the queue."""
         # Enqueue multiple messages
         for i in range(10):
-            queue.enqueue(Transfer(pair_name=f"t{i}", transfer_type="recv", timestamp=1.0))
+            queue.enqueue(Transfer(batch_id=f"t{i}", transfer_type="recv", timestamp=1.0))
 
         assert queue.size() == 10
 
@@ -170,7 +171,7 @@ class TestCommandQueue:
 
         # Enqueue 1000 messages
         for i in range(n):
-            queue.enqueue(Transfer(pair_name=f"t{i}", transfer_type="send", timestamp=time.time()))
+            queue.enqueue(Transfer(batch_id=f"t{i}", transfer_type="send", timestamp=time.time()))
 
         assert queue.size() == n
 
@@ -184,14 +185,14 @@ class TestCommandQueue:
 
         # Verify order
         for i, msg in enumerate(all_msgs):
-            assert msg.pair_name == f"t{i}"
+            assert msg.batch_id == f"t{i}"
 
     def test_persistence(self, temp_lmdb_path):
         """Test queue survives close/reopen."""
         # First queue instance
         q1 = CommandQueue(temp_lmdb_path)
-        q1.enqueue(Transfer(pair_name="t1", transfer_type="send", timestamp=1.0))
-        q1.enqueue(Transfer(pair_name="t2", transfer_type="recv", timestamp=2.0))
+        q1.enqueue(Transfer(batch_id="t1", transfer_type="send", timestamp=1.0))
+        q1.enqueue(Transfer(batch_id="t2", transfer_type="recv", timestamp=2.0))
         assert q1.size() == 2
         q1.close(destroy=False)  # Keep files for next instance
 
@@ -201,11 +202,11 @@ class TestCommandQueue:
 
         msg1 = q2.dequeue()
         assert isinstance(msg1, Transfer)
-        assert msg1.pair_name == "t1"
+        assert msg1.batch_id == "t1"
 
         msg2 = q2.dequeue()
         assert isinstance(msg2, Transfer)
-        assert msg2.pair_name == "t2"
+        assert msg2.batch_id == "t2"
 
         assert q2.is_empty()
         q2.close()  # Default destroy=True, cleanup
@@ -214,8 +215,8 @@ class TestCommandQueue:
         """Test close(destroy=True) completely removes LMDB files."""
         # Create queue and add some data
         q = CommandQueue(temp_lmdb_path)
-        q.enqueue(Transfer(pair_name="t1", transfer_type="send", timestamp=1.0))
-        q.enqueue(Transfer(pair_name="t2", transfer_type="recv", timestamp=2.0))
+        q.enqueue(Transfer(batch_id="t1", transfer_type="send", timestamp=1.0))
+        q.enqueue(Transfer(batch_id="t2", transfer_type="recv", timestamp=2.0))
         assert q.size() == 2
 
         # Verify files exist
@@ -236,7 +237,7 @@ class TestCommandQueue:
     def test_destroy_idempotent(self, temp_lmdb_path):
         """Test close(destroy=True) can be called multiple times safely."""
         q = CommandQueue(temp_lmdb_path)
-        q.enqueue(Transfer(pair_name="t1", transfer_type="send", timestamp=1.0))
+        q.enqueue(Transfer(batch_id="t1", transfer_type="send", timestamp=1.0))
 
         # First destroy
         q.close(destroy=True)
@@ -254,13 +255,13 @@ class TestCommandQueue:
 
         # Fill to capacity
         for i in range(5):
-            q.enqueue(Transfer(pair_name=f"t{i}", transfer_type="send"), block=False)
+            q.enqueue(Transfer(batch_id=f"t{i}", transfer_type="send"), block=False)
 
         assert q.size() == 5
 
         # Try to enqueue when full (non-blocking should fail)
         with pytest.raises(QueueFullError):
-            q.enqueue(Transfer(pair_name="overflow", transfer_type="send"), block=False)
+            q.enqueue(Transfer(batch_id="overflow", transfer_type="send"), block=False)
 
         q.close(destroy=True)
 
@@ -270,7 +271,7 @@ class TestCommandQueue:
 
         # Fill queue
         for i in range(5):
-            q.enqueue(Transfer(pair_name=f"t{i}", transfer_type="send"), block=False)
+            q.enqueue(Transfer(batch_id=f"t{i}", transfer_type="send"), block=False)
 
         # Dequeue 2 items
         q.dequeue()
@@ -278,14 +279,14 @@ class TestCommandQueue:
         assert q.size() == 3
 
         # Now should be able to enqueue 2 more (wrapping around)
-        q.enqueue(Transfer(pair_name="t5", transfer_type="send"), block=False)
-        q.enqueue(Transfer(pair_name="t6", transfer_type="send"), block=False)
+        q.enqueue(Transfer(batch_id="t5", transfer_type="send"), block=False)
+        q.enqueue(Transfer(batch_id="t6", transfer_type="send"), block=False)
         assert q.size() == 5
 
         # Verify order is correct
         for i in range(2, 7):
             msg = q.dequeue()
-            assert msg.pair_name == f"t{i}"
+            assert msg.batch_id == f"t{i}"
 
         q.close(destroy=True)
 
@@ -295,7 +296,7 @@ class TestCommandQueue:
 
         # Fill queue
         for i in range(3):
-            q.enqueue(Transfer(pair_name=f"t{i}", transfer_type="send"), block=False)
+            q.enqueue(Transfer(batch_id=f"t{i}", transfer_type="send"), block=False)
 
         # Start a thread that will dequeue after 0.5s
         def dequeuer():
@@ -307,7 +308,7 @@ class TestCommandQueue:
 
         # Blocking enqueue should wait
         start = time.time()
-        q.enqueue(Transfer(pair_name="blocking", transfer_type="send"), block=True, timeout=2)
+        q.enqueue(Transfer(batch_id="blocking", transfer_type="send"), block=True, timeout=2)
         elapsed = time.time() - start
 
         # Should have waited ~0.5s
@@ -322,11 +323,11 @@ class TestCommandQueue:
 
         # Fill queue
         for i in range(2):
-            q.enqueue(Transfer(pair_name=f"t{i}", transfer_type="send"), block=False)
+            q.enqueue(Transfer(batch_id=f"t{i}", transfer_type="send"), block=False)
 
         # Blocking enqueue with timeout should raise QueueFullError
         with pytest.raises(QueueFullError):
-            q.enqueue(Transfer(pair_name="timeout", transfer_type="send"), block=True, timeout=0.5)
+            q.enqueue(Transfer(batch_id="timeout", transfer_type="send"), block=True, timeout=0.5)
 
         q.close(destroy=True)
 
@@ -335,7 +336,7 @@ class TestCommandQueue:
     def test_close_with_destroy_flag(self, temp_lmdb_path):
         """Test close(destroy=True) removes all resources."""
         q = CommandQueue(temp_lmdb_path)
-        q.enqueue(Transfer(pair_name="t1", transfer_type="send", timestamp=1.0))
+        q.enqueue(Transfer(batch_id="t1", transfer_type="send", timestamp=1.0))
 
         # Verify files exist
         assert os.path.exists(temp_lmdb_path)
@@ -352,7 +353,7 @@ class TestCommandQueue:
     def test_close_without_destroy(self, temp_lmdb_path):
         """Test close(destroy=False) keeps files."""
         q = CommandQueue(temp_lmdb_path)
-        q.enqueue(Transfer(pair_name="t1", transfer_type="send", timestamp=1.0))
+        q.enqueue(Transfer(batch_id="t1", transfer_type="send", timestamp=1.0))
 
         # Close without destroy
         q.close(destroy=False)
@@ -369,7 +370,7 @@ class TestCommandQueue:
         """Test semaphores are shared across multiple queue instances."""
         # First instance creates semaphores
         q1 = CommandQueue(temp_lmdb_path, capacity=5)
-        q1.enqueue(Transfer(pair_name="t1", transfer_type="send"), block=False)
+        q1.enqueue(Transfer(batch_id="t1", transfer_type="send"), block=False)
         assert q1.size() == 1
 
         # Verify files exist
@@ -381,7 +382,7 @@ class TestCommandQueue:
 
         # Dequeue from q2
         msg = q2.dequeue()
-        assert msg.pair_name == "t1"
+        assert msg.batch_id == "t1"
         assert q2.size() == 0
 
         # q1 should also see empty queue

@@ -92,7 +92,7 @@ def main():
 
     # Register pair for distributed tensor transfer
     logger.info(f"Registering pair '{PAIR_NAME}' as '{LOCAL_NAME}' -> '{REMOTE_NAME}'")
-    client.register_pair(
+    client.init_pair(
         pair_name=PAIR_NAME,
         local_name=LOCAL_NAME,
         remote_name=REMOTE_NAME,
@@ -101,22 +101,22 @@ def main():
         placements=tuple(trainer.placements),
     )
 
-    # Register the distributed tensor and get handler
-    handler = client.register_tensors([(trainer.distributed_param.to_local(), PAIR_NAME)])
     logger.info(f"✅ Pair '{PAIR_NAME}' registered successfully!")
 
     # Training loop with distributed weight transfer
     try:
-        semaphore = None
         for step in range(50):
             trainer.forward_backward()
-            if semaphore is not None:
-                semaphore.acquire()
-                semaphore.close()
             trainer.optimizer_step(step)
 
+            # Register tensors with unique batch_id for this step
+            batch_id = f"transfer_step_{step}"
+            handler = client.register_tensors(
+                batch_id=batch_id, tensors=[(trainer.distributed_param.to_local(), PAIR_NAME)]
+            )
+
             # Send updated distributed tensor
-            semaphore = handler.transfer(transfer_type="send", blocking=False)
+            handler.transfer(transfer_type="send", blocking=True)
 
             time.sleep(1)  # Simulate training iteration
 

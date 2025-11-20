@@ -21,7 +21,7 @@ import posix_ipc
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
-from .commands import Transfer, QueryStatus, RegisterPair, RegisterTensors
+from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
@@ -30,14 +30,16 @@ logger = logging.getLogger(__name__)
 class BatchHandler:
     """Handler for batch tensor operations across multiple pairs."""
 
-    def __init__(self, client: TensorBusClient, pair_names: list[str]):
+    def __init__(self, client: TensorBusClient, batch_id: str, pair_names: list[str]):
         """Initialize BatchHandler.
 
         Args:
             client: TensorBusClient instance
+            batch_id: Unique identifier for this batch
             pair_names: List of pair names managed by this handler
         """
         self._client_ref = weakref.ref(client)
+        self.batch_id = batch_id
         self.pair_names = pair_names
 
     @property
@@ -54,47 +56,55 @@ class BatchHandler:
 
     def transfer(
         self, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
-    ) -> list[posix_ipc.Semaphore]:
-        """Transfer tensors for all pairs simultaneously.
+    ) -> posix_ipc.Semaphore:
+        """Transfer all tensors in this batch atomically.
+
+        Sends a single Transfer command to execute all pairs in the batch simultaneously
+        using flattened chunks/buckets for optimal performance.
 
         Args:
             transfer_type: "send" or "recv"
-            blocking: If True, block until all transfers complete
+            blocking: If True, block until transfer completes
             timeout: Timeout in seconds
 
         Returns:
-            List of semaphores for operation completion
+            Semaphore for operation completion
         """
-        semaphores = []
-        for pair_name in self.pair_names:
-            sem = self.client.transfer(pair_name, transfer_type, blocking=False, timeout=timeout)
-            semaphores.append(sem)
+        msg = Transfer(batch_id=self.batch_id, transfer_type=transfer_type)
+        return self.client._execute_command_with_semaphore(
+            msg, "transfer", f"batch_{self.batch_id}_{transfer_type}", blocking=blocking, timeout=timeout
+        )
 
-        if blocking:
-            for sem in semaphores:
-                try:
-                    sem.acquire(timeout=timeout)
-                except posix_ipc.BusyError as e:
-                    raise TimeoutError(f"Transfer timeout for batch handler") from e
-                finally:
-                    sem.close()
-
-        return semaphores
-
-    def query_transfer_signal(self, blocking: bool = True, timeout: float = 30.0) -> dict[str, bool]:
-        """Query transfer signal status for all pairs.
+    def query_transfer_signal(self, blocking: bool = True, timeout: float = 30.0) -> bool:
+        """Query transfer signal status for this batch.
 
         Returns:
-            Dict mapping pair_name to signal status
+            Transfer signal status (True if sender has completed transfer)
         """
-        results = {}
-        for pair_name in self.pair_names:
-            results[pair_name] = self.client.query_transfer_signal(pair_name, blocking=blocking, timeout=timeout)
-        return results
+        return self.client.query_transfer_signal(self.batch_id, blocking=blocking, timeout=timeout)
 
-    def close(self):
-        """Cleanup (placeholder for future use)."""
-        pass
+    def close(self, blocking: bool = True, timeout: float = 30.0):
+        """Explicitly cleanup batch state in agent.
+
+        Sends a CleanupBatch command to free resources associated with this batch.
+        After calling close(), this handler should not be used.
+
+        Args:
+            blocking: If True, block until cleanup completes
+            timeout: Timeout in seconds
+        """
+        msg = CleanupBatch(batch_id=self.batch_id)
+        self.client._execute_command_with_semaphore(
+            msg, "cleanup_batch", f"batch_{self.batch_id}", blocking=blocking, timeout=timeout
+        )
+
+    def __del__(self):
+        """Best-effort cleanup on handler destruction."""
+        try:
+            # Use non-blocking cleanup in destructor to avoid hanging during shutdown
+            self.close(blocking=False)
+        except Exception:
+            pass
 
 
 def generate_semaphore_name(command_type: str, pair_name: str) -> str:
@@ -174,7 +184,7 @@ class TensorBusClient:
 
         return sem
 
-    def register_pair(
+    def init_pair(
         self,
         pair_name: str,
         local_name: str,
@@ -215,7 +225,7 @@ class TensorBusClient:
             placements_bytes = ForkingPickler.dumps(placements)
             placements_payload = memoryview(placements_bytes)
 
-        msg = RegisterPair(
+        msg = InitPair(
             pair_name=pair_name,
             local_name=local_name,
             expected_world_size=expected_world_size,
@@ -248,20 +258,22 @@ class TensorBusClient:
         )
         return self._execute_command_with_semaphore(msg, "transfer", pair_name, blocking=blocking, timeout=timeout)
 
-    def query_transfer_signal(self, pair_name: str, blocking: bool = True, timeout: float = 30.0) -> bool:
-        query_msg = QueryStatus(pair_name=pair_name, state_name="transfer_signal")
-        logger.info(f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for pair '{pair_name}'")
+    def query_transfer_signal(self, batch_id: str, blocking: bool = True, timeout: float = 30.0) -> bool:
+        query_msg = QueryStatus(batch_id=batch_id, state_name="transfer_signal")
+        logger.info(f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for batch '{batch_id}'")
         # Execute with semaphore synchronization (blocking)
-        self._execute_command_with_semaphore(query_msg, "query", pair_name, blocking=blocking, timeout=timeout)
+        self._execute_command_with_semaphore(
+            query_msg, "query", f"batch_{batch_id}", blocking=blocking, timeout=timeout
+        )
 
         # Get the status from LMDB
-        state_key = f"pair:{pair_name}/state:transfer_signal".encode()
+        state_key = f"batch:{batch_id}/state:transfer_signal".encode()
         with self.state_env.begin(db=self.state_db) as txn:
             state_bytes = txn.get(state_key)
             if state_bytes:
                 state = msgspec.msgpack.Decoder(bool).decode(state_bytes)
                 logger.info(
-                    f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for pair '{pair_name}': {state}"
+                    f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for batch '{batch_id}': {state}"
                 )
                 return state
             else:
@@ -269,6 +281,7 @@ class TensorBusClient:
 
     def register_tensors(
         self,
+        batch_id: str,
         tensors: list[tuple[torch.Tensor, str]],
         bucket_size: int | None = None,
         timeout: float = 30.0,
@@ -279,6 +292,7 @@ class TensorBusClient:
         ensuring the returned BatchHandler is immediately usable.
 
         Args:
+            batch_id: Unique identifier for this batch (must be same on both send/recv sides)
             tensors: list of (tensor, pair_name) tuples
             bucket_size: optional bucket size in bytes for bucketization optimization
             timeout: timeout in seconds
@@ -291,12 +305,14 @@ class TensorBusClient:
 
         tensor_tuples = [(pair_name, (ForkingPickler.dumps(tensor.detach()))) for tensor, pair_name in tensors]
 
-        msg = RegisterTensors(tensors=tensor_tuples, bucket_size=bucket_size)
+        msg = RegisterTensors(batch_id=batch_id, tensors=tensor_tuples, bucket_size=bucket_size)
 
-        self._execute_command_with_semaphore(msg, "register_tensors", "batch", blocking=True, timeout=timeout)
+        self._execute_command_with_semaphore(
+            msg, "register_tensors", f"batch_{batch_id}", blocking=True, timeout=timeout
+        )
 
         unique_pair_names = list(dict.fromkeys(pair_name for _, pair_name in tensors))
-        return BatchHandler(client=self, pair_names=unique_pair_names)
+        return BatchHandler(client=self, batch_id=batch_id, pair_names=unique_pair_names)
 
     def _connect_agent(self, path: str, timeout: float):
         """Connect to Agent.

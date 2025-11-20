@@ -5,11 +5,11 @@ set -e
 
 echo "🧹 Cleaning up old log and LMDB files..."
 
-export ROOT_BASE=${HOME}/etha/prototyping
+export ROOT_BASE=${PIXI_PROJECT_ROOT}/prototyping
 echo "ROOT_BASE: ${ROOT_BASE}"
 
 export LMDB_ROOT=/tmp/dbs
-export LOG_ROOT=${ROOT_BASE}/logs
+export LOG_ROOT=${ROOT_BASE}/distributed_tensor_transfer/logs
 rm -rf ${LMDB_ROOT}
 rm -rf ${LOG_ROOT}
 mkdir -p ${LMDB_ROOT}
