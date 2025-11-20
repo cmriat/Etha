@@ -713,7 +713,6 @@ class TensorBusAgent:
                             known_ready.add(r)
                             pending.remove(r)
                     except KeyError:
-                        # Key was deleted between check and get
                         pass
 
             if description:
@@ -723,45 +722,6 @@ class TensorBusAgent:
                 time.sleep(TIME_INTERVAL)
 
         return sorted(known_ready)
-
-    def _scan_ranks(self, key_prefix: str, candidate_ranks: set[int] | None = None) -> list[int]:
-        """Scan TCPStore for ranks with a given key prefix pattern.
-
-        Args:
-            key_prefix: Key prefix pattern with {rank} placeholder (e.g. "batch:{id}/rank:{rank}/state:ready")
-            candidate_ranks: Optional set of ranks to check (default: all ranks in world)
-
-        Returns:
-            List of ranks that have the key set to "1"
-        """
-        if candidate_ranks is None:
-            candidate_ranks = set(range(self.world_size))
-
-        ready_ranks = []
-        for r in candidate_ranks:
-            key = key_prefix.format(rank=r)
-            # Check if key exists before getting to avoid hang
-            if self.store.check([key]):
-                try:
-                    if self.store.get(key) == b"1":
-                        ready_ranks.append(r)
-                except KeyError:
-                    # Key was deleted between check and get
-                    pass
-        return ready_ranks
-
-    def _scan_peer_ranks(self, pair_name: str, status_key: str) -> list[int]:
-        """Scan TCPStore for all ranks of a given peer.
-
-        Args:
-            pair_name: Pair name
-            status_key: Status key (e.g. "state:ready", "state:transfer_signal")
-
-        Returns:
-            List of ranks that have the given status
-        """
-        key_pattern = f"pair:{pair_name}/rank:{{rank}}/{status_key}"
-        return self._scan_ranks(key_pattern)
 
     def _update_heartbeat(self):
         """Update heartbeat timestamp in State LMDB.
