@@ -18,21 +18,16 @@ def _chunk_nbytes(chunk: BaseChunk) -> int:
     return math.prod(chunk.chunk_shape) * element_size
 
 
-def _bucket_key(chunk: BaseChunk) -> tuple:
-    if isinstance(chunk, SendChunk):
-        return chunk.src_idx
-    return chunk.dst_idx
-
-
 def _calculate_bucket_entries(
     grouped_chunks: list[BaseChunk],
 ) -> list[BucketEntry]:
+    """Calculate bucket entries with byte-based offsets."""
     entries: list[BucketEntry] = []
     cursor = 0
     for chunk in grouped_chunks:
-        numel = math.prod(chunk.chunk_shape)
-        entries.append(BucketEntry(offset=cursor, numel=numel, chunk=chunk))
-        cursor += numel
+        nbytes = _chunk_nbytes(chunk)
+        entries.append(BucketEntry(offset=cursor, nbytes=nbytes, chunk=chunk))
+        cursor += nbytes
     return entries
 
 
@@ -41,22 +36,20 @@ def _build_bucket(
 ) -> Bucket:
     first_chunk = entries[0].chunk
     is_source = isinstance(first_chunk, SendChunk)
-    dtype = first_chunk.target_dtype if is_source and first_chunk.target_dtype else first_chunk.tensor.dtype
     device = first_chunk.tensor.device
     transfer_type = first_chunk.transfer_type
     dst_ranks = first_chunk.dst_ranks
     src_rank = first_chunk.src_rank
-    total_elems = entries[-1].offset + entries[-1].numel
-    key = _bucket_key(first_chunk)
+    total_bytes = entries[-1].offset + entries[-1].nbytes
+    key = first_chunk.bucket_key
     return Bucket(
         transfer_type=transfer_type,
         is_source=is_source,
         dst_ranks=dst_ranks,
         src_rank=src_rank,
-        dtype=dtype,
         device=device,
         key=key,
-        total_elems=total_elems,
+        total_bytes=total_bytes,
         entries=entries,
     )
 
@@ -75,7 +68,7 @@ def chunk_to_bucket_ops(
             buckets.append(_build_bucket(entries))
             continue
 
-        key = _bucket_key(chunk)
+        key = chunk.bucket_key
         current_chunks, current_bytes = grouped_state[key]
         current_chunks.append(chunk)
         current_bytes += chunk_bytes

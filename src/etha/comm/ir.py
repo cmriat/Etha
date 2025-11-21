@@ -1,5 +1,7 @@
 """Intermediate Representation for tensor transfer operations."""
 
+from __future__ import annotations
+
 import logging
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -35,7 +37,7 @@ class BaseChunk(ABC):
     buffer: torch.Tensor | None = None
 
     # Async work handle (None for SELF_COPY or before launch, populated during execution)
-    work: "torch.distributed.Work | None" = None
+    work: torch.distributed.Work | None = None
 
     slice_tuples: tuple[slice, ...] = ()  # Slice tuple for tensor indexing
 
@@ -71,30 +73,34 @@ class BaseChunk(ABC):
         and cleans up buffers.
         """
 
+    @property
+    def bucket_key(self) -> tuple:
+        """Return bucket grouping key (src_rank, dst_ranks)."""
+        return (self.src_rank, self.dst_ranks)
+
 
 @dataclass(slots=True, kw_only=True)
 class BucketEntry:
-    """Bucket offset entry."""
+    """Bucket offset entry (byte-based)."""
 
-    offset: int
-    numel: int
+    offset: int  # Byte offset in bucket buffer
+    nbytes: int  # Size in bytes
     chunk: BaseChunk
 
 
 @dataclass(slots=True, kw_only=True)
 class Bucket:
-    """Bucket for transfer operations."""
+    """Bucket for transfer operations (byte-based buffer)."""
 
     transfer_type: TransferType
     is_source: bool
     dst_ranks: tuple[int, ...] | None = None
     src_rank: int | None = None
-    dtype: torch.dtype | None = None
     device: torch.device | None = None
-    buffer: torch.Tensor | None = None
-    work: "torch.distributed.Work | None" = None
+    buffer: torch.Tensor | None = None  # uint8 buffer
+    work: torch.distributed.Work | None = None
     buffer_ready_event: torch.cuda.Event | None = None
-    total_elems: int
+    total_bytes: int
     key: tuple
     entries: list[BucketEntry]
 
@@ -111,15 +117,15 @@ class Bucket:
             self._prepare_target()
 
     def _prepare_source(self) -> None:
-        """Prepare source bucket buffer."""
+        """Prepare source bucket buffer (byte-based)."""
         if len(self.entries) == 1:
             chunk = self.entries[0].chunk
             chunk.prepare()
-            self.buffer = chunk.buffer
+            self.buffer = chunk.buffer.view(torch.uint8)
             chunk.buffer = None
             return
 
-        self.buffer = torch.empty(self.total_elems, dtype=self.dtype, device=self.device)
+        self.buffer = torch.empty(self.total_bytes, dtype=torch.uint8, device=self.device)
 
         for entry in self.entries:
             chunk = entry.chunk
@@ -127,25 +133,28 @@ class Bucket:
             sliced = chunk.tensor[chunk.slice_tuples]
             if hasattr(chunk, "target_dtype") and chunk.target_dtype and chunk.target_dtype != sliced.dtype:
                 sliced = sliced.to(chunk.target_dtype)
-            flat = sliced.view(-1)
-            self.buffer.narrow(0, entry.offset, entry.numel).copy_(flat, non_blocking=True)
+            flat_bytes = sliced.view(-1).view(torch.uint8)
+            self.buffer.narrow(0, entry.offset, entry.nbytes).copy_(flat_bytes, non_blocking=True)
         event = torch.cuda.Event()
         event.record()
         self.buffer_ready_event = event
 
     def _prepare_target(self) -> None:
-        """Prepare target bucket buffer."""
+        """Prepare target bucket buffer (byte-based)."""
         if len(self.entries) == 1:
             chunk = self.entries[0].chunk
             chunk.prepare()
-            self.buffer = chunk.buffer
+            self.buffer = chunk.buffer.view(torch.uint8)
             return
 
-        self.buffer = torch.empty(self.total_elems, dtype=self.dtype, device=self.device)
+        self.buffer = torch.empty(self.total_bytes, dtype=torch.uint8, device=self.device)
 
         for entry in self.entries:
             chunk = entry.chunk
-            view = self.buffer.narrow(0, entry.offset, entry.numel).view(chunk.chunk_shape)
+            # Determine dtype for this chunk
+            dtype = chunk.tensor.dtype
+            numel = entry.nbytes // dtype.itemsize
+            view = self.buffer.narrow(0, entry.offset, entry.nbytes).view(dtype)[:numel].view(chunk.chunk_shape)
             if self.transfer_type == TransferType.SELF_COPY:
                 view.copy_(chunk.tensor[chunk.src_slice_tuples], non_blocking=True)
             chunk.buffer = view
@@ -205,10 +214,7 @@ class Bucket:
 
 @dataclass(slots=True, kw_only=True)
 class SendChunk(BaseChunk):
-    """Send chunk for source-side operations.
-
-    Extracts tensor slice, optionally converts dtype, sends via transfer_ops.
-    """
+    """Send chunk for source-side operations."""
 
     target_dtype: torch.dtype | None = None
 
@@ -228,10 +234,7 @@ class SendChunk(BaseChunk):
 
 @dataclass(slots=True, kw_only=True)
 class RecvChunk(BaseChunk):
-    """Receive chunk for target-side operations.
-
-    Allocates buffer, receives data, writes back to tensor.
-    """
+    """Receive chunk for target-side operations."""
 
     dst_idx: tuple
 
