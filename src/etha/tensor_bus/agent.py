@@ -24,6 +24,7 @@ from etha.comm import (
     map_to_chunk_ops,
     chunk_to_bucket_ops,
 )
+from etha.comm.ir import SourceChunk, TargetChunk
 
 from .utils import setup_cuda_rebuild_patch
 from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors
@@ -257,11 +258,11 @@ class TensorBusAgent:
             # Get local mesh info (this process's mesh)
             local_mesh_shape, local_placements = local_mesh_info[0]
             local_mesh_tensor = torch.arange(
-                local_ranks[0], local_ranks[0] + torch.prod(torch.tensor(local_mesh_shape))
+                local_ranks[0], local_ranks[0] + int(torch.prod(torch.tensor(local_mesh_shape)).item())
             ).view(local_mesh_shape)
             remote_mesh_shape, remote_placements = remote_mesh_info[0]
             remote_mesh_tensor = torch.arange(
-                remote_ranks[0], remote_ranks[0] + torch.prod(torch.tensor(remote_mesh_shape))
+                remote_ranks[0], remote_ranks[0] + int(torch.prod(torch.tensor(remote_mesh_shape)).item())
             ).view(remote_mesh_shape)
             logger.info(f"Agent {self.rank}: Local mesh: {local_mesh_tensor} with placements: {local_placements}")
             logger.info(f"Agent {self.rank}: Remote mesh: {remote_mesh_tensor} with placements: {remote_placements}")
@@ -545,8 +546,8 @@ class TensorBusAgent:
             batch_state.pair_target_dtypes[pair_name] = []
 
             # Per-pair chunk lists (for bucketization)
-            pair_send_chunks = []
-            pair_recv_chunks = []
+            pair_send_chunks: list[SourceChunk | TargetChunk] = []
+            pair_recv_chunks: list[SourceChunk | TargetChunk] = []
 
             for i, tensor_payload in enumerate(tensor_payloads):
                 tensor = ForkingPickler.loads(tensor_payload)
@@ -601,6 +602,7 @@ class TensorBusAgent:
                     pair_recv_chunks.extend(recv_chunks)
 
             # Per-pair bucketization
+            # TODO: Consider global bucketization across all pairs, may be bucket with "channel" idea
             if bucket_size:
                 pair_send_buckets = chunk_to_bucket_ops(
                     chunks=pair_send_chunks,

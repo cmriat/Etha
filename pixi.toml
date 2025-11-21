@@ -34,9 +34,11 @@ ruff = "*"
 pre-commit = "*"
 nccl-tests = ">=2.16.7,<3"
 pytest-timeout = ">=2.4.0,<3"
+mypy = ">=1.18.2,<2"
 
 [feature.dev.tasks]
 transfer_model = "bash prototyping/distributed_model_transfer/launch.sh"
+test = "pytest tests"
 
 [feature.raydev.dependencies]
 ray-default = "*"

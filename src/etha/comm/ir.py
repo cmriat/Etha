@@ -43,7 +43,7 @@ class BaseChunk:
     src_idx: tuple  # Multi-dimensional index in source tensor
 
     # Destination info
-    dst_ranks: tuple[int]  # Target ranks (len > 1 triggers broadcast)
+    dst_ranks: tuple[int, ...]  # Target ranks (len > 1 triggers broadcast)
 
     def __repr__(self) -> str:
         """Return a concise representation for debugging."""

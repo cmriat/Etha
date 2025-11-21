@@ -72,7 +72,7 @@ class BatchHandler:
         """
         msg = Transfer(batch_id=self.batch_id, transfer_type=transfer_type)
         return self.client._execute_command_with_semaphore(
-            msg, "transfer", f"batch_{self.batch_id}_{transfer_type}", blocking=blocking, timeout=timeout
+            msg, "transfer", context_id=f"batch_{self.batch_id}_{transfer_type}", blocking=blocking, timeout=timeout
         )
 
     def query_transfer_signal(self, blocking: bool = True, timeout: float = 30.0) -> bool:
@@ -95,7 +95,7 @@ class BatchHandler:
         """
         msg = CleanupBatch(batch_id=self.batch_id)
         self.client._execute_command_with_semaphore(
-            msg, "cleanup_batch", f"batch_{self.batch_id}", blocking=blocking, timeout=timeout
+            msg, "cleanup_batch", context_id=f"batch_{self.batch_id}", blocking=blocking, timeout=timeout
         )
 
     def __del__(self):
@@ -107,10 +107,10 @@ class BatchHandler:
             pass
 
 
-def generate_semaphore_name(command_type: str, pair_name: str) -> str:
-    safe_pair = pair_name.replace("/", "_").replace(":", "_")
+def generate_semaphore_name(command_type: str, context_id: str) -> str:
+    safe_context = context_id.replace("/", "_").replace(":", "_")
     unique_suffix = uuid.uuid4().hex  # UUID ensures semaphore uniqueness without global state
-    return f"/command_{command_type}_{safe_pair}_{os.getpid()}_{unique_suffix}"
+    return f"/command_{command_type}_{safe_context}_{os.getpid()}_{unique_suffix}"
 
 
 class TensorBusClient:
@@ -138,25 +138,22 @@ class TensorBusClient:
         # Step 1: Connection to agent
         if agent_state_lmdb_path is None:
             agent_state_lmdb_path = os.environ.get("TENSOR_BUS_STATE_PATH")
-        if agent_state_lmdb_path is None:
-            raise ValueError(
-                "State LMDB path not provided. Either pass agent_state_lmdb_path argument "
-                "or set TENSOR_BUS_STATE_PATH environment variable."
-            )
 
         self.agent_state_lmdb_path = agent_state_lmdb_path
 
-        self.state_env = None
+        self.state_env: lmdb.Environment | None = None
         self.state_db = None
         self._connect_agent(agent_state_lmdb_path, timeout=connection_timeout)
 
         # Step 2: Initialize CommandQueue
+        if lmdb_command_queue_path is None:
+            lmdb_command_queue_path = os.environ.get("TENSOR_BUS_COMMAND_QUEUE_PATH")
         self.command_queue = CommandQueue(lmdb_command_queue_path)
 
     def _execute_command_with_semaphore(
-        self, command, command_type: str, pair_name: str, blocking: bool = False, timeout: float = 30.0
+        self, command, command_type: str, context_id: str, blocking: bool = False, timeout: float = 30.0
     ) -> posix_ipc.Semaphore:
-        sem_name = generate_semaphore_name(command_type, pair_name)
+        sem_name = generate_semaphore_name(command_type, context_id)
         sem = posix_ipc.Semaphore(sem_name, flags=posix_ipc.O_CREAT, initial_value=0)
 
         # Set semaphore name on command
@@ -166,18 +163,18 @@ class TensorBusClient:
         # Send command
         self.command_queue.enqueue(command)
         logger.debug(
-            f"TensorBusClient[{self.agent_rank}]: Sent {command_type} command for pair '{pair_name}' with semaphore {sem_name}"
+            f"TensorBusClient[{self.agent_rank}]: Sent {command_type} command for context '{context_id}' with semaphore {sem_name}"
         )
 
         if blocking:
             try:
                 sem.acquire(timeout=timeout)
                 logger.debug(
-                    f"TensorBusClient[{self.agent_rank}]: {command_type} completed for pair '{pair_name}' with semaphore {sem_name}"
+                    f"TensorBusClient[{self.agent_rank}]: {command_type} completed for context '{context_id}' with semaphore {sem_name}"
                 )
             except posix_ipc.BusyError as e:
                 raise TimeoutError(
-                    f"TensorBusClient[{self.agent_rank}]: {command_type} timeout for pair '{pair_name}' with semaphore {sem_name}"
+                    f"TensorBusClient[{self.agent_rank}]: {command_type} timeout for context '{context_id}' with semaphore {sem_name}"
                 ) from e
             finally:
                 sem.close()
@@ -234,9 +231,12 @@ class TensorBusClient:
             placements_payload=placements_payload,
         )
 
-        self._execute_command_with_semaphore(msg, "register", pair_name, blocking=blocking, timeout=timeout)
+        self._execute_command_with_semaphore(msg, "register", context_id=pair_name, blocking=blocking, timeout=timeout)
 
         # Get the matched state
+        if self.state_env is None:
+            raise RuntimeError("State environment not initialized")
+
         state_key = f"pair:{pair_name}/state:match".encode()
         with self.state_env.begin(db=self.state_db) as txn:
             state_bytes = txn.get(state_key)
@@ -250,21 +250,26 @@ class TensorBusClient:
         logger.info(f"TensorBusClient[{self.agent_rank}]: Pair '{pair_name}' registered successfully")
 
     def transfer(
-        self, pair_name: str, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
+        self, batch_id: str, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
     ) -> posix_ipc.Semaphore:
-        msg = Transfer(pair_name=pair_name, transfer_type=transfer_type)
+        msg = Transfer(batch_id=batch_id, transfer_type=transfer_type)
         logger.info(
-            f"TensorBusClient[{self.agent_rank}]: Sending transfer command for pair '{pair_name} {transfer_type}'"
+            f"TensorBusClient[{self.agent_rank}]: Sending transfer command for pair '{batch_id} {transfer_type}'"
         )
-        return self._execute_command_with_semaphore(msg, "transfer", pair_name, blocking=blocking, timeout=timeout)
+        return self._execute_command_with_semaphore(
+            msg, "transfer", context_id=batch_id, blocking=blocking, timeout=timeout
+        )
 
     def query_transfer_signal(self, batch_id: str, blocking: bool = True, timeout: float = 30.0) -> bool:
         query_msg = QueryStatus(batch_id=batch_id, state_name="transfer_signal")
         logger.info(f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for batch '{batch_id}'")
         # Execute with semaphore synchronization (blocking)
         self._execute_command_with_semaphore(
-            query_msg, "query", f"batch_{batch_id}", blocking=blocking, timeout=timeout
+            query_msg, "query", context_id=f"batch_{batch_id}", blocking=blocking, timeout=timeout
         )
+
+        if self.state_env is None:
+            raise RuntimeError("State environment not initialized")
 
         # Get the status from LMDB
         state_key = f"batch:{batch_id}/state:transfer_signal".encode()
@@ -308,7 +313,7 @@ class TensorBusClient:
         msg = RegisterTensors(batch_id=batch_id, tensors=tensor_tuples, bucket_size=bucket_size)
 
         self._execute_command_with_semaphore(
-            msg, "register_tensors", f"batch_{batch_id}", blocking=True, timeout=timeout
+            msg, "register_tensors", context_id=f"batch_{batch_id}", blocking=True, timeout=timeout
         )
 
         unique_pair_names = list(dict.fromkeys(pair_name for _, pair_name in tensors))
@@ -354,6 +359,8 @@ class TensorBusClient:
             heartbeat_fresh = False
             heartbeat_age = None
 
+            assert self.state_env is not None  # Already initialized above
+
             try:
                 with self.state_env.begin(db=self.state_db) as txn:
                     heartbeat_bytes = txn.get(b"agent:heartbeat")
@@ -379,9 +386,10 @@ class TensorBusClient:
             time.sleep(0.1)
 
         # Timeout reached - close LMDB and raise error
-        self.state_env.close()
-        self.state_env = None
-        self.state_db = None
+        if self.state_env is not None:
+            self.state_env.close()
+            self.state_env = None
+            self.state_db = None
         raise ConnectionError(
             f"Agent at {path} is not responding after {timeout}s. "
             f"Heartbeat is too old or missing. Agent may have crashed."

@@ -112,9 +112,10 @@ def get_m2m_map(
         reqs.append(dist.irecv(full_tensor_restored, src=source_rank))
 
     for req in reqs:
-        req.wait()
+        if req is not None:
+            req.wait()
 
-    m2m_map = defaultdict(lambda: defaultdict(list))
+    m2m_map: dict[int, dict[tuple, list[tuple[int, tuple]]]] = defaultdict(lambda: defaultdict(list))
 
     if rank in target_mesh_ranks:
         dtensor_target = distribute_tensor(full_tensor_restored, target_mesh, target_placements, src_data_rank=None)
@@ -125,14 +126,14 @@ def get_m2m_map(
         base = max(middle_tensor_shape) + 1
 
         # Iterate through all indices in the local shard
-        for target_idx in itertools.product(*[range(dim) for dim in local_target_shard.shape]):
-            encoded_value = int(local_target_shard[target_idx].item())
+        for target_idx_tuple in itertools.product(*[range(dim) for dim in local_target_shard.shape]):
+            encoded_value = int(local_target_shard[target_idx_tuple].item())
 
             # Decode the rank and source indices from the encoded value
             # Extract coordinates in reverse order
             source_indices = []
             temp = encoded_value
-            for _ in range(len(target_idx)):
+            for _ in range(len(target_idx_tuple)):
                 coord = temp % base
                 source_indices.append(coord)
                 temp = temp // base
@@ -145,7 +146,7 @@ def get_m2m_map(
             source_idx = tuple(source_indices)
 
             target_rank = rank
-            m2m_map[source_rank][source_idx].append((target_rank, target_idx))
+            m2m_map[source_rank][source_idx].append((target_rank, target_idx_tuple))
 
     m2m_map_regular = {}
     for k, v in m2m_map.items():
@@ -154,7 +155,7 @@ def get_m2m_map(
     all_m2m_maps = [None] * (len(source_mesh_ranks) + len(target_mesh_ranks))
     dist.all_gather_object(all_m2m_maps, m2m_map_regular, group=group)
 
-    merged_m2m_map = defaultdict(lambda: defaultdict(list))
+    merged_m2m_map: dict[int, dict[tuple, list[tuple[int, tuple]]]] = defaultdict(lambda: defaultdict(list))
     for rank_m2m_map in all_m2m_maps:
         if rank_m2m_map is not None:
             for source_rank, source_idx_map in rank_m2m_map.items():

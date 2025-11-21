@@ -51,6 +51,8 @@ def execute_chunk_simple(
     chunks: list[SourceChunk | TargetChunk],
 ) -> None:
     for chunk in chunks:
+        if chunk.tensor is None:
+            continue
         _prepare_chunk(chunk)
         _launch_chunk(chunk)
         _finalize_chunk(chunk)
