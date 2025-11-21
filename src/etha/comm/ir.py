@@ -6,9 +6,6 @@ from enum import Enum
 from dataclasses import dataclass
 
 import torch
-import torch.distributed as dist
-
-from . import utils
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +64,6 @@ class BaseChunk(ABC):
         """
 
     @abstractmethod
-    def launch(self) -> None:
-        """Launch communication operation.
-
-        Initiates async communication (isend/irecv/broadcast) or performs
-        synchronous local copy. Sets self.work for async operations.
-        """
-
-    @abstractmethod
     def finalize(self) -> None:
         """Finalize communication and cleanup.
 
@@ -114,13 +103,111 @@ class Bucket:
         kind = "src" if self.is_source else "dst"
         return f"Bucket({kind}, key={self.key} entries_len={len(self.entries)} src_rank={self.src_rank}→dst_ranks={self.dst_ranks})"
 
+    def prepare(self) -> None:
+        """Prepare buffer for communication."""
+        if self.is_source:
+            self._prepare_source()
+        else:
+            self._prepare_target()
+
+    def _prepare_source(self) -> None:
+        """Prepare source bucket buffer."""
+        if len(self.entries) == 1:
+            chunk = self.entries[0].chunk
+            chunk.prepare()
+            self.buffer = chunk.buffer
+            chunk.buffer = None
+            return
+
+        self.buffer = torch.empty(self.total_elems, dtype=self.dtype, device=self.device)
+
+        for entry in self.entries:
+            chunk = entry.chunk
+            # Manually extract and convert slice (similar to SendChunk.prepare())
+            sliced = chunk.tensor[chunk.slice_tuples]
+            if hasattr(chunk, "target_dtype") and chunk.target_dtype and chunk.target_dtype != sliced.dtype:
+                sliced = sliced.to(chunk.target_dtype)
+            flat = sliced.view(-1)
+            self.buffer.narrow(0, entry.offset, entry.numel).copy_(flat, non_blocking=True)
+        event = torch.cuda.Event()
+        event.record()
+        self.buffer_ready_event = event
+
+    def _prepare_target(self) -> None:
+        """Prepare target bucket buffer."""
+        if len(self.entries) == 1:
+            chunk = self.entries[0].chunk
+            chunk.prepare()
+            self.buffer = chunk.buffer
+            return
+
+        self.buffer = torch.empty(self.total_elems, dtype=self.dtype, device=self.device)
+
+        for entry in self.entries:
+            chunk = entry.chunk
+            view = self.buffer.narrow(0, entry.offset, entry.numel).view(chunk.chunk_shape)
+            if self.transfer_type == TransferType.SELF_COPY:
+                view.copy_(chunk.tensor[chunk.src_slice_tuples], non_blocking=True)
+            chunk.buffer = view
+        if self.transfer_type == TransferType.SELF_COPY:
+            event = torch.cuda.Event()
+            event.record()
+            self.buffer_ready_event = event
+
+    def launch(self) -> bool:
+        """Launch communication operation.
+
+        Returns:
+            True if launched, False if still waiting for buffer to be ready.
+        """
+        if self.buffer_ready_event is not None:
+            if not self.buffer_ready_event.query():
+                return False
+            self.buffer_ready_event = None
+
+        from .transfer_ops import execute_transfer
+
+        self.work = execute_transfer(
+            self.buffer,
+            self.transfer_type,
+            self.is_source,
+            self.src_rank,
+            self.dst_ranks,
+        )
+        return True
+
+    def is_complete(self) -> bool:
+        """Check if communication is complete.
+
+        Returns:
+            True if complete, False otherwise.
+        """
+        if self.work is None:
+            return True
+        if self.device is not None and self.device.type == "cpu":  # cpu device do not support is_completed()
+            self.work.wait()
+            self.work = None
+            return True
+        return self.work.is_completed()
+
+    def finalize(self) -> None:
+        """Finalize communication and cleanup."""
+        if self.work is not None:
+            self.work.wait()
+            self.work = None
+
+        if not self.is_source:
+            for entry in self.entries:
+                entry.chunk.finalize()
+
+        self.buffer = None
+
 
 @dataclass(slots=True, kw_only=True)
-class SendChunk(BaseChunk, ABC):
-    """Abstract base for send chunks (source-side operations).
+class SendChunk(BaseChunk):
+    """Send chunk for source-side operations.
 
-    Common behavior: extract tensor slice, optionally convert dtype, cleanup after send.
-    Subclasses only implement launch() with specific communication primitive.
+    Extracts tensor slice, optionally converts dtype, sends via transfer_ops.
     """
 
     target_dtype: torch.dtype | None = None
@@ -140,11 +227,10 @@ class SendChunk(BaseChunk, ABC):
 
 
 @dataclass(slots=True, kw_only=True)
-class RecvChunk(BaseChunk, ABC):
-    """Abstract base for receive chunks (target-side operations).
+class RecvChunk(BaseChunk):
+    """Receive chunk for target-side operations.
 
-    Common behavior: allocate buffer, write back to tensor, cleanup after receive.
-    Subclasses only implement launch() with specific communication primitive.
+    Allocates buffer, receives data, writes back to tensor.
     """
 
     dst_idx: tuple
@@ -163,58 +249,6 @@ class RecvChunk(BaseChunk, ABC):
 
 
 @dataclass(slots=True, kw_only=True)
-class SendP2PChunk(SendChunk):
-    """Point-to-point send chunk.
-
-    Sends data to a single destination rank via dist.isend().
-    """
-
-    def launch(self) -> None:
-        """Launch async P2P send."""
-        self.work = dist.isend(self.buffer, dst=self.dst_ranks[0])
-
-
-@dataclass(slots=True, kw_only=True)
-class SendBroadcastChunk(SendChunk):
-    """Broadcast send chunk.
-
-    Sends data to multiple destination ranks via dist.broadcast().
-    """
-
-    def launch(self) -> None:
-        """Launch async broadcast send."""
-        group_ranks = sorted([self.src_rank, *self.dst_ranks])
-        group = utils.get_or_create_process_group(group_ranks)
-        self.work = dist.broadcast(self.buffer, src=self.src_rank, group=group, async_op=True)
-
-
-@dataclass(slots=True, kw_only=True)
-class RecvP2PChunk(RecvChunk):
-    """Point-to-point receive chunk.
-
-    Receives data from a single source rank via dist.irecv().
-    """
-
-    def launch(self) -> None:
-        """Launch async P2P receive."""
-        self.work = dist.irecv(self.buffer, src=self.src_rank)
-
-
-@dataclass(slots=True, kw_only=True)
-class RecvBroadcastChunk(RecvChunk):
-    """Broadcast receive chunk.
-
-    Receives data from source rank via dist.broadcast().
-    """
-
-    def launch(self) -> None:
-        """Launch async broadcast receive."""
-        group_ranks = sorted([self.src_rank, *self.dst_ranks])
-        group = utils.get_or_create_process_group(group_ranks)
-        self.work = dist.broadcast(self.buffer, src=self.src_rank, group=group, async_op=True)
-
-
-@dataclass(slots=True, kw_only=True)
 class SelfCopyChunk(BaseChunk):
     """Self-copy chunk (local copy within same rank).
 
@@ -227,10 +261,6 @@ class SelfCopyChunk(BaseChunk):
     def prepare(self) -> None:
         """Directly reference source data (no copy needed yet)."""
         self.buffer = self.tensor[self.src_slice_tuples]
-
-    def launch(self) -> None:
-        """No async work for local copy."""
-        self.work = None
 
     def finalize(self) -> None:
         """Copy data to destination slice and cleanup."""
