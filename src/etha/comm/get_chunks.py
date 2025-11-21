@@ -2,7 +2,15 @@
 
 import torch
 
-from .ir import SourceChunk, TargetChunk, TransferType
+from .ir import (
+    BaseChunk,
+    RecvP2PChunk,
+    SendP2PChunk,
+    TransferType,
+    SelfCopyChunk,
+    RecvBroadcastChunk,
+    SendBroadcastChunk,
+)
 from .utils import (
     get_slicer_tuples,
     get_slice_from_multi_index,
@@ -28,7 +36,7 @@ def map_to_chunk_ops(
     source_tensor: torch.Tensor | None = None,
     target_tensor: torch.Tensor | None = None,
     target_dtype: torch.dtype | None = None,
-) -> list[SourceChunk | TargetChunk]:
+) -> list[BaseChunk]:
     if not m2m_map:
         return []
     source_tensor_shape = source_tensor.shape if source_tensor is not None else None
@@ -51,7 +59,7 @@ def map_to_chunk_ops(
                 broadcast_groups.add(group_ranks)
     for group_ranks in sorted(broadcast_groups):
         get_or_create_process_group(list(group_ranks))
-    chunks: list[SourceChunk | TargetChunk] = []
+    chunks: list[BaseChunk] = []
     for src_rank, src_map in m2m_map.items():
         for src_idx, dst_list in src_map.items():
             if len(dst_list) > 1:
@@ -65,16 +73,30 @@ def map_to_chunk_ops(
                     src_slice_tuples = get_slice_from_multi_index(
                         src_idx, source_num_slicers_extended, source_slicer_tuples
                     )
-                source_chunk = SourceChunk(
-                    chunk_shape=calculate_chunk_shape(source_num_slicers_extended or [], source_tensor_shape),
-                    transfer_type=transfer_type,
-                    src_rank=rank,
-                    src_idx=src_idx,
-                    dst_ranks=dst_ranks,
-                    slice_tuples=src_slice_tuples,
-                    tensor=source_tensor,
-                    target_dtype=target_dtype,
-                )
+
+                # Create appropriate send chunk based on transfer type
+                if transfer_type == TransferType.BROADCAST:
+                    source_chunk = SendBroadcastChunk(
+                        chunk_shape=calculate_chunk_shape(source_num_slicers_extended, source_tensor_shape),
+                        transfer_type=transfer_type,
+                        src_rank=rank,
+                        src_idx=src_idx,
+                        dst_ranks=dst_ranks,
+                        slice_tuples=src_slice_tuples,
+                        tensor=source_tensor,
+                        target_dtype=target_dtype,
+                    )
+                else:  # P2P
+                    source_chunk = SendP2PChunk(
+                        chunk_shape=calculate_chunk_shape(source_num_slicers_extended, source_tensor_shape),
+                        transfer_type=transfer_type,
+                        src_rank=rank,
+                        src_idx=src_idx,
+                        dst_ranks=dst_ranks,
+                        slice_tuples=src_slice_tuples,
+                        tensor=source_tensor,
+                        target_dtype=target_dtype,
+                    )
                 chunks.append(source_chunk)
             for dst_rank, dst_idx in dst_list:
                 if dst_rank == rank:
@@ -96,16 +118,41 @@ def map_to_chunk_ops(
                         dst_src_slice_tuples = get_slice_from_multi_index(
                             src_idx, source_num_slicers_extended, source_slicer_tuples
                         )
-                    target_chunk = TargetChunk(
-                        chunk_shape=calculate_chunk_shape(target_num_slicers_extended or [], target_tensor_shape),
-                        transfer_type=actual_transfer_type,
-                        dst_ranks=dst_ranks,
-                        dst_idx=dst_idx,
-                        src_rank=src_rank,
-                        src_idx=src_idx,
-                        slice_tuples=dst_slice_tuples,
-                        src_slice_tuples=dst_src_slice_tuples,
-                        tensor=target_tensor,
-                    )
+
+                    # Create appropriate receive chunk based on transfer type
+                    if actual_transfer_type == TransferType.SELF_COPY:
+                        target_chunk = SelfCopyChunk(
+                            chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
+                            transfer_type=actual_transfer_type,
+                            src_rank=src_rank,
+                            src_idx=src_idx,
+                            dst_ranks=dst_ranks,
+                            dst_idx=dst_idx,
+                            slice_tuples=dst_slice_tuples,
+                            src_slice_tuples=src_slice_tuples,
+                            tensor=target_tensor,
+                        )
+                    elif actual_transfer_type == TransferType.BROADCAST:
+                        target_chunk = RecvBroadcastChunk(
+                            chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
+                            transfer_type=actual_transfer_type,
+                            src_rank=src_rank,
+                            src_idx=src_idx,
+                            dst_ranks=dst_ranks,
+                            dst_idx=dst_idx,
+                            slice_tuples=dst_slice_tuples,
+                            tensor=target_tensor,
+                        )
+                    else:  # P2P
+                        target_chunk = RecvP2PChunk(
+                            chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
+                            transfer_type=actual_transfer_type,
+                            src_rank=src_rank,
+                            src_idx=src_idx,
+                            dst_ranks=dst_ranks,
+                            dst_idx=dst_idx,
+                            slice_tuples=dst_slice_tuples,
+                            tensor=target_tensor,
+                        )
                     chunks.append(target_chunk)
     return chunks

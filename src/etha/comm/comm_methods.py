@@ -7,7 +7,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import DTensor, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement
 
-from .ir import Bucket, SourceChunk, TargetChunk
+from .ir import Bucket, BaseChunk
 from .chunk_execution import execute_chunk_simple
 from .bucket_execution import execute_bucket_pipeline
 
@@ -52,7 +52,7 @@ def gather_broadcast_comm(
 
 
 def chunk_comm(
-    chunks: list[SourceChunk | TargetChunk],
+    chunks: list[BaseChunk],
 ) -> None:
     """Execute chunked communication."""
     execute_chunk_simple(chunks=chunks)

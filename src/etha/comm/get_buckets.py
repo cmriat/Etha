@@ -5,23 +5,27 @@ from collections import defaultdict
 
 import torch
 
-from .ir import Bucket, BucketEntry, SourceChunk, TargetChunk
+from .ir import Bucket, BaseChunk, SendChunk, BucketEntry
 
 
-def _chunk_nbytes(chunk: SourceChunk | TargetChunk) -> int:
-    dtype = chunk.target_dtype if isinstance(chunk, SourceChunk) else chunk.tensor.dtype
+def _chunk_nbytes(chunk: BaseChunk) -> int:
+    """Calculate chunk size in bytes. Send chunks may have target_dtype conversion."""
+    if isinstance(chunk, SendChunk) and chunk.target_dtype:
+        dtype = chunk.target_dtype
+    else:
+        dtype = chunk.tensor.dtype
     element_size = torch.empty((), dtype=dtype).element_size()
     return math.prod(chunk.chunk_shape) * element_size
 
 
-def _bucket_key(chunk: SourceChunk | TargetChunk) -> tuple:
-    if isinstance(chunk, SourceChunk):
+def _bucket_key(chunk: BaseChunk) -> tuple:
+    if isinstance(chunk, SendChunk):
         return chunk.src_idx
     return chunk.dst_idx
 
 
 def _calculate_bucket_entries(
-    grouped_chunks: list[SourceChunk | TargetChunk],
+    grouped_chunks: list[BaseChunk],
 ) -> list[BucketEntry]:
     entries: list[BucketEntry] = []
     cursor = 0
@@ -36,8 +40,8 @@ def _build_bucket(
     entries: list[BucketEntry],
 ) -> Bucket:
     first_chunk = entries[0].chunk
-    is_source = isinstance(first_chunk, SourceChunk)
-    dtype = first_chunk.target_dtype if is_source else first_chunk.tensor.dtype
+    is_source = isinstance(first_chunk, SendChunk)
+    dtype = first_chunk.target_dtype if is_source and first_chunk.target_dtype else first_chunk.tensor.dtype
     device = first_chunk.tensor.device
     transfer_type = first_chunk.transfer_type
     dst_ranks = first_chunk.dst_ranks
@@ -58,11 +62,11 @@ def _build_bucket(
 
 
 def chunk_to_bucket_ops(
-    chunks: list[SourceChunk | TargetChunk],
+    chunks: list[BaseChunk],
     bucket_size: int,
 ) -> list[Bucket]:
     buckets: list[Bucket] = []
-    grouped_state: dict[tuple, tuple[list[SourceChunk | TargetChunk], int]] = defaultdict(lambda: ([], 0))
+    grouped_state: dict[tuple, tuple[list[BaseChunk], int]] = defaultdict(lambda: ([], 0))
 
     for chunk in chunks:
         chunk_bytes = _chunk_nbytes(chunk)

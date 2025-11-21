@@ -8,7 +8,6 @@ import torch.distributed as dist
 
 from .ir import Bucket, TransferType
 from .utils import get_or_create_process_group
-from .chunk_execution import _prepare_chunk, _finalize_chunk
 
 logger = logging.getLogger(__name__)
 rank = None
@@ -17,7 +16,7 @@ rank = None
 def _prepare_source_bucket(bucket: Bucket) -> None:
     if len(bucket.entries) == 1:
         chunk = bucket.entries[0].chunk
-        _prepare_chunk(chunk)
+        chunk.prepare()
         bucket.buffer = chunk.buffer
         chunk.buffer = None
         return
@@ -26,10 +25,12 @@ def _prepare_source_bucket(bucket: Bucket) -> None:
 
     for entry in bucket.entries:
         chunk = entry.chunk
-        _prepare_chunk(chunk, contiguous=False)
-        flat = chunk.buffer.view(-1)
+        # Manually extract and convert slice (similar to SendChunk.prepare())
+        sliced = chunk.tensor[chunk.slice_tuples]
+        if hasattr(chunk, "target_dtype") and chunk.target_dtype and chunk.target_dtype != sliced.dtype:
+            sliced = sliced.to(chunk.target_dtype)
+        flat = sliced.view(-1)
         bucket.buffer.narrow(0, entry.offset, entry.numel).copy_(flat, non_blocking=True)
-        chunk.buffer = None
     event = torch.cuda.Event()
     event.record()
     bucket.buffer_ready_event = event
@@ -38,7 +39,7 @@ def _prepare_source_bucket(bucket: Bucket) -> None:
 def _prepare_target_bucket(bucket: Bucket) -> None:
     if len(bucket.entries) == 1:
         chunk = bucket.entries[0].chunk
-        _prepare_chunk(chunk)
+        chunk.prepare()
         bucket.buffer = chunk.buffer
         return
 
@@ -103,7 +104,7 @@ def _finalize_bucket(bucket: Bucket) -> None:
 
     if not bucket.is_source:
         for entry in bucket.entries:
-            _finalize_chunk(entry.chunk)
+            entry.chunk.finalize()
 
     bucket.buffer = None
 
