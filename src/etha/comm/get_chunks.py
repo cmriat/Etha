@@ -27,7 +27,7 @@ def map_to_chunk_ops(
     target_num_slicers: list[int],
     source_tensor: torch.Tensor | None = None,
     target_tensor: torch.Tensor | None = None,
-    target_dtype: torch.dtype | None = None,
+    transfer_dtype: torch.dtype | None = None,
 ) -> list[Chunk]:
     if not m2m_map:
         return []
@@ -44,6 +44,7 @@ def map_to_chunk_ops(
         target_num_slicers_extended = (target_num_slicers + [1] * len(target_tensor_shape))[: len(target_tensor_shape)]
         target_slicer_tuples = get_slicer_tuples(target_tensor_shape, target_num_slicers_extended)
     broadcast_groups = set()
+
     for src_rank, src_map in m2m_map.items():
         for _, dst_list in src_map.items():
             if len(dst_list) > 1:
@@ -51,6 +52,7 @@ def map_to_chunk_ops(
                 broadcast_groups.add(group_ranks)
     for group_ranks in sorted(broadcast_groups):
         get_or_create_process_group(list(group_ranks))
+
     chunks: list[Chunk] = []
     for src_rank, src_map in m2m_map.items():
         for src_idx, dst_list in src_map.items():
@@ -76,7 +78,7 @@ def map_to_chunk_ops(
                         dst_ranks=dst_ranks,
                         slice_tuples=src_slice_tuples,
                         tensor=source_tensor,
-                        target_dtype=target_dtype,
+                        transfer_dtype=transfer_dtype,
                     )
                 )
             for dst_rank, dst_idx in dst_list:
@@ -117,7 +119,7 @@ def map_to_chunk_ops(
                                 dst_idx=dst_idx,
                                 slice_tuples=dst_slice_tuples,
                                 tensor=target_tensor,
-                                target_dtype=target_dtype,
+                                transfer_dtype=transfer_dtype,
                             )
                         )
     return chunks

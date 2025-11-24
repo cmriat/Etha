@@ -17,7 +17,7 @@ def execute_bucket_pipeline(
 ) -> None:
     rank = dist.get_rank()
 
-    key_states: defaultdict[tuple, dict[str, deque]] = defaultdict(
+    channels: defaultdict[tuple, dict[str, deque]] = defaultdict(
         lambda: {
             "candidate": deque(),
             "prepared": deque(),
@@ -25,20 +25,20 @@ def execute_bucket_pipeline(
         }
     )
     for bucket in buckets:
-        key_states[bucket.key]["candidate"].append(bucket)
-    logger.debug(f"[rank={rank}] Bucket execution: Key states: {key_states}")
+        channels[bucket.key]["candidate"].append(bucket)
+    logger.debug(f"[rank={rank}] Bucket execution: Key states: {channels}")
 
     def _has_work() -> bool:
-        for state in key_states.values():
-            if state["candidate"] or state["prepared"] or state["in_flight"]:
+        for channel in channels.values():
+            if channel["candidate"] or channel["prepared"] or channel["in_flight"]:
                 return True
         return False
 
     while _has_work():
-        for state in key_states.values():
-            candidate: deque = state["candidate"]
-            prepared: deque = state["prepared"]
-            in_flight: deque = state["in_flight"]
+        for channel in channels.values():
+            candidate: deque = channel["candidate"]
+            prepared: deque = channel["prepared"]
+            in_flight: deque = channel["in_flight"]
 
             while candidate and len(prepared) + len(in_flight) < max_in_flight:
                 bucket = candidate.popleft()
@@ -46,9 +46,9 @@ def execute_bucket_pipeline(
                 bucket.prepare()
                 prepared.append(bucket)
 
-        for state in key_states.values():
-            prepared: deque = state["prepared"]
-            in_flight: deque = state["in_flight"]
+        for channel in channels.values():
+            prepared: deque = channel["prepared"]
+            in_flight: deque = channel["in_flight"]
 
             while prepared:
                 if not prepared[0].launch():
@@ -56,8 +56,8 @@ def execute_bucket_pipeline(
                 logger.debug(f"[rank={rank}] Bucket execution: Launching bucket {prepared[0]}")
                 in_flight.append(prepared.popleft())
 
-        for state in key_states.values():
-            in_flight: deque = state["in_flight"]
+        for channel in channels.values():
+            in_flight: deque = channel["in_flight"]
             while in_flight:
                 if not in_flight[0].is_complete():
                     break

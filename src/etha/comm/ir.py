@@ -19,10 +19,14 @@ class Chunk(Transferable):
     chunk_shape: tuple[int, ...]  # Shape of the data being transferred
     tensor: torch.Tensor | None = None
     slice_tuples: tuple[slice, ...] = ()  # Slice tuple for tensor indexing (dst for recv/self-copy)
-    target_dtype: torch.dtype | None = None  # Dtype conversion (None means no conversion)
+    transfer_dtype: torch.dtype | None = None  # Wire dtype (None = use tensor.dtype, set in __post_init__)
     src_idx: tuple  # Multi-dimensional index in source tensor
     dst_idx: tuple | None = None  # Multi-dimensional index in target tensor (recv/self-copy only)
     src_slice_tuples: tuple[slice, ...] | None = None  # Source slice (self-copy only)
+
+    def __post_init__(self) -> None:
+        if self.transfer_dtype is None:
+            self.transfer_dtype = self.tensor.dtype
 
     def __repr__(self) -> str:
         """Return a concise representation for debugging."""
@@ -45,8 +49,9 @@ class Chunk(Transferable):
             buffer = self.tensor[self.slice_tuples]
             if contiguous:
                 buffer = buffer.contiguous()
-        if self.is_source and self.target_dtype and self.target_dtype != buffer.dtype:
-            buffer = buffer.to(self.target_dtype)
+        # Source: convert to transfer_dtype if specified and different
+        if self.is_source and self.transfer_dtype and self.transfer_dtype != buffer.dtype:
+            buffer = buffer.to(self.transfer_dtype)
         self.buffer = buffer
 
     def finalize(self) -> None:
@@ -55,7 +60,11 @@ class Chunk(Transferable):
             self.work.wait()
             self.work = None
         if self.transfer_type == TransferType.SELF_COPY or not self.is_source:
-            self.tensor[self.slice_tuples].copy_(self.buffer, non_blocking=True)
+            buffer = self.buffer
+            # Target: convert from transfer_dtype to tensor.dtype if different
+            if buffer.dtype != self.tensor.dtype:
+                buffer = buffer.to(self.tensor.dtype)
+            self.tensor[self.slice_tuples].copy_(buffer, non_blocking=True)
         self.buffer = None
 
     @property
@@ -105,7 +114,7 @@ class Bucket(Transferable):
 
         for entry in self.entries:
             chunk = entry.chunk
-            dtype = chunk.tensor.dtype
+            dtype = chunk.transfer_dtype
             numel = entry.nbytes // dtype.itemsize
             buffer_slice = self.buffer.narrow(0, entry.offset, entry.nbytes).view(dtype)[:numel].view(chunk.chunk_shape)
 

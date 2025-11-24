@@ -3,16 +3,12 @@
 import math
 from collections import defaultdict
 
-import torch
-
 from .ir import Chunk, Bucket, BucketEntry
 
 
 def _chunk_nbytes(chunk: Chunk) -> int:
-    """Calculate chunk size in bytes."""
-    dtype = chunk.target_dtype if chunk.target_dtype else chunk.tensor.dtype
-    element_size = torch.empty((), dtype=dtype).element_size()
-    return math.prod(chunk.chunk_shape) * element_size
+    """Calculate chunk size in bytes (uses wire dtype for transfer)."""
+    return math.prod(chunk.chunk_shape) * chunk.transfer_dtype.itemsize
 
 
 def _calculate_bucket_entries(
