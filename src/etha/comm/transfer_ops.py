@@ -1,82 +1,67 @@
-"""Transfer operation execution functions.
+"""Transfer operation types and execution."""
 
-Separates communication execution from data management.
-"""
+from enum import Enum
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
 
-from .ir import TransferType
 from .utils import get_or_create_process_group
 
 
-def execute_p2p_send(buffer: torch.Tensor, dst_rank: int) -> dist.Work:
-    """Execute point-to-point send.
+class TransferType(Enum):
+    """Transfer operation types."""
 
-    Args:
-        buffer: Data buffer to send
-        dst_rank: Destination rank
-
-    Returns:
-        Work handle for async operation
-    """
-    return dist.isend(buffer, dst=dst_rank)
+    SELF_COPY = "self_copy"  # Local copy within same rank
+    P2P = "p2p"  # Point-to-point transfer between two ranks
+    BROADCAST = "broadcast"  # One-to-many transfer
 
 
-def execute_p2p_recv(buffer: torch.Tensor, src_rank: int) -> dist.Work:
-    """Execute point-to-point receive.
+def _execute_p2p(
+    buffer: torch.Tensor,
+    is_source: bool,
+    src_rank: int,
+    dst_rank: int,
+) -> dist.Work:
+    """Execute point-to-point transfer."""
+    if is_source:
+        return dist.isend(buffer, dst=dst_rank)
+    else:
+        return dist.irecv(buffer, src=src_rank)
 
-    Args:
-        buffer: Buffer to receive data into
-        src_rank: Source rank
 
-    Returns:
-        Work handle for async operation
-    """
-    return dist.irecv(buffer, src=src_rank)
-
-
-def execute_broadcast(
+def _execute_broadcast(
     buffer: torch.Tensor,
     src_rank: int,
     dst_ranks: tuple[int, ...],
 ) -> dist.Work:
-    """Execute broadcast operation.
-
-    Args:
-        buffer: Data buffer to broadcast
-        src_rank: Source rank that broadcasts
-        dst_ranks: Destination ranks
-
-    Returns:
-        Work handle for async operation
-    """
+    """Execute broadcast operation."""
     group_ranks = sorted([src_rank, *dst_ranks])
     group = get_or_create_process_group(group_ranks)
     return dist.broadcast(buffer, src=src_rank, group=group, async_op=True)
 
 
-def execute_transfer(
-    buffer: torch.Tensor,
-    transfer_type: TransferType,
-    is_source: bool,
-    src_rank: int,
-    dst_ranks: tuple[int, ...],
-) -> dist.Work | None:
-    """Execute transfer operation based on type.
+@dataclass(slots=True, kw_only=True)
+class Transferable:
+    """Base class for transferable objects (chunks and buckets)."""
 
-    Unified entry point for all transfer types.
+    transfer_type: TransferType
+    is_source: bool
+    src_rank: int
+    dst_ranks: tuple[int, ...]
+    buffer: torch.Tensor | None = None
+    work: dist.Work | None = None
 
-    Returns:
-        Work handle for async operations, None for SELF_COPY.
-    """
-    match transfer_type:
-        case TransferType.SELF_COPY:
-            return None
-        case TransferType.P2P:
-            if is_source:
-                return execute_p2p_send(buffer, dst_ranks[0])
-            else:
-                return execute_p2p_recv(buffer, src_rank)
-        case TransferType.BROADCAST:
-            return execute_broadcast(buffer, src_rank, dst_ranks)
+    def execute(self) -> dist.Work | None:
+        """Execute transfer operation.
+
+        Returns:
+            Work handle for async operations, None for SELF_COPY.
+        """
+        match self.transfer_type:
+            case TransferType.SELF_COPY:
+                return None
+            case TransferType.P2P:
+                return _execute_p2p(self.buffer, self.is_source, self.src_rank, self.dst_ranks[0])
+            case TransferType.BROADCAST:
+                return _execute_broadcast(self.buffer, self.src_rank, self.dst_ranks)

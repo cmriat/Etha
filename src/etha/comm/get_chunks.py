@@ -75,6 +75,7 @@ def map_to_chunk_ops(
                 source_chunk = SendChunk(
                     chunk_shape=calculate_chunk_shape(source_num_slicers_extended, source_tensor_shape),
                     transfer_type=transfer_type,
+                    is_source=True,
                     src_rank=rank,
                     src_idx=src_idx,
                     dst_ranks=dst_ranks,
@@ -108,6 +109,7 @@ def map_to_chunk_ops(
                         target_chunk = SelfCopyChunk(
                             chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
                             transfer_type=actual_transfer_type,
+                            is_source=True,
                             src_rank=src_rank,
                             src_idx=src_idx,
                             dst_ranks=dst_ranks,
@@ -120,12 +122,14 @@ def map_to_chunk_ops(
                         target_chunk = RecvChunk(
                             chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
                             transfer_type=actual_transfer_type,
+                            is_source=False,
                             src_rank=src_rank,
                             src_idx=src_idx,
                             dst_ranks=dst_ranks,
                             dst_idx=dst_idx,
                             slice_tuples=dst_slice_tuples,
                             tensor=target_tensor,
+                            target_dtype=target_dtype,
                         )
                     chunks.append(target_chunk)
     return chunks

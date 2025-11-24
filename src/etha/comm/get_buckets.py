@@ -5,15 +5,12 @@ from collections import defaultdict
 
 import torch
 
-from .ir import Bucket, BaseChunk, SendChunk, BucketEntry
+from .ir import Bucket, BaseChunk, BucketEntry
 
 
 def _chunk_nbytes(chunk: BaseChunk) -> int:
-    """Calculate chunk size in bytes. Send chunks may have target_dtype conversion."""
-    if isinstance(chunk, SendChunk) and chunk.target_dtype:
-        dtype = chunk.target_dtype
-    else:
-        dtype = chunk.tensor.dtype
+    """Calculate chunk size in bytes."""
+    dtype = chunk.target_dtype if chunk.target_dtype else chunk.tensor.dtype
     element_size = torch.empty((), dtype=dtype).element_size()
     return math.prod(chunk.chunk_shape) * element_size
 
@@ -35,7 +32,6 @@ def _build_bucket(
     entries: list[BucketEntry],
 ) -> Bucket:
     first_chunk = entries[0].chunk
-    is_source = isinstance(first_chunk, SendChunk)
     device = first_chunk.tensor.device
     transfer_type = first_chunk.transfer_type
     dst_ranks = first_chunk.dst_ranks
@@ -44,7 +40,7 @@ def _build_bucket(
     key = first_chunk.bucket_key
     return Bucket(
         transfer_type=transfer_type,
-        is_source=is_source,
+        is_source=first_chunk.is_source,
         dst_ranks=dst_ranks,
         src_rank=src_rank,
         device=device,

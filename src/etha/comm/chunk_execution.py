@@ -2,8 +2,7 @@
 
 import torch
 
-from .ir import BaseChunk, SendChunk
-from .transfer_ops import execute_transfer
+from .ir import BaseChunk
 
 
 def execute_chunk_simple(
@@ -18,12 +17,6 @@ def execute_chunk_simple(
         if chunk.tensor is None:
             continue
         chunk.prepare()
-        chunk.work = execute_transfer(
-            chunk.buffer,
-            chunk.transfer_type,
-            isinstance(chunk, SendChunk),
-            chunk.src_rank,
-            chunk.dst_ranks,
-        )
+        chunk.work = chunk.execute()
         chunk.finalize()
         torch.cuda.synchronize()

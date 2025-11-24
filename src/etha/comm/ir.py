@@ -4,49 +4,24 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from enum import Enum
 from dataclasses import dataclass
 
 import torch
 
+from .transfer_ops import Transferable, TransferType
+
 logger = logging.getLogger(__name__)
 
 
-class TransferType(Enum):
-    """Transfer operation types."""
-
-    SELF_COPY = "self_copy"  # Local copy within same rank
-    P2P = "p2p"  # Point-to-point transfer between two ranks
-    BROADCAST = "broadcast"  # One-to-many transfer
-
-
 @dataclass(slots=True, kw_only=True)
-class BaseChunk(ABC):
+class BaseChunk(Transferable, ABC):
     """Abstract base class for transfer chunks."""
 
-    # Shape info
     chunk_shape: tuple[int, ...]  # Shape of the data being transferred
-
-    # Transfer method
-    transfer_type: TransferType
-
-    # Tensor reference (None during planning, populated during binding)
     tensor: torch.Tensor | None = None
-
-    # Buffer management
-    buffer: torch.Tensor | None = None
-
-    # Async work handle (None for SELF_COPY or before launch, populated during execution)
-    work: torch.distributed.Work | None = None
-
     slice_tuples: tuple[slice, ...] = ()  # Slice tuple for tensor indexing
-
-    # Source info
-    src_rank: int  # Rank that owns this data
+    target_dtype: torch.dtype | None = None  # Dtype conversion (None means no conversion)
     src_idx: tuple  # Multi-dimensional index in source tensor
-
-    # Destination info
-    dst_ranks: tuple[int, ...]  # Target ranks (len > 1 triggers broadcast)
 
     def __repr__(self) -> str:
         """Return a concise representation for debugging."""
@@ -89,20 +64,14 @@ class BucketEntry:
 
 
 @dataclass(slots=True, kw_only=True)
-class Bucket:
+class Bucket(Transferable):
     """Bucket for transfer operations (byte-based buffer)."""
 
-    transfer_type: TransferType
-    is_source: bool
-    dst_ranks: tuple[int, ...] | None = None
-    src_rank: int | None = None
-    device: torch.device | None = None
-    buffer: torch.Tensor | None = None  # uint8 buffer
-    work: torch.distributed.Work | None = None
-    buffer_ready_event: torch.cuda.Event | None = None
     total_bytes: int
     key: tuple
     entries: list[BucketEntry]
+    device: torch.device | None = None
+    buffer_ready_event: torch.cuda.Event | None = None
 
     def __repr__(self) -> str:
         """Return a concise representation for debugging."""
@@ -174,15 +143,7 @@ class Bucket:
                 return False
             self.buffer_ready_event = None
 
-        from .transfer_ops import execute_transfer
-
-        self.work = execute_transfer(
-            self.buffer,
-            self.transfer_type,
-            self.is_source,
-            self.src_rank,
-            self.dst_ranks,
-        )
+        self.work = self.execute()
         return True
 
     def is_complete(self) -> bool:
@@ -215,8 +176,6 @@ class Bucket:
 @dataclass(slots=True, kw_only=True)
 class SendChunk(BaseChunk):
     """Send chunk for source-side operations."""
-
-    target_dtype: torch.dtype | None = None
 
     def prepare(self) -> None:
         """Extract and optionally convert tensor slice for sending."""
