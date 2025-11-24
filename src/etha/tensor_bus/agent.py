@@ -24,7 +24,7 @@ from etha.comm import (
     map_to_chunk_ops,
     chunk_to_bucket_ops,
 )
-from etha.comm.ir import SourceChunk, TargetChunk
+from etha.comm.ir import RecvChunk, SendChunk
 
 from .utils import setup_cuda_rebuild_patch
 from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors
@@ -152,7 +152,7 @@ class TensorBusAgent:
     def _handle_init_pair(self, msg: InitPair):
         """Handle RegisterPair command.
 
-        Flow:
+        Steps:
         1. Write to TCPStore: pair:{pair_name}:{side_name}:rank{rank} = "1"
         2. Write expected_world_size (if first)
         3. Write device mesh and placement info to TCPStore via base64 encoding
@@ -527,8 +527,6 @@ class TensorBusAgent:
 
         all_send_chunks = []
         all_recv_chunks = []
-        all_send_buckets = []
-        all_recv_buckets = []
 
         # Process each pair
         for pair_name, tensor_payloads in grouped.items():
@@ -546,8 +544,8 @@ class TensorBusAgent:
             batch_state.pair_target_dtypes[pair_name] = []
 
             # Per-pair chunk lists (for bucketization)
-            pair_send_chunks: list[SourceChunk | TargetChunk] = []
-            pair_recv_chunks: list[SourceChunk | TargetChunk] = []
+            pair_send_chunks: list[SendChunk | RecvChunk] = []
+            pair_recv_chunks: list[SendChunk | RecvChunk] = []
 
             for i, tensor_payload in enumerate(tensor_payloads):
                 tensor = ForkingPickler.loads(tensor_payload)
@@ -601,24 +599,6 @@ class TensorBusAgent:
                     )
                     pair_recv_chunks.extend(recv_chunks)
 
-            # Per-pair bucketization
-            # TODO: Consider global bucketization across all pairs, may be bucket with "channel" idea
-            if bucket_size:
-                pair_send_buckets = chunk_to_bucket_ops(
-                    chunks=pair_send_chunks,
-                    bucket_size=bucket_size,
-                )
-                pair_recv_buckets = chunk_to_bucket_ops(
-                    chunks=pair_recv_chunks,
-                    bucket_size=bucket_size,
-                )
-                all_send_buckets.extend(pair_send_buckets)
-                all_recv_buckets.extend(pair_recv_buckets)
-                logger.debug(
-                    f"Agent {self.rank}: Batch {batch_id}: Pair '{pair_name}': "
-                    f"send ({len(pair_send_buckets)} buckets), recv ({len(pair_recv_buckets)} buckets)"
-                )
-
             # Accumulate to flattened lists
             all_send_chunks.extend(pair_send_chunks)
             all_recv_chunks.extend(pair_recv_chunks)
@@ -634,13 +614,19 @@ class TensorBusAgent:
             f"send ({len(all_send_chunks)}), recv ({len(all_recv_chunks)})"
         )
 
-        # Store flattened buckets (per-pair bucketization already done)
+        # Unified bucketization (cross-pair, by channel key)
         if bucket_size:
-            batch_state.send_buckets = all_send_buckets
-            batch_state.recv_buckets = all_recv_buckets
+            batch_state.send_buckets = chunk_to_bucket_ops(
+                chunks=all_send_chunks,
+                bucket_size=bucket_size,
+            )
+            batch_state.recv_buckets = chunk_to_bucket_ops(
+                chunks=all_recv_chunks,
+                bucket_size=bucket_size,
+            )
             logger.info(
-                f"Agent {self.rank}: Batch {batch_id}: Flattened buckets (per-pair): "
-                f"send ({len(all_send_buckets)} buckets), recv ({len(all_recv_buckets)} buckets)"
+                f"Agent {self.rank}: Batch {batch_id}: Unified buckets: "
+                f"send ({len(batch_state.send_buckets)} buckets), recv ({len(batch_state.recv_buckets)} buckets)"
             )
 
         logger.info(
