@@ -5,10 +5,10 @@ from collections import defaultdict
 
 import torch
 
-from .ir import Bucket, BaseChunk, BucketEntry
+from .ir import Chunk, Bucket, BucketEntry
 
 
-def _chunk_nbytes(chunk: BaseChunk) -> int:
+def _chunk_nbytes(chunk: Chunk) -> int:
     """Calculate chunk size in bytes."""
     dtype = chunk.target_dtype if chunk.target_dtype else chunk.tensor.dtype
     element_size = torch.empty((), dtype=dtype).element_size()
@@ -16,7 +16,7 @@ def _chunk_nbytes(chunk: BaseChunk) -> int:
 
 
 def _calculate_bucket_entries(
-    grouped_chunks: list[BaseChunk],
+    grouped_chunks: list[Chunk],
 ) -> list[BucketEntry]:
     """Calculate bucket entries with byte-based offsets."""
     entries: list[BucketEntry] = []
@@ -51,11 +51,11 @@ def _build_bucket(
 
 
 def chunk_to_bucket_ops(
-    chunks: list[BaseChunk],
+    chunks: list[Chunk],
     bucket_size: int,
 ) -> list[Bucket]:
     buckets: list[Bucket] = []
-    grouped_state: dict[tuple, tuple[list[BaseChunk], int]] = defaultdict(lambda: ([], 0))
+    grouped_state: dict[tuple, tuple[list[Chunk], int]] = defaultdict(lambda: ([], 0))
 
     for chunk in chunks:
         chunk_bytes = _chunk_nbytes(chunk)

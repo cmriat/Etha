@@ -7,7 +7,7 @@ for the same pair, each with independent tensors and handlers.
 import torch
 import msgspec
 
-from etha.comm.ir import Bucket, BaseChunk
+from etha.comm.ir import Chunk, Bucket
 
 
 class BatchState(msgspec.Struct):
@@ -28,8 +28,8 @@ class BatchState(msgspec.Struct):
     pair_target_dtypes: dict[str, list[torch.dtype]] = msgspec.field(default_factory=dict)
 
     # Execution layer: FLATTENED across all pairs for efficient execution
-    send_chunks: list[BaseChunk] = msgspec.field(default_factory=list)
-    recv_chunks: list[BaseChunk] = msgspec.field(default_factory=list)
+    send_chunks: list[Chunk] = msgspec.field(default_factory=list)
+    recv_chunks: list[Chunk] = msgspec.field(default_factory=list)
     send_buckets: list[Bucket] | None = None
     recv_buckets: list[Bucket] | None = None
 

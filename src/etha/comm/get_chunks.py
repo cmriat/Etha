@@ -2,13 +2,7 @@
 
 import torch
 
-from .ir import (
-    BaseChunk,
-    RecvChunk,
-    SendChunk,
-    TransferType,
-    SelfCopyChunk,
-)
+from .ir import Chunk, TransferType
 from .utils import (
     get_slicer_tuples,
     get_slice_from_multi_index,
@@ -34,7 +28,7 @@ def map_to_chunk_ops(
     source_tensor: torch.Tensor | None = None,
     target_tensor: torch.Tensor | None = None,
     target_dtype: torch.dtype | None = None,
-) -> list[BaseChunk]:
+) -> list[Chunk]:
     if not m2m_map:
         return []
     source_tensor_shape = source_tensor.shape if source_tensor is not None else None
@@ -57,7 +51,7 @@ def map_to_chunk_ops(
                 broadcast_groups.add(group_ranks)
     for group_ranks in sorted(broadcast_groups):
         get_or_create_process_group(list(group_ranks))
-    chunks: list[BaseChunk] = []
+    chunks: list[Chunk] = []
     for src_rank, src_map in m2m_map.items():
         for src_idx, dst_list in src_map.items():
             if len(dst_list) > 1:
@@ -72,18 +66,19 @@ def map_to_chunk_ops(
                         src_idx, source_num_slicers_extended, source_slicer_tuples
                     )
 
-                source_chunk = SendChunk(
-                    chunk_shape=calculate_chunk_shape(source_num_slicers_extended, source_tensor_shape),
-                    transfer_type=transfer_type,
-                    is_source=True,
-                    src_rank=rank,
-                    src_idx=src_idx,
-                    dst_ranks=dst_ranks,
-                    slice_tuples=src_slice_tuples,
-                    tensor=source_tensor,
-                    target_dtype=target_dtype,
+                chunks.append(
+                    Chunk(
+                        chunk_shape=calculate_chunk_shape(source_num_slicers_extended, source_tensor_shape),
+                        transfer_type=transfer_type,
+                        is_source=True,
+                        src_rank=rank,
+                        src_idx=src_idx,
+                        dst_ranks=dst_ranks,
+                        slice_tuples=src_slice_tuples,
+                        tensor=source_tensor,
+                        target_dtype=target_dtype,
+                    )
                 )
-                chunks.append(source_chunk)
             for dst_rank, dst_idx in dst_list:
                 if dst_rank == rank:
                     if src_rank == rank:
@@ -95,41 +90,34 @@ def map_to_chunk_ops(
                         dst_slice_tuples = get_slice_from_multi_index(
                             dst_idx, target_num_slicers_extended, target_slicer_tuples
                         )
-                    dst_src_slice_tuples: tuple[slice, ...] = ()
-                    if (
-                        actual_transfer_type == TransferType.SELF_COPY
-                        and source_slicer_tuples is not None
-                        and source_num_slicers_extended is not None
-                    ):
-                        dst_src_slice_tuples = get_slice_from_multi_index(
-                            src_idx, source_num_slicers_extended, source_slicer_tuples
-                        )
-
                     if actual_transfer_type == TransferType.SELF_COPY:
-                        target_chunk = SelfCopyChunk(
-                            chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
-                            transfer_type=actual_transfer_type,
-                            is_source=True,
-                            src_rank=src_rank,
-                            src_idx=src_idx,
-                            dst_ranks=dst_ranks,
-                            dst_idx=dst_idx,
-                            slice_tuples=dst_slice_tuples,
-                            src_slice_tuples=src_slice_tuples,
-                            tensor=target_tensor,
+                        chunks.append(
+                            Chunk(
+                                chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
+                                transfer_type=actual_transfer_type,
+                                is_source=True,
+                                src_rank=src_rank,
+                                src_idx=src_idx,
+                                dst_ranks=dst_ranks,
+                                dst_idx=dst_idx,
+                                slice_tuples=dst_slice_tuples,
+                                src_slice_tuples=src_slice_tuples,
+                                tensor=target_tensor,
+                            )
                         )
                     else:
-                        target_chunk = RecvChunk(
-                            chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
-                            transfer_type=actual_transfer_type,
-                            is_source=False,
-                            src_rank=src_rank,
-                            src_idx=src_idx,
-                            dst_ranks=dst_ranks,
-                            dst_idx=dst_idx,
-                            slice_tuples=dst_slice_tuples,
-                            tensor=target_tensor,
-                            target_dtype=target_dtype,
+                        chunks.append(
+                            Chunk(
+                                chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
+                                transfer_type=actual_transfer_type,
+                                is_source=False,
+                                src_rank=src_rank,
+                                src_idx=src_idx,
+                                dst_ranks=dst_ranks,
+                                dst_idx=dst_idx,
+                                slice_tuples=dst_slice_tuples,
+                                tensor=target_tensor,
+                                target_dtype=target_dtype,
+                            )
                         )
-                    chunks.append(target_chunk)
     return chunks

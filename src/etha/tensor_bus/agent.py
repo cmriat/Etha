@@ -24,7 +24,7 @@ from etha.comm import (
     map_to_chunk_ops,
     chunk_to_bucket_ops,
 )
-from etha.comm.ir import RecvChunk, SendChunk
+from etha.comm.ir import Chunk
 
 from .utils import setup_cuda_rebuild_patch
 from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors
@@ -544,8 +544,8 @@ class TensorBusAgent:
             batch_state.pair_target_dtypes[pair_name] = []
 
             # Per-pair chunk lists (for bucketization)
-            pair_send_chunks: list[SendChunk | RecvChunk] = []
-            pair_recv_chunks: list[SendChunk | RecvChunk] = []
+            pair_send_chunks: list[Chunk] = []
+            pair_recv_chunks: list[Chunk] = []
 
             for i, tensor_payload in enumerate(tensor_payloads):
                 tensor = ForkingPickler.loads(tensor_payload)
