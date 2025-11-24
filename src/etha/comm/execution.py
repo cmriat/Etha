@@ -1,4 +1,4 @@
-"""Bucket communication executor."""
+"""Communication executor."""
 
 import logging
 from collections import deque, defaultdict
@@ -6,7 +6,7 @@ from collections import deque, defaultdict
 import torch
 import torch.distributed as dist
 
-from .ir import Bucket
+from .ir import Chunk, Bucket
 
 logger = logging.getLogger(__name__)
 
@@ -65,3 +65,20 @@ def execute_bucket_pipeline(
                 in_flight.popleft().finalize()
 
     torch.cuda.synchronize()
+
+
+def execute_chunk_simple(
+    chunks: list[Chunk],
+) -> None:
+    """Execute chunks using polymorphic prepare/finalize and transfer functions.
+
+    This is the simple sequential execution strategy - each chunk is fully
+    prepared, launched, and finalized before moving to the next chunk.
+    """
+    for chunk in chunks:
+        if chunk.tensor is None:
+            continue
+        chunk.prepare()
+        chunk.work = chunk.execute()
+        chunk.finalize()
+        torch.cuda.synchronize()
