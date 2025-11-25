@@ -575,6 +575,17 @@ class TensorBusAgent:
                         f"Agent {self.rank}: Batch {batch_id}: Generating chunks for tensor {i} with shape {tensor.shape}"
                     )
 
+                    # Calculate smart transfer_dtype: min(my_dtype, remote_dtype) by itemsize
+                    transfer_dtype = None
+                    if target_dtype is not None:
+                        my_itemsize = tensor.dtype.itemsize
+                        remote_itemsize = target_dtype.itemsize
+                        transfer_dtype = tensor.dtype if my_itemsize <= remote_itemsize else target_dtype
+                        logger.debug(
+                            f"Agent {self.rank}: Batch {batch_id}: tensor {i} transfer_dtype={transfer_dtype} "
+                            f"(my={tensor.dtype}, remote={target_dtype})"
+                        )
+
                     # Generate send chunks for this tensor
                     send_chunks = map_to_chunk_ops(
                         m2m_map=pair_state.m2m_send.m2m_map,
@@ -582,8 +593,8 @@ class TensorBusAgent:
                         source_num_slicers=pair_state.m2m_send.source_num_slicers,
                         target_num_slicers=pair_state.m2m_send.target_num_slicers,
                         source_tensor=tensor,
-                        target_tensor=tensor,
-                        target_dtype=target_dtype,
+                        target_tensor=None,
+                        transfer_dtype=transfer_dtype,
                     )
                     pair_send_chunks.extend(send_chunks)
 
@@ -593,9 +604,9 @@ class TensorBusAgent:
                         rank=self.rank,
                         source_num_slicers=pair_state.m2m_recv.source_num_slicers,
                         target_num_slicers=pair_state.m2m_recv.target_num_slicers,
-                        source_tensor=tensor,
+                        source_tensor=None,
                         target_tensor=tensor,
-                        target_dtype=target_dtype,
+                        transfer_dtype=transfer_dtype,
                     )
                     pair_recv_chunks.extend(recv_chunks)
 
