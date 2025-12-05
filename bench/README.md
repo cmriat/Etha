@@ -129,3 +129,59 @@ target mesh placement: [Replicate(), _StridedShard(1, split_factor=2), Replicate
 ## Mesh Configuration 8
 * 4, 2, 1, 1 -> 1, 1, 2, 4
 ![Mesh 8](./results/throughput_benchmark_mesh_08_4_2_1_1_1_1_2_4.png)
+
+---
+
+# KVStore Benchmark
+
+Benchmark comparing EtcdStore vs TorchTCPStore performance for key-value operations.
+
+## Basic Usage
+
+```bash
+# Run benchmark for both backends
+pixi run -e dev python bench/kvstore_benchmark.py
+
+# Run with more operations
+pixi run -e dev python bench/kvstore_benchmark.py --num-ops 1000
+
+# Run only etcd backend
+pixi run -e dev python bench/kvstore_benchmark.py --backend etcd
+
+# Run only TCPStore backend
+pixi run -e dev python bench/kvstore_benchmark.py --backend tcp
+
+# Show help
+pixi run -e dev python bench/kvstore_benchmark.py --help
+```
+
+## Configuration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--etcd-host` | localhost | etcd server host |
+| `--etcd-port` | 2379 | etcd server port |
+| `--tcp-host` | localhost | TCPStore server host |
+| `--tcp-port` | 29501 | TCPStore server port |
+| `--num-ops` | 500 | Number of operations for benchmarks |
+| `--backend` | both | Which backend to benchmark (both/etcd/tcp) |
+
+## Benchmarked Operations
+
+| Operation | Description |
+|-----------|-------------|
+| `set` | Set string key-value pairs |
+| `get` | Get string values by key |
+| `exists` | Check if key exists |
+| `set_bytes` | Set binary data (64B, 1KB, 4KB) |
+| `get_bytes` | Get binary data |
+| `wait_for_key(existing)` | Wait for key that already exists |
+| `wait_for_key(async)` | Wait for key written after delay |
+| `wait_for_keys(N)` | Wait for N keys matching pattern |
+
+## Notes
+
+- **etcd** requires a running etcd server (default: localhost:2379)
+- **TorchTCPStore** starts its own server automatically
+- EtcdStore uses watch mechanism for `wait_for_key` (efficient)
+- TorchTCPStore uses polling for `wait_for_key` (less efficient but no external dependency)

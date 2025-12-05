@@ -28,8 +28,13 @@ MESH_CONFIGS = {
 }
 
 # TCPStore configuration
-TCPSTORE_HOST = os.environ.get("MASTER_ADDR", "localhost")
-TCPSTORE_PORT = 40001
+STORE_HOST = os.environ.get("MASTER_ADDR", "localhost")
+STORE_PORT = 40001
+STORE_BACKEND = "tcp"
+
+# STORE_HOST = "127.0.0.1"
+# STORE_PORT = 2379
+# STORE_BACKEND = "etcd"
 
 # Base path for LMDB storage
 LMDB_ROOT = os.environ.get("LMDB_ROOT", "/tmp/dbs")

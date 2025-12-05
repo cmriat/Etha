@@ -1,27 +1,16 @@
 """Helper functions for communication operations.
 
-Pure utility functions with no side effects (except process group caching).
+Pure utility functions with no side effects.
 """
 
 import itertools
 
 import torch
-import torch.distributed as dist
 
-# Global cache for subgroup handles (avoid repeated collective new_group)
-_PROCESS_GROUP_CACHE: dict[tuple[int, ...], dist.ProcessGroup] = {}
+# Re-export for backward compatibility
+from etha.pg_utils import get_or_create_process_group
 
-
-def get_or_create_process_group(ranks: list[int]) -> dist.ProcessGroup:
-    """Get or create a process group for the given ranks.
-
-    Uses caching to avoid repeated dist.new_group() calls.
-    Process groups must be created in same order on all ranks (PyTorch requirement).
-    """
-    key = tuple(sorted(ranks))
-    if key not in _PROCESS_GROUP_CACHE:
-        _PROCESS_GROUP_CACHE[key] = dist.new_group(ranks=list(key))
-    return _PROCESS_GROUP_CACHE[key]
+__all__ = ["get_or_create_process_group", "get_slicer_tuples", "get_slice_from_multi_index"]
 
 
 def get_slicer_tuples(tensor_shape: torch.Size, source_num_slicers: list[int]) -> list[tuple[slice, ...]]:
