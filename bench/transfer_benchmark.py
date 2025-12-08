@@ -187,23 +187,21 @@ def benchmark_single_shape(
             else:
                 pass
 
-        # Time measurement after profiling
-        start_time = time.perf_counter()
-        for _ in range(profile_iter):
-            chunk_comm(chunks=chunks)
-        if device == "cuda":
-            torch.cuda.synchronize()
-        dist.barrier()
-        m2m_time = (time.perf_counter() - start_time) / profile_iter
-    else:
-        # Regular M2M benchmark without profiling
-        start_time = time.perf_counter()
-        for _ in range(profile_iter):
-            chunk_comm(chunks=chunks)
-        if device == "cuda":
-            torch.cuda.synchronize()
-        dist.barrier()
-        m2m_time = (time.perf_counter() - start_time) / profile_iter
+    # Time measurement with CUDA events
+    if device == "cuda":
+        torch.cuda.synchronize()
+    dist.barrier()
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    start_event.record()
+    for _ in range(profile_iter):
+        chunk_comm(chunks=chunks)
+    end_event.record()
+
+    torch.cuda.synchronize()
+    m2m_time = start_event.elapsed_time(end_event) / 1000.0 / profile_iter  # ms -> s
 
     dist.barrier()
     for _ in range(warmup_iter):
@@ -238,21 +236,21 @@ def benchmark_single_shape(
             else:
                 pass
 
-        start_time = time.perf_counter()
-        for _ in range(profile_iter):
-            bucket_comm(buckets=buckets)
-        if device == "cuda":
-            torch.cuda.synchronize()
-        dist.barrier()
-        bucket_time = (time.perf_counter() - start_time) / profile_iter
-    else:
-        start_time = time.perf_counter()
-        for _ in range(profile_iter):
-            bucket_comm(buckets=buckets)
-        if device == "cuda":
-            torch.cuda.synchronize()
-        dist.barrier()
-        bucket_time = (time.perf_counter() - start_time) / profile_iter
+    # Time measurement with CUDA events
+    if device == "cuda":
+        torch.cuda.synchronize()
+    dist.barrier()
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    start_event.record()
+    for _ in range(profile_iter):
+        bucket_comm(buckets=buckets)
+    end_event.record()
+
+    torch.cuda.synchronize()
+    bucket_time = start_event.elapsed_time(end_event) / 1000.0 / profile_iter  # ms -> s
 
     # Gather-Broadcast method warmup (only test first tensor as reference)
     dist.barrier()
@@ -336,53 +334,36 @@ def benchmark_single_shape(
             else:
                 pass
 
-        # Time measurement after profiling
-        start_time = time.perf_counter()
-        for _ in range(profile_iter):
-            if source_dist_tensors:
-                gather_broadcast_comm(
-                    current_target_mesh,
-                    target_specs,
-                    source_dist_tensors[0],
-                    origin_tensors[0],
-                    source_world_size,
-                )
-            else:
-                gather_broadcast_comm(
-                    current_target_mesh,
-                    target_specs,
-                    None,
-                    origin_tensors[0],
-                    source_world_size,
-                )
-            if device == "cuda":
-                torch.cuda.synchronize()
-            dist.barrier()
-            baseline_time = (time.perf_counter() - start_time) / profile_iter
-    else:
-        # Regular Gather-Broadcast benchmark without profiling
-        start_time = time.perf_counter()
-        for _ in range(profile_iter):
-            if source_dist_tensors:
-                gather_broadcast_comm(
-                    current_target_mesh,
-                    target_specs,
-                    source_dist_tensors[0],
-                    origin_tensors[0],
-                    source_world_size,
-                )
-            else:
-                gather_broadcast_comm(
-                    current_target_mesh,
-                    target_specs,
-                    None,
-                    origin_tensors[0],
-                    source_world_size,
-                )
-        if device == "cuda":
-            torch.cuda.synchronize()
-        dist.barrier()
-        baseline_time = (time.perf_counter() - start_time) / profile_iter
+    # Time measurement with CUDA events
+    if device == "cuda":
+        torch.cuda.synchronize()
+    dist.barrier()
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    start_event.record()
+    for _ in range(profile_iter):
+        if source_dist_tensors:
+            gather_broadcast_comm(
+                current_target_mesh,
+                target_specs,
+                source_dist_tensors[0],
+                origin_tensors[0],
+                source_world_size,
+            )
+        else:
+            gather_broadcast_comm(
+                current_target_mesh,
+                target_specs,
+                None,
+                origin_tensors[0],
+                source_world_size,
+            )
+    end_event.record()
+
+    torch.cuda.synchronize()
+    baseline_time = start_event.elapsed_time(end_event) / 1000.0 / profile_iter  # ms -> s
 
     if rank == 0:
         # Calculate ideal bytes that target ranks need to receive (for all tensors in batch)
@@ -583,14 +564,14 @@ def main():
     # Mesh combinations: source_mesh_shape -> target_mesh_shape (total 16 devices)
     # Each dimension must be power of 2: 1, 2, 4, 8
     mesh_combinations = [
-        ((1, 1, 4, 2), (4, 2, 1, 1)),
-        ((8, 1, 1, 1), (1, 2, 2, 2)),
-        ((1, 2, 4, 1), (8, 1, 1, 1)),
-        ((2, 2, 2, 1), (1, 1, 4, 2)),
-        ((2, 4, 1, 1), (1, 2, 4, 1)),
-        ((4, 1, 1, 2), (2, 1, 1, 4)),
-        ((4, 1, 2, 1), (1, 1, 1, 8)),
-        ((4, 2, 1, 1), (1, 1, 2, 4)),
+        # ((1, 1, 4, 2), (4, 2, 1, 1)),
+        # ((8, 1, 1, 1), (1, 2, 2, 2)),
+        # ((1, 2, 4, 1), (8, 1, 1, 1)),
+        # ((2, 2, 2, 1), (1, 1, 4, 2)),
+        # ((2, 4, 1, 1), (1, 2, 4, 1)),
+        # ((4, 1, 1, 2), (2, 1, 1, 4)),
+        # ((4, 1, 2, 1), (1, 1, 1, 8)),
+        # ((4, 2, 1, 1), (1, 1, 2, 4)),
         ((1, 1, 1, 8), (1, 1, 1, 8)),
     ]
 

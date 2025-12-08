@@ -485,7 +485,7 @@ class TensorBusAgent:
                     f"({pair.local_ranks}, {pair.remote_ranks}) than first pair ({first_pair.local_ranks}, {first_pair.remote_ranks})"
                 )
 
-        batch_state.local_leader = first_pair.local_ranks[0]
+        batch_state.local_leader = sorted(first_pair.local_ranks)[0]
         batch_state.local_group = first_pair.local_group
         batch_state.batch_group = first_pair.pair_group
 

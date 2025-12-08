@@ -21,7 +21,7 @@ python-lmdb = "*"
 msgspec = "*"
 universal-pathlib = "*"
 posix_ipc = "*"
-etcdpy = ">=0.0.0.2,<0.0.0.3"
+etcdpy = "*"
 
 [feature.dev.dependencies]
 transformers = "*"
