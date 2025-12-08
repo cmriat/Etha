@@ -31,6 +31,7 @@ class TorchTCPStore(KVStore):
         is_master: bool,
         timeout: float = 3600.0,
         wait_for_workers: bool = True,
+        namespace: str = "default",
     ):
         """Initialize TorchTCPStore.
 
@@ -41,11 +42,14 @@ class TorchTCPStore(KVStore):
             is_master: Whether this process is the master (server)
             timeout: Connection timeout in seconds
             wait_for_workers: Whether master should wait for all workers
+            namespace: Namespace prefix to isolate different TensorBus instances
         """
         self.host = host
         self.port = port
         self.world_size = world_size
         self.is_master = is_master
+        self.namespace = namespace
+        self._key_prefix = f"tensorbus/{namespace}/"
 
         self._store = dist.TCPStore(
             host_name=host,
@@ -56,7 +60,7 @@ class TorchTCPStore(KVStore):
             wait_for_workers=wait_for_workers,
         )
         logger.info(
-            f"TorchTCPStore: Connected to TCPStore at {host}:{port} (master={is_master}, world_size={world_size})"
+            f"TorchTCPStore: Connected to TCPStore at {host}:{port} (master={is_master}, world_size={world_size}, namespace={namespace})"
         )
 
         # Track all keys we've set (for pattern matching in wait_for_keys)
@@ -65,27 +69,30 @@ class TorchTCPStore(KVStore):
 
     def set(self, key: str, value: str) -> None:
         """Set a key-value pair."""
-        self._store.set(key, value)
+        prefixed = self._prefixed(key)
+        self._store.set(prefixed, value)
         self._known_keys.add(key)
 
     def get(self, key: str) -> bytes | None:
         """Get value for a key."""
-        if not self._store.check([key]):
+        prefixed = self._prefixed(key)
+        if not self._store.check([prefixed]):
             return None
-        return self._store.get(key)
+        return self._store.get(prefixed)
 
     def exists(self, key: str) -> bool:
         """Check if a key exists."""
-        return self._store.check([key])
+        return self._store.check([self._prefixed(key)])
 
     def delete(self, key: str) -> bool:
         """Delete a key.
 
         Note: TCPStore doesn't support delete, so we set value to empty string.
         """
-        if not self._store.check([key]):
+        prefixed = self._prefixed(key)
+        if not self._store.check([prefixed]):
             return False
-        self._store.set(key, "")
+        self._store.set(prefixed, "")
         self._known_keys.discard(key)
         return True
 
@@ -94,11 +101,12 @@ class TorchTCPStore(KVStore):
 
         Uses polling since TCPStore doesn't support watch.
         """
+        prefixed = self._prefixed(key)
         start_time = time.monotonic()
 
         while True:
-            if self._store.check([key]):
-                value = self._store.get(key)
+            if self._store.check([prefixed]):
+                value = self._store.get(prefixed)
                 if value:  # not empty (deleted)
                     return value
 
@@ -129,7 +137,7 @@ class TorchTCPStore(KVStore):
             candidate_keys: List of keys to check (required for TCPStore)
 
         Returns:
-            List of matched keys
+            List of matched keys (without namespace prefix)
 
         Raises:
             TimeoutError: If timeout reached
@@ -145,7 +153,7 @@ class TorchTCPStore(KVStore):
         matched_keys: set[str] = set()
         start_time = time.monotonic()
 
-        # Filter candidates by pattern first
+        # Filter candidates by pattern first (candidates are original keys without prefix)
         candidates = [k for k in candidate_keys if fnmatch.fnmatch(k, key_pattern)]
 
         while len(matched_keys) < expected_count:
@@ -156,13 +164,14 @@ class TorchTCPStore(KVStore):
                     f"Timeout waiting for {expected_count} keys matching '{key_pattern}', got {len(matched_keys)}"
                 )
 
-            # Poll candidates
+            # Poll candidates (check with prefix, store without prefix)
             for key in candidates:
                 if key in matched_keys:
                     continue
-                if self._store.check([key]):
+                prefixed = self._prefixed(key)
+                if self._store.check([prefixed]):
                     try:
-                        if self._store.get(key) == value_bytes:
+                        if self._store.get(prefixed) == value_bytes:
                             matched_keys.add(key)
                     except Exception:
                         pass
@@ -174,15 +183,17 @@ class TorchTCPStore(KVStore):
 
     def set_bytes(self, key: str, data: bytes) -> None:
         """Store binary data with base64 encoding (TCPStore only accepts strings)."""
+        prefixed = self._prefixed(key)
         encoded = base64.b64encode(data).decode("ascii")
-        self._store.set(key, encoded)
+        self._store.set(prefixed, encoded)
         self._known_keys.add(key)
 
     def get_bytes(self, key: str) -> bytes | None:
         """Retrieve binary data with base64 decoding."""
-        if not self._store.check([key]):
+        prefixed = self._prefixed(key)
+        if not self._store.check([prefixed]):
             return None
-        value = self._store.get(key)
+        value = self._store.get(prefixed)
         return base64.b64decode(value)
 
     def close(self, cleanup: bool = True) -> None:  # noqa: ARG002

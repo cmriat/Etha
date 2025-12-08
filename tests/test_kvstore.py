@@ -276,6 +276,47 @@ class TestWaitForKeys:
         assert keys[1] not in result
 
 
+class TestNamespaceIsolation:
+    """Tests for namespace isolation between different stores."""
+
+    def test_tcp_two_namespaces_same_key(self):
+        """Test that two stores with different namespaces can use same key."""
+        port1 = find_free_port()
+        port2 = find_free_port()
+
+        store1 = TorchTCPStore(
+            host="localhost",
+            port=port1,
+            world_size=1,
+            is_master=True,
+            wait_for_workers=False,
+            namespace="ns1",
+        )
+        store2 = TorchTCPStore(
+            host="localhost",
+            port=port2,
+            world_size=1,
+            is_master=True,
+            wait_for_workers=False,
+            namespace="ns2",
+        )
+
+        # Both stores set the same logical key
+        store1.set("shared/key", "value_from_ns1")
+        store2.set("shared/key", "value_from_ns2")
+
+        # Each store sees its own value
+        assert store1.get("shared/key") == b"value_from_ns1"
+        assert store2.get("shared/key") == b"value_from_ns2"
+
+        # Underlying keys are different
+        assert store1._store.get("tensorbus/ns1/shared/key") == b"value_from_ns1"
+        assert store2._store.get("tensorbus/ns2/shared/key") == b"value_from_ns2"
+
+        store1.close()
+        store2.close()
+
+
 class TestWaitForKey:
     """Tests for wait_for_key - single key waiting."""
 

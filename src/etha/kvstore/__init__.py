@@ -13,6 +13,7 @@ def create_store(
     port: int | None = None,
     backend: Literal["etcd", "tcp"] = "tcp",
     timeout: float = 3600.0,
+    namespace: str = "default",
 ) -> KVStore:
     """Create a KVStore instance.
 
@@ -21,6 +22,7 @@ def create_store(
         port: Server port (default: 2379 for etcd, 29500 for tcp)
         backend: "etcd" or "tcp"
         timeout: Connection timeout in seconds
+        namespace: Namespace prefix to isolate different TensorBus instances
 
     Returns:
         KVStore instance
@@ -29,7 +31,7 @@ def create_store(
 
     if backend == "etcd":
         # Only rank 0 cleans up stale keys
-        return EtcdStore(host=host, port=port or 2379, timeout=timeout, cleanup=(rank == 0))
+        return EtcdStore(host=host, port=port or 2379, timeout=timeout, cleanup=(rank == 0), namespace=namespace)
     else:
         # TCP store uses environment variables for distributed setup
         world_size = int(os.environ.get("WORLD_SIZE", 1))
@@ -40,6 +42,7 @@ def create_store(
             is_master=(rank == 0),
             timeout=timeout,
             wait_for_workers=True,
+            namespace=namespace,
         )
 
 

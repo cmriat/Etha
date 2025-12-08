@@ -2,6 +2,7 @@
 
 import os
 import time
+import uuid
 import logging
 import traceback
 from multiprocessing.reduction import ForkingPickler
@@ -67,15 +68,25 @@ class TensorBusAgent:
         self.world_size = world_size
         torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
-        # Initialize KVStore
-        logger.info(f"Agent {rank}: Connecting to {store_backend} store at {store_host}:{store_port}")
-        self.store: KVStore = create_store(
-            host=store_host, port=store_port, timeout=store_timeout, backend=store_backend
-        )
-
-        # Initialize torch.distributed
+        # Initialize torch.distributed first (needed for namespace broadcast)
         logger.debug(f"Agent {rank}: Initializing torch.distributed")
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+
+        # Generate namespace: rank 0 creates UUID, broadcasts to all
+        if rank == 0:
+            namespace = uuid.uuid4().hex[:8]
+        else:
+            namespace = None
+        namespace_list = [namespace]
+        dist.broadcast_object_list(namespace_list, src=0)
+        namespace = namespace_list[0]
+        logger.info(f"Agent {rank}: Using namespace '{namespace}'")
+
+        # Initialize KVStore with namespace
+        logger.info(f"Agent {rank}: Connecting to {store_backend} store at {store_host}:{store_port}")
+        self.store: KVStore = create_store(
+            host=store_host, port=store_port, timeout=store_timeout, backend=store_backend, namespace=namespace
+        )
 
         # Initialize CommandQueue (for Host communication)
         self.command_queue = CommandQueue(lmdb_command_queue_path)
@@ -165,24 +176,24 @@ class TensorBusAgent:
 
         # Step 1: Write local registration to KVStore
         logger.info(f"Agent {self.rank}: About to write local registration to KVStore")
-        local_key = f"tensorbus/pair:{pair_name}/rank:{self.rank}/{local_name}"
+        local_key = f"pair:{pair_name}/rank:{self.rank}/{local_name}"
         self.store.set(local_key, "1")
         logger.info(f"Agent {self.rank}: Wrote {local_key} = '1' to KVStore")
 
         # Step 2: Write expected_world_size (all ranks write the same value, idempotent)
         logger.info(f"Agent {self.rank}: About to write expected_world_size")
-        expected_key = f"tensorbus/pair:{pair_name}/{local_name}/expected_world_size"
+        expected_key = f"pair:{pair_name}/{local_name}/expected_world_size"
         self.store.set(expected_key, str(expected_local))
         logger.info(f"Agent {self.rank}: Wrote {expected_key}={expected_local}")
 
         # Step 3: Write device mesh and placement info to store
         if msg.mesh_shape_payload is not None and msg.placements_payload is not None:
             logger.info(f"Agent {self.rank}: About to write device mesh info")
-            mesh_shape_key = f"tensorbus/pair:{pair_name}/rank:{self.rank}/mesh_shape"
+            mesh_shape_key = f"pair:{pair_name}/rank:{self.rank}/mesh_shape"
             self.store.set_bytes(mesh_shape_key, bytes(msg.mesh_shape_payload))
             logger.info(f"Agent {self.rank}: Wrote mesh_shape to store")
 
-            placements_key = f"tensorbus/pair:{pair_name}/rank:{self.rank}/placements"
+            placements_key = f"pair:{pair_name}/rank:{self.rank}/placements"
             self.store.set_bytes(placements_key, bytes(msg.placements_payload))
             logger.info(f"Agent {self.rank}: Wrote placements to store")
         else:
@@ -191,9 +202,9 @@ class TensorBusAgent:
         # Step 4: Wait until local peer is complete
         logger.info(f"Agent {self.rank}: Waiting for local peer '{local_name}' (expected={expected_local})")
         local_keys = self.store.wait_for_keys(
-            key_pattern=f"tensorbus/pair:{pair_name}/rank:*/{local_name}",
+            key_pattern=f"pair:{pair_name}/rank:*/{local_name}",
             expected_count=expected_local,
-            candidate_keys=[f"tensorbus/pair:{pair_name}/rank:{r}/{local_name}" for r in range(self.world_size)],
+            candidate_keys=[f"pair:{pair_name}/rank:{r}/{local_name}" for r in range(self.world_size)],
         )
         local_ranks = [self._extract_rank(k) for k in local_keys]
         logger.info(f"Agent {self.rank}: Local peer complete: {local_ranks}")
@@ -201,15 +212,15 @@ class TensorBusAgent:
         # Step 5: Wait until remote peer has written expected_world_size
         logger.info(f"Agent {self.rank}: Waiting for remote peer '{remote_name}'")
 
-        remote_expected_key = f"tensorbus/pair:{pair_name}/{remote_name}/expected_world_size"
+        remote_expected_key = f"pair:{pair_name}/{remote_name}/expected_world_size"
         expected_remote = int(self.store.wait_for_key(remote_expected_key).decode())
         logger.debug(f"Agent {self.rank}: Remote peer '{remote_name}' expects {expected_remote} ranks")
 
         # Then, wait for all remote ranks to register
         remote_keys = self.store.wait_for_keys(
-            key_pattern=f"tensorbus/pair:{pair_name}/rank:*/{remote_name}",
+            key_pattern=f"pair:{pair_name}/rank:*/{remote_name}",
             expected_count=expected_remote,
-            candidate_keys=[f"tensorbus/pair:{pair_name}/rank:{r}/{remote_name}" for r in range(self.world_size)],
+            candidate_keys=[f"pair:{pair_name}/rank:{r}/{remote_name}" for r in range(self.world_size)],
         )
         remote_ranks = [self._extract_rank(k) for k in remote_keys]
 
@@ -337,7 +348,7 @@ class TensorBusAgent:
         self.pairs[pair_name] = state
 
         # Step 10: Write PairState to State LMDB (for Worker verification)
-        state_key = f"pair:{pair_name}/state:match".encode()  # LMDB key (no tensorbus/ prefix)
+        state_key = f"pair:{pair_name}/state:match".encode()  # LMDB key
         state_bytes = msgspec.msgpack.encode("matched")
         with self.state_env.begin(write=True, db=self.state_db) as txn:
             txn.put(state_key, state_bytes)
@@ -360,7 +371,7 @@ class TensorBusAgent:
         batch_state = self.batches[batch_id]
 
         # Set transfer_signal to notify receiver that sender is ready (before barrier)
-        transfer_signal_key = f"tensorbus/batch:{batch_id}/state:transfer_signal"
+        transfer_signal_key = f"batch:{batch_id}/state:transfer_signal"
         self._leader_set(transfer_signal_key, "1", batch_state)
 
         # Synchronize all ranks in batch
@@ -416,8 +427,8 @@ class TensorBusAgent:
     def _handle_query_status(self, msg: QueryStatus):
         batch_id = msg.batch_id
         state_name = msg.state_name  # e.g. "transfer_signal"
-        store_state_key = f"tensorbus/batch:{batch_id}/state:{state_name}"
-        statedb_key = f"batch:{batch_id}/state:{state_name}".encode()  # LMDB key (no tensorbus/ prefix)
+        store_state_key = f"batch:{batch_id}/state:{state_name}"
+        statedb_key = f"batch:{batch_id}/state:{state_name}".encode()  # LMDB key
 
         if batch_id not in self.batches:
             logger.error(f"Agent {self.rank}: QueryStatus for unknown batch: {batch_id}")
@@ -616,8 +627,8 @@ class TensorBusAgent:
         mesh_info_list = []
 
         for rank in ranks:
-            mesh_shape_key = f"tensorbus/pair:{pair_name}/rank:{rank}/mesh_shape"
-            placements_key = f"tensorbus/pair:{pair_name}/rank:{rank}/placements"
+            mesh_shape_key = f"pair:{pair_name}/rank:{rank}/mesh_shape"
+            placements_key = f"pair:{pair_name}/rank:{rank}/placements"
 
             mesh_shape_bytes = self.store.get_bytes(mesh_shape_key)
             placements_bytes = self.store.get_bytes(placements_key)
