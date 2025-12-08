@@ -130,7 +130,7 @@ def main():
 
     # Transfer loop - register batch for each step
     i = 0
-    while i < 50:
+    while i < 10:
         batch_id = f"transfer_step_{i}"
         handler = client.register_tensors(batch_id=batch_id, tensors=tensors_to_register)
         logger.info(f"✅ Batch '{batch_id}' registered successfully!")
@@ -148,7 +148,7 @@ def main():
     golden_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=MODEL_DTYPE)
     golden_model.to(device)
     for name, param in engine.model.named_parameters():
-        if not isinstance(param, DTensor):  # Qwen-0.6B's lm_head
+        if not isinstance(param, DTensor):
             continue
         assert torch.allclose(param.data.full_tensor(), golden_model.get_parameter(name))
     logger.info(f"✅ Distributed model matches golden model")

@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 
 import torch.distributed as dist
-from common import TCPSTORE_HOST, TCPSTORE_PORT, get_queue_state_paths
+from common import STORE_HOST, STORE_PORT, STORE_BACKEND, get_queue_state_paths
 
 from etha.tensor_bus import TensorBusAgent
 
@@ -30,7 +30,7 @@ def main():
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Agent Rank {rank} starting...")
     logger.info(f"World Size: {world_size}")
-    logger.info(f"TCPStore: {TCPSTORE_HOST}:{TCPSTORE_PORT}")
+    logger.info(f"TCPStore: {STORE_HOST}:{STORE_PORT}")
     logger.info(f"{'=' * 60}\n")
 
     # Get LMDB paths
@@ -65,8 +65,9 @@ def main():
     agent = TensorBusAgent(
         rank=rank,
         world_size=world_size,
-        tcpstore_host=TCPSTORE_HOST,
-        tcpstore_port=TCPSTORE_PORT,
+        store_host=STORE_HOST,
+        store_port=STORE_PORT,
+        store_backend=STORE_BACKEND,
         lmdb_command_queue_path=command_queue_path,
         lmdb_state_path=state_path,
     )

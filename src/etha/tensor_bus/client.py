@@ -253,7 +253,7 @@ class TensorBusClient:
         self, batch_id: str, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
     ) -> posix_ipc.Semaphore:
         msg = Transfer(batch_id=batch_id, transfer_type=transfer_type)
-        logger.info(
+        logger.debug(
             f"TensorBusClient[{self.agent_rank}]: Sending transfer command for pair '{batch_id} {transfer_type}'"
         )
         return self._execute_command_with_semaphore(
@@ -262,7 +262,7 @@ class TensorBusClient:
 
     def query_transfer_signal(self, batch_id: str, blocking: bool = True, timeout: float = 30.0) -> bool:
         query_msg = QueryStatus(batch_id=batch_id, state_name="transfer_signal")
-        logger.info(f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for batch '{batch_id}'")
+        logger.debug(f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for batch '{batch_id}'")
         # Execute with semaphore synchronization (blocking)
         self._execute_command_with_semaphore(
             query_msg, "query", context_id=f"batch_{batch_id}", blocking=blocking, timeout=timeout
@@ -277,7 +277,7 @@ class TensorBusClient:
             state_bytes = txn.get(state_key)
             if state_bytes:
                 state = msgspec.msgpack.Decoder(bool).decode(state_bytes)
-                logger.info(
+                logger.debug(
                     f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for batch '{batch_id}': {state}"
                 )
                 return state

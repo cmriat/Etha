@@ -41,7 +41,7 @@ pixi run -e dev --frozen --no-install \
         --nproc-per-node=8 \
         --master-addr=${MASTER_ADDR} \
         --master-port=${MASTER_PORT} \
-        ./bench/benchmark.py
+        ./bench/transfer_benchmark.py
 
 echo "============================================"
 echo "Benchmark completed"

@@ -1,6 +1,6 @@
 [workspace]
 channels = [
-  "file:///data/conda_nightly",
+  "https://srgconda.bj.bcebos.com/",
   "https://prefix.dev/meta-forge",
   "conda-forge",
 ]
@@ -16,12 +16,12 @@ args = ["script"]
 cuda = "12.9"
 
 [dependencies]
-cuda = "12.9.*"
 pytorch = "*"
 python-lmdb = "*"
 msgspec = "*"
 universal-pathlib = "*"
 posix_ipc = "*"
+etcdpy = "*"
 
 [feature.dev.dependencies]
 transformers = "*"
@@ -35,6 +35,7 @@ pre-commit = "*"
 nccl-tests = ">=2.16.7,<3"
 pytest-timeout = ">=2.4.0,<3"
 mypy = ">=1.18.2,<2"
+tyro = ">=0.9.35,<0.10"
 
 [feature.dev.tasks]
 transfer_model = "bash prototyping/distributed_model_transfer/launch.sh"

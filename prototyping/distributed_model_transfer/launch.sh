@@ -14,7 +14,7 @@ rm -rf ${LOG_ROOT}
 mkdir -p ${LMDB_ROOT}
 mkdir -p ${LOG_ROOT}
 
-export MODEL_ID=Qwen/Qwen3-0.6B
+export MODEL_ID=Qwen/Qwen3-8B
 
 echo "🚀 Starting Agent processes (ranks 0-7) with torchrun..."
 pixi run torchrun --nproc_per_node=8 --master-port=39500 ${ROOT_BASE}/agent.py > ${LOG_ROOT}/agent.log 2>&1 &
