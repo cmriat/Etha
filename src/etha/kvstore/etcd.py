@@ -25,6 +25,7 @@ class EtcdStore(KVStore):
         port: int = 2379,
         timeout: float | None = None,
         cleanup: bool = False,
+        namespace: str = "default",
     ):
         """Initialize EtcdStore.
 
@@ -32,25 +33,28 @@ class EtcdStore(KVStore):
             host: etcd server host
             port: etcd server port
             timeout: Connection timeout in seconds
-            cleanup: If True, delete all tensorbus/ keys on init (should only be True for rank 0)
+            cleanup: If True, delete all keys in this namespace on init (should only be True for rank 0)
+            namespace: Namespace prefix to isolate different TensorBus instances
         """
         self.host = host
         self.port = port
+        self.namespace = namespace
+        self._key_prefix = f"tensorbus/{namespace}/"
         self._client = etcd3.client(host=host, port=port, timeout=timeout)
-        logger.info(f"EtcdStore: Connected to etcd at {host}:{port}")
+        logger.info(f"EtcdStore: Connected to etcd at {host}:{port} (namespace={namespace})")
 
         if cleanup:
-            deleted = self._client.delete_prefix("tensorbus/")
+            deleted = self._client.delete_prefix(self._key_prefix)
             if deleted:
-                logger.info(f"EtcdStore: Cleaned up {deleted} stale keys with prefix 'tensorbus/'")
+                logger.info(f"EtcdStore: Cleaned up {deleted} stale keys with prefix '{self._key_prefix}'")
 
     def set(self, key: str, value: str) -> None:
         """Set a key-value pair."""
-        self._client.put(key, value)
+        self._client.put(self._prefixed(key), value)
 
     def get(self, key: str) -> bytes | None:
         """Get value for a key."""
-        value, _ = self._client.get(key)
+        value, _ = self._client.get(self._prefixed(key))
         return value
 
     def exists(self, key: str) -> bool:
@@ -59,11 +63,11 @@ class EtcdStore(KVStore):
 
     def delete(self, key: str) -> bool:
         """Delete a key."""
-        return self._client.delete(key)
+        return self._client.delete(self._prefixed(key))
 
     def set_bytes(self, key: str, data: bytes) -> None:
         """Store binary data directly."""
-        self._client.put(key, data)
+        self._client.put(self._prefixed(key), data)
 
     def get_bytes(self, key: str) -> bytes | None:
         """Retrieve binary data directly."""
@@ -120,15 +124,16 @@ class EtcdStore(KVStore):
 
     def wait_for_key(self, key: str, timeout: float = 3600.0) -> bytes:
         """Wait for a key to exist and return its value."""
+        prefixed_key = self._prefixed(key)
 
         def on_event(e: Any) -> bytes | None:
             k = e.key.decode() if isinstance(e.key, bytes) else e.key
-            if k == key and e.value is not None:
+            if k == prefixed_key and e.value is not None:
                 return e.value
             return None
 
         return self._wait_with_watch(
-            watch_fn=lambda cb: self._client.add_watch_callback(key, cb),
+            watch_fn=lambda cb: self._client.add_watch_callback(prefixed_key, cb),
             check_fn=lambda: self.get(key),
             on_event=on_event,
             timeout=timeout,
@@ -144,13 +149,15 @@ class EtcdStore(KVStore):
         candidate_keys: list[str] | None = None,  # noqa: ARG002 - ignored, etcd uses prefix scan
     ) -> list[str]:
         """Wait for keys matching pattern using etcd watch."""
-        prefix = key_pattern[: key_pattern.find("*")] if "*" in key_pattern else key_pattern
+        # Add namespace prefix to pattern
+        prefixed_pattern = self._prefixed(key_pattern)
+        prefix = prefixed_pattern[: prefixed_pattern.find("*")] if "*" in prefixed_pattern else prefixed_pattern
         value_bytes = value.encode()
-        matched: set[str] = set()
+        matched: set[str] = set()  # stores prefixed keys, strip on return
         lock = threading.Lock()
 
         def matches(k: str, v: bytes | None) -> bool:
-            return v == value_bytes and fnmatch.fnmatch(k, key_pattern)
+            return v == value_bytes and fnmatch.fnmatch(k, prefixed_pattern)
 
         def on_event(e: Any) -> list[str] | None:
             k = e.key.decode() if isinstance(e.key, bytes) else e.key
@@ -158,7 +165,7 @@ class EtcdStore(KVStore):
                 with lock:
                     matched.add(k)
                     if len(matched) >= expected_count:
-                        return sorted(matched)[:expected_count]
+                        return [self._strip_prefix(k) for k in sorted(matched)[:expected_count]]
             return None
 
         def check_existing() -> list[str] | None:
@@ -168,7 +175,7 @@ class EtcdStore(KVStore):
                     if matches(k, v):
                         matched.add(k)
             if len(matched) >= expected_count:
-                return sorted(matched)[:expected_count]
+                return [self._strip_prefix(k) for k in sorted(matched)[:expected_count]]
             return None
 
         return self._wait_with_watch(
@@ -183,7 +190,7 @@ class EtcdStore(KVStore):
         """Close the etcd client."""
         if self._client:
             if cleanup:
-                deleted = self._client.delete_prefix("tensorbus/")
-                logger.info(f"EtcdStore: Deleted {deleted} keys with prefix 'tensorbus/'")
+                deleted = self._client.delete_prefix(self._key_prefix)
+                logger.info(f"EtcdStore: Deleted {deleted} keys with prefix '{self._key_prefix}'")
             self._client.close()
             logger.info("EtcdStore: Connection closed")

@@ -6,6 +6,17 @@ from abc import ABC, abstractmethod
 class KVStore(ABC):
     """Abstract KV store interface."""
 
+    namespace: str
+    _key_prefix: str
+
+    def _prefixed(self, key: str) -> str:
+        """Add namespace prefix to key."""
+        return f"{self._key_prefix}{key}"
+
+    def _strip_prefix(self, key: str) -> str:
+        """Remove namespace prefix from key."""
+        return key[len(self._key_prefix) :] if key.startswith(self._key_prefix) else key
+
     @abstractmethod
     def set(self, key: str, value: str) -> None:
         """Set a key-value pair.
