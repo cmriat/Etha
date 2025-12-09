@@ -1,7 +1,5 @@
 """Integration test for the distributed model transfer prototype."""
 
-from __future__ import annotations
-
 import os
 import time
 import shutil
