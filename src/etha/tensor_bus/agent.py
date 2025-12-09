@@ -51,6 +51,7 @@ class TensorBusAgent:
         lmdb_state_path: str,
         store_timeout: float = 3600.0,
         store_backend: str = "tcp",
+        store_namespace: str | None = None,
     ):
         """Initialize Agent.
 
@@ -66,26 +67,29 @@ class TensorBusAgent:
         """
         self.rank = rank
         self.world_size = world_size
+
         torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
         # Initialize torch.distributed first (needed for namespace broadcast)
         logger.debug(f"Agent {rank}: Initializing torch.distributed")
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-        # Generate namespace: rank 0 creates UUID, broadcasts to all
-        if rank == 0:
-            namespace = uuid.uuid4().hex[:8]
-        else:
-            namespace = None
-        namespace_list = [namespace]
-        dist.broadcast_object_list(namespace_list, src=0)
-        namespace = namespace_list[0]
-        logger.info(f"Agent {rank}: Using namespace '{namespace}'")
+        if store_namespace is None:
+            # Generate namespace: rank 0 creates UUID, broadcasts to all
+            if rank == 0:
+                store_namespace = uuid.uuid4().hex[:8]
+            else:
+                store_namespace = None
+            namespace_list = [store_namespace]
+            dist.broadcast_object_list(namespace_list, src=0)
+            store_namespace = namespace_list[0]
+
+        logger.info(f"Agent {rank}: Using namespace '{store_namespace}'")
 
         # Initialize KVStore with namespace
         logger.info(f"Agent {rank}: Connecting to {store_backend} store at {store_host}:{store_port}")
         self.store: KVStore = create_store(
-            host=store_host, port=store_port, timeout=store_timeout, backend=store_backend, namespace=namespace
+            host=store_host, port=store_port, timeout=store_timeout, backend=store_backend, namespace=store_namespace
         )
 
         # Initialize CommandQueue (for Host communication)

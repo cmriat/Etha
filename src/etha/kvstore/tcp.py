@@ -49,7 +49,7 @@ class TorchTCPStore(KVStore):
         self.world_size = world_size
         self.is_master = is_master
         self.namespace = namespace
-        self._key_prefix = f"tensorbus/{namespace}/"
+        self._key_prefix = f"{namespace}/tensorbus/"
 
         self._store = dist.TCPStore(
             host_name=host,

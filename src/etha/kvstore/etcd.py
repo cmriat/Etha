@@ -39,7 +39,7 @@ class EtcdStore(KVStore):
         self.host = host
         self.port = port
         self.namespace = namespace
-        self._key_prefix = f"tensorbus/{namespace}/"
+        self._key_prefix = f"{namespace}/tensorbus/"
         self._client = etcd3.client(host=host, port=port, timeout=timeout)
         logger.info(f"EtcdStore: Connected to etcd at {host}:{port} (namespace={namespace})")
 

@@ -310,8 +310,8 @@ class TestNamespaceIsolation:
         assert store2.get("shared/key") == b"value_from_ns2"
 
         # Underlying keys are different
-        assert store1._store.get("tensorbus/ns1/shared/key") == b"value_from_ns1"
-        assert store2._store.get("tensorbus/ns2/shared/key") == b"value_from_ns2"
+        assert store1._store.get("ns1/tensorbus/shared/key") == b"value_from_ns1"
+        assert store2._store.get("ns2/tensorbus/shared/key") == b"value_from_ns2"
 
         store1.close()
         store2.close()
