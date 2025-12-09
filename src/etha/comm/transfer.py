@@ -1,6 +1,6 @@
 """Transfer operation types and execution."""
 
-from enum import Enum
+from enum import StrEnum
 from dataclasses import dataclass
 
 import torch
@@ -9,7 +9,7 @@ import torch.distributed as dist
 from .utils import get_or_create_process_group
 
 
-class TransferType(Enum):
+class TransferType(StrEnum):
     """Transfer operation types."""
 
     SELF_COPY = "self_copy"  # Local copy within same rank
