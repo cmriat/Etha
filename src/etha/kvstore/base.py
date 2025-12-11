@@ -4,35 +4,52 @@ from abc import ABC, abstractmethod
 
 
 class KVStore(ABC):
-    """Abstract KV store interface."""
+    """Abstract KV store interface.
+
+    Key format: {namespace}/{component}/{key}
+    """
 
     namespace: str
-    _key_prefix: str
+    component: str
 
-    def _prefixed(self, key: str) -> str:
-        """Add namespace prefix to key."""
-        return f"{self._key_prefix}{key}"
+    def __init__(self, namespace: str, component: str):
+        """Initialize KVStore.
+
+        Args:
+            namespace: Namespace for key isolation
+            component: Default component name
+        """
+        self.namespace = namespace
+        self.component = component
+
+    def _prefixed(self, key: str, component: str | None = None) -> str:
+        """Add namespace/component prefix to key."""
+        comp = component or self.component
+        return f"{self.namespace}/{comp}/{key}"
 
     def _strip_prefix(self, key: str) -> str:
-        """Remove namespace prefix from key."""
-        return key[len(self._key_prefix) :] if key.startswith(self._key_prefix) else key
+        """Remove namespace/component prefix from key."""
+        parts = key.split("/", 2)
+        return parts[2] if len(parts) > 2 else key
 
     @abstractmethod
-    def set(self, key: str, value: str) -> None:
+    def set(self, key: str, value: str, *, component: str | None = None) -> None:
         """Set a key-value pair.
 
         Args:
             key: The key to set
             value: The value to store (string)
+            component: Override default component for this call
         """
         ...
 
     @abstractmethod
-    def get(self, key: str) -> bytes | None:
+    def get(self, key: str, *, component: str | None = None) -> bytes | None:
         """Get value for a key.
 
         Args:
             key: The key to retrieve
+            component: Override default component for this call
 
         Returns:
             The value as bytes, or None if key doesn't exist
@@ -40,11 +57,12 @@ class KVStore(ABC):
         ...
 
     @abstractmethod
-    def exists(self, key: str) -> bool:
+    def exists(self, key: str, *, component: str | None = None) -> bool:
         """Check if a key exists.
 
         Args:
             key: The key to check
+            component: Override default component for this call
 
         Returns:
             True if key exists, False otherwise
@@ -52,11 +70,12 @@ class KVStore(ABC):
         ...
 
     @abstractmethod
-    def delete(self, key: str) -> bool:
+    def delete(self, key: str, *, component: str | None = None) -> bool:
         """Delete a key.
 
         Args:
             key: The key to delete
+            component: Override default component for this call
 
         Returns:
             True if key was deleted, False if it didn't exist
@@ -68,6 +87,8 @@ class KVStore(ABC):
         self,
         key: str,
         timeout: float = 3600.0,
+        *,
+        component: str | None = None,
     ) -> bytes:
         """Wait for a key to exist and return its value.
 
@@ -78,6 +99,7 @@ class KVStore(ABC):
         Args:
             key: The key to wait for
             timeout: Maximum time to wait in seconds
+            component: Override default component for this call
 
         Returns:
             The value as bytes
@@ -95,6 +117,8 @@ class KVStore(ABC):
         value: str = "1",
         timeout: float = 3600.0,
         candidate_keys: list[str] | None = None,
+        *,
+        component: str | None = None,
     ) -> list[str]:
         """Wait until expected_count keys matching pattern have the specified value.
 
@@ -112,6 +136,7 @@ class KVStore(ABC):
             value: Expected value for matching keys (default "1")
             timeout: Maximum time to wait in seconds
             candidate_keys: List of candidate keys to check (required for TCPStore, ignored by etcd)
+            component: Override default component for this call
 
         Returns:
             List of matched keys
@@ -122,7 +147,7 @@ class KVStore(ABC):
         ...
 
     @abstractmethod
-    def set_bytes(self, key: str, data: bytes) -> None:
+    def set_bytes(self, key: str, data: bytes, *, component: str | None = None) -> None:
         """Store binary data.
 
         Implementation:
@@ -132,11 +157,12 @@ class KVStore(ABC):
         Args:
             key: The key to set
             data: Binary data to store
+            component: Override default component for this call
         """
         ...
 
     @abstractmethod
-    def get_bytes(self, key: str) -> bytes | None:
+    def get_bytes(self, key: str, *, component: str | None = None) -> bytes | None:
         """Retrieve binary data.
 
         Implementation:
@@ -145,9 +171,35 @@ class KVStore(ABC):
 
         Args:
             key: The key to retrieve
+            component: Override default component for this call
 
         Returns:
             Binary data, or None if key doesn't exist
+        """
+        ...
+
+    @abstractmethod
+    def wait_for_value(
+        self,
+        key: str,
+        expected: str,
+        timeout: float = 3600.0,
+        *,
+        component: str | None = None,
+    ) -> bytes:
+        """Wait for a key to have a specific value.
+
+        Args:
+            key: The key to watch
+            expected: Expected value to match
+            timeout: Maximum time to wait in seconds
+            component: Override default component for this call
+
+        Returns:
+            The value as bytes when matched
+
+        Raises:
+            TimeoutError: If timeout is reached before value matches
         """
         ...
 

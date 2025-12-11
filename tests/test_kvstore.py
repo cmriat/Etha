@@ -353,3 +353,67 @@ class TestWaitForKey:
         result = store.wait_for_key("test/wait_for_key/bytes", timeout=1.0)
         assert result == b"12345"
         assert int(result.decode()) == 12345
+
+
+class TestWaitForValue:
+    """Tests for wait_for_value - wait for specific value."""
+
+    def test_wait_for_value_existing(self, store):
+        """Test wait_for_value returns immediately when key has expected value."""
+        store.set("test/wait_for_value/existing", "1")
+        result = store.wait_for_value("test/wait_for_value/existing", "1", timeout=1.0)
+        assert result == b"1"
+
+    def test_wait_for_value_async(self, store):
+        """Test wait_for_value detects value written asynchronously."""
+        key = "test/wait_for_value/async"
+
+        def writer():
+            time.sleep(0.1)
+            store.set(key, "ready")
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+
+        result = store.wait_for_value(key, "ready", timeout=5.0)
+        thread.join()
+
+        assert result == b"ready"
+
+    def test_wait_for_value_timeout(self, store):
+        """Test wait_for_value raises TimeoutError when value never matches."""
+        store.set("test/wait_for_value/wrong", "0")
+        with pytest.raises(TimeoutError):
+            store.wait_for_value("test/wait_for_value/wrong", "1", timeout=0.1)
+
+    def test_wait_for_value_key_not_exist_timeout(self, store):
+        """Test wait_for_value raises TimeoutError when key doesn't exist."""
+        with pytest.raises(TimeoutError):
+            store.wait_for_value("test/wait_for_value/nonexistent", "1", timeout=0.1)
+
+    def test_wait_for_value_waits_for_correct_value(self, store):
+        """Test wait_for_value waits when key exists but value is wrong."""
+        key = "test/wait_for_value/change"
+        store.set(key, "0")  # Initial wrong value
+
+        def writer():
+            time.sleep(0.1)
+            store.set(key, "1")  # Change to expected value
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+
+        result = store.wait_for_value(key, "1", timeout=5.0)
+        thread.join()
+
+        assert result == b"1"
+
+    def test_wait_for_value_different_values(self, store):
+        """Test wait_for_value with different expected values."""
+        store.set("test/wait_for_value/status", "running")
+        result = store.wait_for_value("test/wait_for_value/status", "running", timeout=1.0)
+        assert result == b"running"
+
+        store.set("test/wait_for_value/status", "done")
+        result = store.wait_for_value("test/wait_for_value/status", "done", timeout=1.0)
+        assert result == b"done"
