@@ -210,7 +210,7 @@ class TensorBusAgent:
             expected_count=expected_local,
             candidate_keys=[f"pair:{pair_name}/rank:{r}/{local_name}" for r in range(self.world_size)],
         )
-        local_ranks = [self._extract_rank(k) for k in local_keys]
+        local_ranks = sorted([self._extract_rank(k) for k in local_keys])
         logger.info(f"Agent {self.rank}: Local peer complete: {local_ranks}")
 
         # Step 5: Wait until remote peer has written expected_world_size
@@ -226,7 +226,7 @@ class TensorBusAgent:
             expected_count=expected_remote,
             candidate_keys=[f"pair:{pair_name}/rank:{r}/{remote_name}" for r in range(self.world_size)],
         )
-        remote_ranks = [self._extract_rank(k) for k in remote_keys]
+        remote_ranks = sorted([self._extract_rank(k) for k in remote_keys])
 
         logger.info(f"Agent {self.rank}: Remote peer '{remote_name}' complete: {remote_ranks}")
         logger.debug(f"Agent {self.rank}: Creating pair group with ranks: {local_ranks + remote_ranks}")
