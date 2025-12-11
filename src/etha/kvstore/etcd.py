@@ -26,6 +26,7 @@ class EtcdStore(KVStore):
         timeout: float | None = None,
         cleanup: bool = False,
         namespace: str = "default",
+        component: str = "tensorbus",
     ):
         """Initialize EtcdStore.
 
@@ -34,44 +35,46 @@ class EtcdStore(KVStore):
             port: etcd server port
             timeout: Connection timeout in seconds
             cleanup: If True, delete all keys in this namespace on init (should only be True for rank 0)
-            namespace: Namespace prefix to isolate different TensorBus instances
+            namespace: Namespace for key isolation
+            component: Default component name
         """
+        super().__init__(namespace, component)
         self.host = host
         self.port = port
-        self.namespace = namespace
-        self._key_prefix = f"{namespace}/tensorbus/"
         self._client = etcd3.client(host=host, port=port, timeout=timeout)
-        logger.info(f"EtcdStore: Connected to etcd at {host}:{port} (namespace={namespace})")
+        logger.info(f"EtcdStore: Connected to etcd at {host}:{port} (namespace={namespace}, component={component})")
 
         if cleanup:
-            deleted = self._client.delete_prefix(self._key_prefix)
+            # Clean up keys for this namespace (all components)
+            cleanup_prefix = f"{namespace}/"
+            deleted = self._client.delete_prefix(cleanup_prefix)
             if deleted:
-                logger.info(f"EtcdStore: Cleaned up {deleted} stale keys with prefix '{self._key_prefix}'")
+                logger.info(f"EtcdStore: Cleaned up {deleted} stale keys with prefix '{cleanup_prefix}'")
 
-    def set(self, key: str, value: str) -> None:
+    def set(self, key: str, value: str, *, component: str | None = None) -> None:
         """Set a key-value pair."""
-        self._client.put(self._prefixed(key), value)
+        self._client.put(self._prefixed(key, component), value)
 
-    def get(self, key: str) -> bytes | None:
+    def get(self, key: str, *, component: str | None = None) -> bytes | None:
         """Get value for a key."""
-        value, _ = self._client.get(self._prefixed(key))
+        value, _ = self._client.get(self._prefixed(key, component))
         return value
 
-    def exists(self, key: str) -> bool:
+    def exists(self, key: str, *, component: str | None = None) -> bool:
         """Check if a key exists."""
-        return self.get(key) is not None
+        return self.get(key, component=component) is not None
 
-    def delete(self, key: str) -> bool:
+    def delete(self, key: str, *, component: str | None = None) -> bool:
         """Delete a key."""
-        return self._client.delete(self._prefixed(key))
+        return self._client.delete(self._prefixed(key, component))
 
-    def set_bytes(self, key: str, data: bytes) -> None:
+    def set_bytes(self, key: str, data: bytes, *, component: str | None = None) -> None:
         """Store binary data directly."""
-        self._client.put(self._prefixed(key), data)
+        self._client.put(self._prefixed(key, component), data)
 
-    def get_bytes(self, key: str) -> bytes | None:
+    def get_bytes(self, key: str, *, component: str | None = None) -> bytes | None:
         """Retrieve binary data directly."""
-        return self.get(key)
+        return self.get(key, component=component)
 
     # --- Watch-based waiting ---
 
@@ -122,9 +125,9 @@ class EtcdStore(KVStore):
             cancelled.set()
             self._client.cancel_watch(watch_id)
 
-    def wait_for_key(self, key: str, timeout: float = 3600.0) -> bytes:
+    def wait_for_key(self, key: str, timeout: float = 3600.0, *, component: str | None = None) -> bytes:
         """Wait for a key to exist and return its value."""
-        prefixed_key = self._prefixed(key)
+        prefixed_key = self._prefixed(key, component)
 
         def on_event(e: Any) -> bytes | None:
             k = e.key.decode() if isinstance(e.key, bytes) else e.key
@@ -134,7 +137,7 @@ class EtcdStore(KVStore):
 
         return self._wait_with_watch(
             watch_fn=lambda cb: self._client.add_watch_callback(prefixed_key, cb),
-            check_fn=lambda: self.get(key),
+            check_fn=lambda: self.get(key, component=component),
             on_event=on_event,
             timeout=timeout,
             error_msg=f"Timeout waiting for key: {key}",
@@ -147,10 +150,12 @@ class EtcdStore(KVStore):
         value: str = "1",
         timeout: float = 3600.0,
         candidate_keys: list[str] | None = None,  # noqa: ARG002 - ignored, etcd uses prefix scan
+        *,
+        component: str | None = None,
     ) -> list[str]:
         """Wait for keys matching pattern using etcd watch."""
-        # Add namespace prefix to pattern
-        prefixed_pattern = self._prefixed(key_pattern)
+        # Add namespace/component prefix to pattern
+        prefixed_pattern = self._prefixed(key_pattern, component)
         prefix = prefixed_pattern[: prefixed_pattern.find("*")] if "*" in prefixed_pattern else prefixed_pattern
         value_bytes = value.encode()
         matched: set[str] = set()  # stores prefixed keys, strip on return
@@ -186,11 +191,42 @@ class EtcdStore(KVStore):
             error_msg=f"Timeout waiting for {expected_count} keys matching '{key_pattern}', got {len(matched)}",
         )
 
+    def wait_for_value(
+        self,
+        key: str,
+        expected: str,
+        timeout: float = 3600.0,
+        *,
+        component: str | None = None,
+    ) -> bytes:
+        """Wait for a key to have a specific value."""
+        prefixed_key = self._prefixed(key, component)
+        expected_bytes = expected.encode()
+
+        def on_event(e: Any) -> bytes | None:
+            k = e.key.decode() if isinstance(e.key, bytes) else e.key
+            if k == prefixed_key and e.value == expected_bytes:
+                return e.value
+            return None
+
+        def check_fn() -> bytes | None:
+            value = self.get(key, component=component)
+            return value if value == expected_bytes else None
+
+        return self._wait_with_watch(
+            watch_fn=lambda cb: self._client.add_watch_callback(prefixed_key, cb),
+            check_fn=check_fn,
+            on_event=on_event,
+            timeout=timeout,
+            error_msg=f"Timeout waiting for key '{key}' to have value '{expected}'",
+        )
+
     def close(self, cleanup: bool = True) -> None:
         """Close the etcd client."""
         if self._client:
             if cleanup:
-                deleted = self._client.delete_prefix(self._key_prefix)
-                logger.info(f"EtcdStore: Deleted {deleted} keys with prefix '{self._key_prefix}'")
+                cleanup_prefix = f"{self.namespace}/"
+                deleted = self._client.delete_prefix(cleanup_prefix)
+                logger.info(f"EtcdStore: Deleted {deleted} keys with prefix '{cleanup_prefix}'")
             self._client.close()
             logger.info("EtcdStore: Connection closed")
