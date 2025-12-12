@@ -126,7 +126,9 @@ def main():
         i = 0
         while i < 10:
             batch_id = f"transfer_step_{i}"
-            handler = client.register_tensors(batch_id=batch_id, tensors=tensors_to_register)
+            handler = client.register_tensors(
+                batch_id=batch_id, tensors=tensors_to_register, bucket_size=64 * 1024 * 1024
+            )
             logger.info(f"✅ Batch '{batch_id}' registered successfully!")
 
             logger.info(f"step {i} transfer begin")

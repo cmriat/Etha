@@ -35,34 +35,42 @@ def execute_bucket_pipeline(
         return False
 
     while _has_work():
-        for channel in channels.values():
-            candidate: deque = channel["candidate"]
-            prepared: deque = channel["prepared"]
-            in_flight: deque = channel["in_flight"]
+        made_progress = True
+        while made_progress:
+            made_progress = False
+            for channel in channels.values():
+                candidate: deque = channel["candidate"]
+                prepared: deque = channel["prepared"]
+                in_flight: deque = channel["in_flight"]
 
-            while candidate and len(prepared) + len(in_flight) < max_in_flight:
-                bucket = candidate.popleft()
-                logger.debug(f"[rank={rank}] Bucket execution: Preparing bucket {bucket}")
-                bucket.prepare()
-                prepared.append(bucket)
+                if candidate and len(prepared) + len(in_flight) < max_in_flight:
+                    bucket = candidate.popleft()
+                    logger.debug(f"[rank={rank}] Bucket execution: Preparing bucket {bucket}")
+                    bucket.prepare()
+                    prepared.append(bucket)
+                    made_progress = True
 
-        for channel in channels.values():
-            prepared: deque = channel["prepared"]
-            in_flight: deque = channel["in_flight"]
+        made_progress = True
+        while made_progress:
+            made_progress = False
+            for channel in channels.values():
+                prepared: deque = channel["prepared"]
+                in_flight: deque = channel["in_flight"]
 
-            while prepared:
-                if not prepared[0].launch():
-                    break
-                logger.debug(f"[rank={rank}] Bucket execution: Launching bucket {prepared[0]}")
-                in_flight.append(prepared.popleft())
+                if prepared and prepared[0].launch():
+                    logger.debug(f"[rank={rank}] Bucket execution: Launching bucket {prepared[0]}")
+                    in_flight.append(prepared.popleft())
+                    made_progress = True
 
-        for channel in channels.values():
-            in_flight: deque = channel["in_flight"]
-            while in_flight:
-                if not in_flight[0].is_complete():
-                    break
-                logger.debug(f"[rank={rank}] Bucket execution: Finalizing bucket {in_flight[0]}")
-                in_flight.popleft().finalize()
+        made_progress = True
+        while made_progress:
+            made_progress = False
+            for channel in channels.values():
+                in_flight: deque = channel["in_flight"]
+                if in_flight and in_flight[0].is_complete():
+                    logger.debug(f"[rank={rank}] Bucket execution: Finalizing bucket {in_flight[0]}")
+                    in_flight.popleft().finalize()
+                    made_progress = True
 
     torch.cuda.synchronize()
 
