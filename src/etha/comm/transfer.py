@@ -13,8 +13,8 @@ class TransferType(Enum):
     """Transfer operation types."""
 
     SELF_COPY = "self_copy"  # Local copy within same rank
-    P2P = "p2p"  # Point-to-point transfer between two ranks
-    BROADCAST = "broadcast"  # One-to-many transfer
+    P2P = "p2p"
+    BROADCAST = "broadcast"
 
 
 def _execute_p2p(
