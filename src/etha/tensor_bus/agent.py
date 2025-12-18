@@ -377,7 +377,9 @@ class TensorBusAgent:
         # Set transfer_signal to notify receiver that sender is ready (before barrier)
         transfer_signal_key = f"batch:{batch_id}/state:transfer_signal"
         self._leader_set(transfer_signal_key, "1", batch_state)
-
+        logger.info(
+            f"Agent {self.rank}: set key {self.store._prefixed(transfer_signal_key, component='global')} value 1"
+        )
         # Synchronize all ranks in batch
         dist.barrier(batch_state.batch_group)
         logger.debug(f"Agent {self.rank}: Batch {batch_id}: All ranks synchronized")
@@ -672,23 +674,23 @@ class TensorBusAgent:
         with self.state_env.begin(write=True, db=self.state_db) as txn:
             txn.put(b"agent:heartbeat", str(time.time()).encode())
 
-    def _leader_set(self, key: str, value: str, batch: BatchState) -> None:
+    def _leader_set(self, key: str, value: str, batch: BatchState, component: str = "global") -> None:
         """Set key-value where only leader writes.
 
         All ranks in local group synchronize after write.
         """
         if self.rank == batch.local_leader:
-            self.store.set(key, value)
+            self.store.set(key, value, component=component)
         dist.barrier(batch.local_group)
 
-    def _leader_get(self, key: str, batch: BatchState) -> bytes | None:
+    def _leader_get(self, key: str, batch: BatchState, component: str = "global") -> bytes | None:
         """Get key-value where only leader reads, then broadcasts.
 
         Returns:
             Value bytes from store (same for all ranks in local group)
         """
         if self.rank == batch.local_leader:
-            value = self.store.get(key)
+            value = self.store.get(key, component=component)
         else:
             value = None
 
