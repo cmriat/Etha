@@ -10,6 +10,11 @@ from multiprocessing.reduction import ForkingPickler
 import lmdb
 import torch
 import msgspec
+
+try:
+    import logfire
+except ImportError:
+    logfire = None
 import posix_ipc
 import torch.distributed as dist
 from upath import UPath
@@ -132,6 +137,15 @@ class TensorBusAgent:
 
     def _handle_command(self, command):
         """Dispatch command to appropriate handler and handle semaphore release."""
+        # Only create observation on rank 0
+        if int(os.environ.get("RANK")) == 0 and logfire:
+            with logfire.span(f"handle-{type(command).__name__}", input=command):
+                self._execute_command(command)
+        else:
+            self._execute_command(command)
+
+    def _execute_command(self, command):
+        """Execute the actual command logic."""
         try:
             match command:
                 case InitPair():
