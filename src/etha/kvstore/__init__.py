@@ -37,7 +37,7 @@ def create_store(
             host=host,
             port=port or 2379,
             timeout=timeout,
-            cleanup=(rank == 0),
+            cleanup=False,
             namespace=namespace,
             component=component,
         )
