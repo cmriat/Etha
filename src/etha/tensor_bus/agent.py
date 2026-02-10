@@ -390,10 +390,11 @@ class TensorBusAgent:
 
         # Set transfer_signal to notify receiver that sender is ready (before barrier)
         transfer_signal_key = f"batch:{batch_id}/state:transfer_signal"
-        self._leader_set(transfer_signal_key, "1", batch_state)
-        logger.info(
-            f"Agent {self.rank}: set key {self.store._prefixed(transfer_signal_key, component='global')} value 1"
-        )
+        if transfer_type == "send":
+            self._leader_set(transfer_signal_key, "1", batch_state)
+            logger.info(
+                f"Agent {self.rank}: set key {self.store._prefixed(transfer_signal_key, component='global')} value 1"
+            )
         # Synchronize all ranks in batch
         dist.barrier(batch_state.batch_group)
         logger.debug(f"Agent {self.rank}: Batch {batch_id}: All ranks synchronized")
@@ -441,7 +442,8 @@ class TensorBusAgent:
         transfer_time_ms = start_event.elapsed_time(end_event)
 
         dist.barrier(batch_state.batch_group)
-        self._leader_set(transfer_signal_key, "0", batch_state)
+        if transfer_type == "recv":
+            self._leader_set(transfer_signal_key, "0", batch_state)
         logger.info(f"Agent {self.rank}: Batch {batch_id}: Transfer complete in {transfer_time_ms:.2f} ms")
 
     def _handle_query_status(self, msg: QueryStatus):
