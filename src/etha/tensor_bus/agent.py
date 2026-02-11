@@ -77,7 +77,7 @@ class TensorBusAgent:
 
         # Initialize torch.distributed first (needed for namespace broadcast)
         logger.debug(f"Agent {rank}: Initializing torch.distributed")
-        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+        dist.init_process_group(backend="cuda:nccl,cpu:gloo", rank=rank, world_size=world_size)
 
         if store_namespace is None:
             # Generate namespace: rank 0 creates UUID, broadcasts to all
@@ -281,13 +281,13 @@ class TensorBusAgent:
             logger.info(f"Agent {self.rank}: Remote mesh: {remote_mesh_tensor} with placements: {remote_placements}")
 
             if local_is_first:
-                first_mesh = DeviceMesh("cuda", local_mesh_tensor)
-                second_mesh = DeviceMesh("cuda", remote_mesh_tensor)
+                first_mesh = DeviceMesh("cpu", local_mesh_tensor)
+                second_mesh = DeviceMesh("cpu", remote_mesh_tensor)
                 first_placements = local_placements
                 second_placements = remote_placements
             else:
-                first_mesh = DeviceMesh("cuda", remote_mesh_tensor)
-                second_mesh = DeviceMesh("cuda", local_mesh_tensor)
+                first_mesh = DeviceMesh("cpu", remote_mesh_tensor)
+                second_mesh = DeviceMesh("cpu", local_mesh_tensor)
                 first_placements = remote_placements
                 second_placements = local_placements
             logger.info(f"Agent {self.rank}: Generating M2M maps for pair '{pair_name}'")
@@ -301,7 +301,7 @@ class TensorBusAgent:
                 target_mesh=second_mesh,
                 target_placements=second_placements,
                 group=pair_group,
-                device="cuda",
+                device="cpu",
             )
             # Second call: second_mesh -> first_mesh
             map_2, src_slicers_2, tgt_slicers_2 = get_m2m_map(
@@ -310,7 +310,7 @@ class TensorBusAgent:
                 target_mesh=first_mesh,
                 target_placements=first_placements,
                 group=pair_group,
-                device="cuda",
+                device="cpu",
             )
 
             # Assign to send/recv based on which mesh is local
@@ -339,6 +339,13 @@ class TensorBusAgent:
             logger.info(
                 f"Agent {self.rank}: Generated P2P maps for pair '{pair_name}'. m2m_map_send: {m2m_map_send} m2m_map_recv: {m2m_map_recv}"
             )
+
+            for mesh in (first_mesh, second_mesh):
+                mesh_ranks = mesh.mesh.flatten().tolist()
+                if self.rank in mesh_ranks:
+                    for pg in mesh.get_all_groups():
+                        dist.destroy_process_group(pg)
+            logger.debug(f"Agent {self.rank}: Destroyed DeviceMesh process groups for pair '{pair_name}'")
         else:
             logger.info(f"Agent {self.rank}: Skipping P2P map generation - missing or inconsistent mesh/placement info")
 
