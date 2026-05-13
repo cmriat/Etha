@@ -10,8 +10,9 @@ move tensors between two independently-launched process groups — for example,
 shipping model weights from a training cluster to an inference cluster in a
 disaggregated RL setup.
 
-It plans communication on top of `DeviceMesh` + `Placement`, batches and
-buckets small transfers, and uses NCCL for the actual send/recv.
+It plans the cross-process-group **resharding** (`DeviceMesh` + `Placement`
+on each side) once per pair, then specializes that plan per batch into
+NCCL send / recv ops bucketed for throughput.
 
 ## Architecture
 
@@ -49,6 +50,22 @@ buckets small transfers, and uses NCCL for the actual send/recv.
 Each `(local_name, remote_name, DeviceMesh, Placement)` tuple registers as a
 **pair**. Tensors are registered into a **batch** that spans one or more pairs
 and is then transferred atomically.
+
+### Two-stage planning
+
+Planning is split so that the expensive cross-mesh work is paid once per pair
+and reused across every transfer on it:
+
+- **Pair level — shape-independent.** `init_pair` computes an **M2M map**:
+  a rank-to-rank, slice-to-slice plan describing how to redistribute a
+  tensor laid out as `(source_mesh, source_placements)` into one laid out
+  as `(target_mesh, target_placements)`. Same idea as
+  `DTensor.redistribute`, but across two independent process groups. The
+  map is stored on the pair and reused forever.
+- **Batch level — shape-dependent.** `register_tensors` specializes the
+  M2M map into concrete **chunks** for the actual tensor shapes and
+  coalesces them into NCCL-friendly **buckets**. Only this layer changes
+  with tensor shape; the cross-mesh topology itself is computed only once.
 
 ## Installation
 
