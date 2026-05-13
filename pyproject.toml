@@ -2,6 +2,8 @@
 name = "etha"
 version = "0.0.1"
 description = "etha"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 
 [build-system]
 build-backend = "hatchling.build"
