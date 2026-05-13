@@ -14,6 +14,11 @@ It plans the cross-process-group **resharding** (`DeviceMesh` + `Placement`
 on each side) once per pair, then specializes that plan per batch into
 NCCL send / recv ops bucketed for throughput.
 
+The worker → agent handoff uses CUDA IPC handles, so transfers are
+**zero-copy** end-to-end and **zero-duplicate**: the agent runs NCCL send /
+recv directly against the worker's registered tensor — no host roundtrip
+and no staging buffers on either side.
+
 ## Architecture
 
 ```
@@ -112,7 +117,16 @@ handler.close()
 A complete runnable example that transfers a Qwen3 model between two separate
 `torchrun` groups lives in
 [`prototyping/distributed_model_transfer/`](prototyping/distributed_model_transfer/).
-Benchmarks are under [`bench/`](bench/).
+
+## Benchmarks
+
+Throughput of M2M (Etha) vs. a gather-broadcast baseline across 8 different
+`(source_mesh → target_mesh)` resharding configurations on 16 GPUs:
+
+![Mesh 4 example: (2,2,2,1) → (1,1,4,2)](bench/results/throughput_benchmark_mesh_04_2_2_2_1_1_1_4_2.png)
+
+Full result matrix, profiler / memory-snapshot setup, and the KVStore
+microbenchmark are in [bench/README.md](bench/README.md).
 
 ## Repository layout
 
