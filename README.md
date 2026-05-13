@@ -1,6 +1,6 @@
 # Etha
 
-> M × N tensor transfer between PyTorch process groups.
+> M-to-N tensor transfer between PyTorch process groups.
 > Named after the [Sub-Etha](https://hitchhikers.fandom.com/wiki/Sub-Etha).
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -19,7 +19,7 @@ Two compounding properties keep the data path tight:
 - **Zero-copy** worker → agent handoff via CUDA IPC handles. The agent
   runs NCCL send / recv directly against the worker's registered tensor,
   with no host roundtrip and no staging buffer on either side.
-- **Zero-duplicate** wire traffic from the M × N M2M plan. Each source
+- **Zero-duplicate** wire traffic from the M-to-N M2M plan. Each source
   rank sends only the shards it owns straight to the target ranks that
   need them — no intermediate rank ever materializes a full copy of the
   tensor. (A naive gather-then-broadcast baseline, by contrast,
