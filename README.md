@@ -1,6 +1,6 @@
 # Etha
 
-> Distributed P2P tensor transfer for PyTorch.
+> M-to-N tensor transfer between PyTorch process groups.
 > Named after the [Sub-Etha](https://hitchhikers.fandom.com/wiki/Sub-Etha).
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -13,6 +13,17 @@ disaggregated RL setup.
 It plans the cross-process-group **resharding** (`DeviceMesh` + `Placement`
 on each side) once per pair, then specializes that plan per batch into
 NCCL send / recv ops bucketed for throughput.
+
+Two compounding properties keep the data path tight:
+
+- **Zero-copy** worker → agent handoff via CUDA IPC handles. The agent
+  runs NCCL send / recv directly against the worker's registered tensor,
+  with no host roundtrip and no staging buffer on either side.
+- **Zero-duplicate** wire traffic from the M-to-N M2M plan. Each source
+  rank sends only the shards it owns straight to the target ranks that
+  need them — no intermediate rank ever materializes a full copy of the
+  tensor. (A naive gather-then-broadcast baseline, by contrast,
+  reconstitutes the whole tensor on every rank before redistributing.)
 
 ## Architecture
 
@@ -112,7 +123,16 @@ handler.close()
 A complete runnable example that transfers a Qwen3 model between two separate
 `torchrun` groups lives in
 [`prototyping/distributed_model_transfer/`](prototyping/distributed_model_transfer/).
-Benchmarks are under [`bench/`](bench/).
+
+## Benchmarks
+
+Throughput of M2M (Etha) vs. a gather-broadcast baseline across 8 different
+`(source_mesh → target_mesh)` resharding configurations on 16 GPUs:
+
+![Mesh 4 example: (2,2,2,1) → (1,1,4,2)](bench/results/throughput_benchmark_mesh_04_2_2_2_1_1_1_4_2.png)
+
+Full result matrix, profiler / memory-snapshot setup, and the KVStore
+microbenchmark are in [bench/README.md](bench/README.md).
 
 ## Repository layout
 
