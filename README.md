@@ -1,6 +1,6 @@
 # Etha
 
-> Distributed P2P tensor transfer for PyTorch.
+> M × N tensor transfer between PyTorch process groups.
 > Named after the [Sub-Etha](https://hitchhikers.fandom.com/wiki/Sub-Etha).
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -14,10 +14,16 @@ It plans the cross-process-group **resharding** (`DeviceMesh` + `Placement`
 on each side) once per pair, then specializes that plan per batch into
 NCCL send / recv ops bucketed for throughput.
 
-The worker → agent handoff uses CUDA IPC handles, so transfers are
-**zero-copy** end-to-end and **zero-duplicate**: the agent runs NCCL send /
-recv directly against the worker's registered tensor — no host roundtrip
-and no staging buffers on either side.
+Two compounding properties keep the data path tight:
+
+- **Zero-copy** worker → agent handoff via CUDA IPC handles. The agent
+  runs NCCL send / recv directly against the worker's registered tensor,
+  with no host roundtrip and no staging buffer on either side.
+- **Zero-duplicate** wire traffic from the M × N M2M plan. Each source
+  rank sends only the shards it owns straight to the target ranks that
+  need them — no intermediate rank ever materializes a full copy of the
+  tensor. (A naive gather-then-broadcast baseline, by contrast,
+  reconstitutes the whole tensor on every rank before redistributing.)
 
 ## Architecture
 
