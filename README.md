@@ -120,9 +120,9 @@ handler.transfer("send", blocking=True)   # "recv" on the other side
 handler.close()
 ```
 
-A complete runnable example that transfers a Qwen3 model between two separate
-`torchrun` groups lives in
-[`prototyping/distributed_model_transfer/`](prototyping/distributed_model_transfer/).
+A complete runnable example that synchronizes weights between a fake trainer
+and a live vLLM inference server lives in
+[`examples/vllm_weight_sync/`](examples/vllm_weight_sync/).
 Throughput comparisons against a gather-broadcast baseline across 8 mesh
 configurations are in [`bench/`](bench/).
 
@@ -135,7 +135,7 @@ src/etha/
   kvstore/      KVStore abstraction (etcd, torch TCPStore)
 tests/          pytest suite
 bench/          comm + KV store benchmarks
-prototyping/    end-to-end runnable examples (not stable API)
+examples/       end-to-end runnable examples
 docs/design/    design notes
 ```
 
