@@ -3,6 +3,9 @@
 import os
 import math
 import time
+from pathlib import Path
+
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 import torch
 import pandas as pd
@@ -480,7 +483,7 @@ def generate_result_plot(
     # Generate clean filename
     src = "_".join(map(str, source_mesh_shape))
     tgt = "_".join(map(str, target_mesh_shape))
-    fig_path = f"./results/throughput_benchmark_mesh_{mesh_idx + 1:02d}_{src}_{tgt}.png"
+    fig_path = RESULTS_DIR / f"throughput_benchmark_mesh_{mesh_idx + 1:02d}_{src}_{tgt}.png"
 
     fig.savefig(fig_path, dpi=300)
     print(f"✅ Plot saved: {fig_path}")
@@ -505,13 +508,13 @@ def main():
     local_rank = int(os.environ["LOCAL_RANK"])
 
     # Create results directory
-    os.makedirs("./results", exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Setup profiling configuration
     profiling_config = None
     if ENABLE_PROFILING:
         profiling_config = {
-            "dump_folder": "./results",
+            "dump_folder": str(RESULTS_DIR),
             "profile_shapes": PROFILE_SHAPES,
             "warmup_steps": PROFILE_WARMUP,
             "active_steps": PROFILE_ACTIVE,
@@ -564,15 +567,14 @@ def main():
     # Mesh combinations: source_mesh_shape -> target_mesh_shape (total 16 devices)
     # Each dimension must be power of 2: 1, 2, 4, 8
     mesh_combinations = [
-        # ((1, 1, 4, 2), (4, 2, 1, 1)),
-        # ((8, 1, 1, 1), (1, 2, 2, 2)),
-        # ((1, 2, 4, 1), (8, 1, 1, 1)),
-        # ((2, 2, 2, 1), (1, 1, 4, 2)),
-        # ((2, 4, 1, 1), (1, 2, 4, 1)),
-        # ((4, 1, 1, 2), (2, 1, 1, 4)),
-        # ((4, 1, 2, 1), (1, 1, 1, 8)),
-        # ((4, 2, 1, 1), (1, 1, 2, 4)),
-        ((1, 1, 1, 8), (1, 1, 1, 8)),
+        ((1, 1, 4, 2), (4, 2, 1, 1)),
+        ((8, 1, 1, 1), (1, 2, 2, 2)),
+        ((1, 2, 4, 1), (8, 1, 1, 1)),
+        ((2, 2, 2, 1), (1, 1, 4, 2)),
+        ((2, 4, 1, 1), (1, 2, 4, 1)),
+        ((4, 1, 1, 2), (2, 1, 1, 4)),
+        ((4, 1, 2, 1), (1, 1, 1, 8)),
+        ((4, 2, 1, 1), (1, 1, 2, 4)),
     ]
 
     print(f"Total {len(mesh_combinations)} different 16-device mesh combinations")
@@ -758,7 +760,7 @@ def main():
         print("All mesh combination tests completed!")
         print(f"Tested {len(mesh_combinations)} mesh combinations")
         print(f"Generated {len(all_results)} performance charts")
-        print("All plots saved in: ./results/")
+        print(f"All plots saved in: {RESULTS_DIR}")
         print(f"{'=' * 80}")
 
     # Cleanup
