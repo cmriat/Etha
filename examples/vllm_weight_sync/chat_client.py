@@ -1,9 +1,9 @@
 """Stress chat against the vLLM OpenAI server, gated by the control store.
 
 Reads `vllm_ready` / `vllm_version` to skip requests during sync and tag
-each reply with the live weight version. Atomically bumps `chat_count`
-after every successful completion — trainer rank 0 watches that counter
-to gate the next sync round, so the demo runs at the chat's pace.
+each reply with the live weight version. Bumps `chat_count` after every
+successful completion — trainer rank 0 watches that counter to gate the
+next sync round, so the demo runs at the chat's pace.
 """
 
 import os
@@ -51,6 +51,8 @@ def main() -> None:
     logger.info("vllm server is up at %s:%d", CONFIG.vllm_http_host, CONFIG.vllm_http_port)
 
     round_idx = 0
+    chat_count = 0
+    store.set("chat_count", "0")
     while CONFIG.chat_rounds == 0 or round_idx < CONFIG.chat_rounds:
         ready = store.get("vllm_ready")
         if ready != b"1":
@@ -76,8 +78,9 @@ def main() -> None:
                     prompt,
                     resp.choices[0].text,
                 )
-                new_count = store.add("chat_count", 1)
-                logger.debug("chat_count -> %d", new_count)
+                chat_count += 1
+                store.set("chat_count", str(chat_count))
+                logger.debug("chat_count -> %d", chat_count)
             except Exception:
                 logger.exception("chat round=%d prompt=%r failed", round_idx, prompt)
         time.sleep(CONFIG.chat_interval)
