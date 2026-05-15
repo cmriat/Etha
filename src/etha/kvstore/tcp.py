@@ -74,16 +74,6 @@ class TorchTCPStore(KVStore):
         self._store.set(prefixed, value)
         self._known_keys.add(key)
 
-    def add(self, key: str, value: int, *, component: str | None = None) -> int:
-        """Atomically increment integer key by value, returning new value.
-
-        Creates the key with value=0 first if it doesn't exist.
-        """
-        prefixed = self._prefixed(key, component)
-        new_value = self._store.add(prefixed, value)
-        self._known_keys.add(key)
-        return new_value
-
     def get(self, key: str, *, component: str | None = None) -> bytes | None:
         """Get value for a key."""
         prefixed = self._prefixed(key, component)
