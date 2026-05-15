@@ -5,8 +5,6 @@ environments:
     - url: https://srgconda.bj.bcebos.com/
     - url: https://prefix.dev/meta-forge/
     - url: https://conda.anaconda.org/conda-forge/
-    indexes:
-    - https://pypi.org/simple
     options:
       pypi-prerelease-mode: if-necessary-or-explicit
     packages:
@@ -30,7 +28,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nvvm-tools-12.9.86-h4bc722e_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-opencl-12.9.19-h5888daf_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/cuda-version-12.9-h4f385c5_3.conda
-      - conda: https://srgconda.bj.bcebos.com/linux-64/cudnn-9.13.1.26-hbcb9cd8_0.conda
+      - conda: https://srgconda.bj.bcebos.com/linux-64/cudnn-9.21.1.3-h152cecb_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cusparselt-0.8.1.1-h58dd1b1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/etcdpy-0.0.0.2-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/filelock-3.20.0-pyhd8ed1ab_0.conda
@@ -45,8 +43,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcap-2.77-h3ff7636_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcblas-3.11.0-4_hfef963f_mkl.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcublas-12.9.1.4-h676940d_1.conda
-      - conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-9.13.1.26-hf7e9902_0.conda
-      - conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-dev-9.13.1.26-h58dd1b1_0.conda
+      - conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-9.21.1.3-hb0f4dca_0.conda
+      - conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-dev-9.21.1.3-h081b9d2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcudss-0.7.1.4-h58dd1b1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcufft-11.4.1.4-hecca717_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcufile-1.14.1.1-hbc026e6_1.conda
@@ -125,14 +123,12 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/universal-pathlib-0.3.7-hd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/universal_pathlib-0.3.7-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
-      - pypi: ./
+      - conda: .
   dev:
     channels:
     - url: https://srgconda.bj.bcebos.com/
     - url: https://prefix.dev/meta-forge/
     - url: https://conda.anaconda.org/conda-forge/
-    indexes:
-    - https://pypi.org/simple
     options:
       pypi-prerelease-mode: if-necessary-or-explicit
     packages:
@@ -204,7 +200,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nvvm-tools-12.9.86-h4bc722e_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-opencl-12.9.19-h5888daf_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/cuda-version-12.9-h4f385c5_3.conda
-      - conda: https://srgconda.bj.bcebos.com/linux-64/cudnn-9.13.1.26-hbcb9cd8_0.conda
+      - conda: https://srgconda.bj.bcebos.com/linux-64/cudnn-9.21.1.3-h152cecb_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cusparselt-0.8.1.1-h58dd1b1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/cycler-0.12.1-pyhcf101f3_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cyrus-sasl-2.1.28-hd9c7081_0.conda
@@ -297,8 +293,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libclang13-21.1.7-default_h746c552_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcrc32c-1.1.2-h9c3ff4c_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcublas-12.9.1.4-h676940d_1.conda
-      - conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-9.13.1.26-hf7e9902_0.conda
-      - conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-dev-9.13.1.26-h58dd1b1_0.conda
+      - conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-9.21.1.3-hb0f4dca_0.conda
+      - conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-dev-9.21.1.3-h081b9d2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcudss-0.7.1.4-h58dd1b1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcufft-11.4.1.4-hecca717_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcufile-1.14.1.1-hbc026e6_1.conda
@@ -559,7 +555,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-1.3.1-hb9d3cd8_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-ng-2.3.2-h54a6638_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
-      - pypi: ./
+      - conda: .
   vllm:
     channels:
     - url: https://srgconda.bj.bcebos.com/
@@ -1144,11 +1140,11 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-ng-2.3.3-hceb46e0_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
+      - conda: .
       - conda: external/vllm-build
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/61/26/c7aea197f1719f31d0dd686eb4475982fe9efd7668ce259cb52b62c676b6/model_hosting_container_standards-0.1.15-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0e/65/5e726c372da8a5e35022a94388b12252710aad0c2351699c3d76ae8dba78/supervisor-4.3.0-py2.py3-none-any.whl
-      - pypi: ./
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
   build_number: 7
@@ -2795,21 +2791,6 @@ packages:
   purls: []
   size: 21578
   timestamp: 1746134436166
-- conda: https://srgconda.bj.bcebos.com/linux-64/cudnn-9.13.1.26-hbcb9cd8_0.conda
-  sha256: e7fee0538f05969ab3b33ac93d892ab777c8ce1a34b1ffd207aa339b82e18b49
-  md5: 7ebbea86a820fdc69ffa044b7c9729cb
-  depends:
-  - __glibc >=2.28,<3.0.a0
-  - cuda-version >=12,<13.0a0
-  - libcudnn-dev 9.13.1.26 h58dd1b1_0
-  - libgcc >=14
-  - libstdcxx >=14
-  constrains:
-  - cudnn-jit <0a
-  license: LicenseRef-cuDNN-Software-License-Agreement
-  purls: []
-  size: 19353
-  timestamp: 1759247527005
 - conda: https://srgconda.bj.bcebos.com/linux-64/cudnn-9.21.1.3-h152cecb_0.conda
   sha256: 0a2cae47610be773244620d3258964fe6455e351bf696d237c6424f78fbad8a5
   md5: 1f2b3170c23f5b2e3d4ef5f2b2bb3377
@@ -3181,10 +3162,24 @@ packages:
   - pkg:pypi/etcdpy?source=hash-mapping
   size: 38479
   timestamp: 1735487073862
-- pypi: ./
+- conda: .
   name: etha
-  version: 0.0.1
-  sha256: ec5cf567ab85d5a2a31c80ccf81925ce8f41afb550fc7a733749a6eb1a49a527
+  version: 0.1.0
+  build: pyh4616a5c_0
+  subdir: noarch
+  variants:
+    target_platform: noarch
+  depends:
+  - python 3.12.*
+  - python *
+  - pytorch
+  - python-lmdb
+  - msgspec
+  - universal-pathlib
+  - posix_ipc
+  - etcdpy
+  - sortedcontainers
+  license: Apache-2.0
 - conda: https://conda.anaconda.org/conda-forge/noarch/eval_type_backport-0.3.1-pyha770c72_0.conda
   sha256: 454f03ac61295b2bca852913af54248cfb9c1a9d2e057f3b5574d552255cda61
   md5: 9cb8eae2a1f3e4a2cb8c53559abf6d75
@@ -5476,23 +5471,6 @@ packages:
   purls: []
   size: 94143
   timestamp: 1778772159259
-- conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-9.13.1.26-hf7e9902_0.conda
-  sha256: 490d4d2136dda223b71e391363810aa9bb542d0d4a22270901df344090d0e394
-  md5: 9cd33afe990aff3302820edb37fad8d4
-  depends:
-  - __glibc >=2.28,<3.0.a0
-  - cuda-nvrtc
-  - cuda-version >=12,<13.0a0
-  - libcublas
-  - libgcc >=14
-  - libstdcxx >=14
-  - libzlib >=1.3.1,<2.0a0
-  constrains:
-  - libcudnn-jit <0a
-  license: LicenseRef-cuDNN-Software-License-Agreement
-  purls: []
-  size: 447009909
-  timestamp: 1759247115298
 - conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-9.21.1.3-hb0f4dca_0.conda
   sha256: 1c79dfd2bda98713e66ae962a4bf090974c3ec7cce487ee2d2205b42952e0207
   md5: a8dda5cb2cbade0e7458e8bff31d7584
@@ -5500,21 +5478,6 @@ packages:
   - cuda-version >=12,<13.0a0
   size: 540742555
   timestamp: 1777521131315
-- conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-dev-9.13.1.26-h58dd1b1_0.conda
-  sha256: af7c9b773738dfbb1d2d0354c9459a95a0e77e53380532a8486139764294a171
-  md5: f048ce39203cfab52eba53f35c3228c0
-  depends:
-  - __glibc >=2.28,<3.0.a0
-  - cuda-version >=12,<13.0a0
-  - libcudnn 9.13.1.26 hf7e9902_0
-  - libgcc >=14
-  - libstdcxx >=14
-  constrains:
-  - libcudnn-jit-dev <0a
-  license: LicenseRef-cuDNN-Software-License-Agreement
-  purls: []
-  size: 44048
-  timestamp: 1759247497317
 - conda: https://srgconda.bj.bcebos.com/linux-64/libcudnn-dev-9.21.1.3-h081b9d2_0.conda
   sha256: aba284fc7ed5e6151a640fb2c20c6d696521b8561654525834efdd3f9b560ca0
   md5: 762dbe18de2a37897cac6d49920b4556
