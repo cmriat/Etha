@@ -68,7 +68,7 @@ def test_distributed_model_transfer_end_to_end(training_dtype: str, inference_dt
         "torchrun",
         "--nproc_per_node=8",
         "--master-port=39500",
-        "prototyping/agent.py",
+        "tests/distributed_model_transfer/agent.py",
     ]
     agent_proc = _spawn_process(agent_cmd, base_env, project_root, agent_log_path)
     processes.append(agent_proc)
@@ -84,7 +84,7 @@ def test_distributed_model_transfer_end_to_end(training_dtype: str, inference_dt
         "torchrun",
         "--nproc_per_node=4",
         "--master-port=39501",
-        "prototyping/distributed_model_transfer/train.py",
+        "tests/distributed_model_transfer/train.py",
     ]
     train_proc = _spawn_process(training_cmd, training_env, project_root, train_log_path)
     processes.append(train_proc)
@@ -98,7 +98,7 @@ def test_distributed_model_transfer_end_to_end(training_dtype: str, inference_dt
         "torchrun",
         "--nproc_per_node=4",
         "--master-port=39502",
-        "prototyping/distributed_model_transfer/inference.py",
+        "tests/distributed_model_transfer/inference.py",
     ]
     inference_proc = _spawn_process(inference_cmd, inference_env, project_root, inference_log_path)
     processes.append(inference_proc)
