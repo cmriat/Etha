@@ -121,9 +121,10 @@ is ~60 GB CPU per rank. Instead, each rank:
      ships `Qwen3MoeExperts` with grouped 3D tensors natively
      (`gate_up_proj (E, 2I, H)` and `down_proj (E, H, I)`).
   2. Wraps each parameter as a DTensor on one of two meshes:
-     - `att_mesh = (dp_replicate, dp_shard)` for dense weights, all
-       `Replicate` — attn/dense are fully replicated across the trainer
-       ranks.
+     - `att_mesh = (dp_replicate, dp_shard)` for dense weights — column-
+       parallel projections (`qkv`, `embed`, `lm_head`) use `(Replicate,
+       Shard(0))`, row-parallel `o_proj` uses `(Replicate, Shard(1))`,
+       scalars (router, layernorms) use `(Replicate, Replicate)`.
      - `moe_mesh = (dp_replicate, dp_shard, ep)` for grouped MoE — both
        `dp_shard` and `ep` `Shard(0)` the E axis, so each rank holds a
        slice of experts whose per-expert shape stays intact (`(I, H)` /
@@ -136,19 +137,28 @@ is ~60 GB CPU per rank. Instead, each rank:
      weights; the writes go straight into the grouped tensors underneath.
      (Same trick susser-tod uses for `convert_hf_to_dcp`.)
 
+vLLM boots with `--load-format dummy` — its weights start as random
+junk, and the very first sync round is what makes the model useful.
 With `CONFIG.trainer_perturb_scale = 1.0` (default), the trainer pushes
-the unmodified weights every round — chat output should stay coherent
-Qwen3 across rounds. Set it to `0.99` to corrupt the weights gradually
-and watch the output degrade, as an end-to-end sanity check that bytes
-actually moved.
+the unmodified disk weights every round, and chat output stays coherent
+Qwen3 from `v=1` onward. Set it to `0.99` to corrupt the weights
+gradually and watch the output degrade — an end-to-end sanity check
+that bytes actually moved.
+
+vLLM's FusedMoE `w13_weight` is `[gate; up]` for TRITON/AITER but
+`[up; gate]` for FlashInfer CUTLASS/TRT-LLM (they swap it in
+`process_weights_after_loading`). The vLLM side reads
+`layer.quant_method.unquantized_backend` and registers `gate_proj` /
+`up_proj` views accordingly, so the HF-named tensors land in the
+kernel's expected slots regardless of which backend got picked.
 
 ## What TensorBus features this exercises
 
 - **Mismatched-mesh resharding.** Trainer and vLLM independently declare
-  DTensor placements on different mesh shapes — trainer's
-  `(dp_replicate, dp_shard)` all-`Replicate` attn vs. vLLM's `(DP, TP)`;
-  trainer's `(dp_replicate, dp_shard, ep)` `Shard(0)` MoE vs. vLLM's
-  1-D `(EP,)`. Etha turns each side's placements into a many-to-many
+  DTensor placements on different mesh shapes — trainer's 2D
+  `(dp_replicate, dp_shard)` attn vs. vLLM's 2D `(DP, TP)`; trainer's
+  3D `(dp_replicate, dp_shard, ep)` `Shard(0)` MoE vs. vLLM's 1D `(EP,)`
+  `Shard(0)`. Etha turns each side's placements into a many-to-many
   send/recv plan and reshards across the boundary in a single round.
 - **N pairs over one agent group.** A single NCCL world (`world_size =
   trainer + vllm`) carries 8 named handler pairs (`embed_tokens`,
@@ -161,10 +171,17 @@ actually moved.
   rendezvous beyond a transfer signal.
 - **Zero-copy through views.** Both sides register `q_proj` / `k_proj` /
   `v_proj` as slice *views* into the fused `qkv_proj`, and `gate_proj` /
-  `up_proj` as views into the fused `w13_weight` (vLLM's FlashInfer
-  CUTLASS MoE rearranges to `[up; gate]`, so vLLM's view uses swapped
-  halves). NCCL writes straight into the kernel's expected slots — no
-  staging buffers, no post-recv copies.
+  `up_proj` as views into the fused `w13_weight`. When vLLM picks
+  FlashInfer CUTLASS/TRT-LLM (which rearranges `w13` to `[up; gate]`
+  post-load), the vLLM side flips the halves so the named views still
+  point at the right data. NCCL writes straight into the kernel's
+  expected slots — no staging buffers, no post-recv copies.
+- **Dtype conversion at the boundary.** The trainer holds `float32`
+  master weights (`AutoModelForCausalLM(..., torch_dtype=torch.float32)`),
+  vLLM runs `bfloat16`. Each side declares its own dtype on
+  `register_tensors`; Etha downcasts on the way out so trainer-side
+  optimizer math stays in fp32 without forcing a manual cast in user
+  code.
 
 ## Beyond weight transfer
 
