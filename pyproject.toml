@@ -1,6 +1,6 @@
 [project]
 name = "etha"
-version = "0.0.1"
+version = "0.1.0"
 description = "etha"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

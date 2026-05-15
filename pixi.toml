@@ -9,21 +9,11 @@ platforms = ["linux-64"]
 version = "0.1.0"
 preview = ["pixi-build"]
 
-[tasks.submit]
-cmd = "kjobctl create slurm --first-node-ip -- --chdir $PIXI_PROJECT_ROOT --output $PIXI_PROJECT_ROOT/jobs-%j-%N.out --error $PIXI_PROJECT_ROOT/jobs-%j-%N.err {{ script }}"
-args = ["script"]
-
 [system-requirements]
 cuda = "12.9"
 
 [dependencies]
-pytorch = "*"
-python-lmdb = "*"
-msgspec = "*"
-universal-pathlib = "*"
-posix_ipc = "*"
-etcdpy = "*"
-sortedcontainers = "*"
+etha = { path = "." }
 
 [feature.dev.dependencies]
 transformers = "*"
@@ -41,6 +31,7 @@ tyro = ">=0.9.35,<0.10"
 
 [feature.dev.tasks]
 test = "pytest tests"
+submit = { cmd = "kjobctl create slurm --first-node-ip -- --chdir $PIXI_PROJECT_ROOT --output $PIXI_PROJECT_ROOT/jobs-%j-%N.out --error $PIXI_PROJECT_ROOT/jobs-%j-%N.err {{ script }}", args = ["script"] }
 
 [feature.vllm.dependencies]
 vllm = { path = "external/vllm-build" }
@@ -57,9 +48,27 @@ VLLM_ALLOW_INSECURE_SERIALIZATION = "1"
 [feature.vllm.tasks]
 vllm_weight_sync = "python examples/vllm_weight_sync/launch.py"
 
-[pypi-dependencies]
-etha = { path = ".", editable = true }
-
 [environments]
 dev = { features = ["dev"], solve-group = "default" }
 vllm = { features = ["dev", "vllm"], solve-group = "vllm" }
+
+[package]
+name = "etha"
+version = "0.1.0"
+
+[package.build]
+backend = { name = "pixi-build-python", version = "*" }
+
+[package.host-dependencies]
+python = "3.12.*"
+hatchling = "*"
+
+[package.run-dependencies]
+python = "3.12.*"
+pytorch = "*"
+python-lmdb = "*"
+msgspec = "*"
+universal-pathlib = "*"
+posix_ipc = "*"
+etcdpy = "*"
+sortedcontainers = "*"
