@@ -1,3 +1,0 @@
-[submodule "external/vllm"]
-	path = external/vllm
-	url = https://github.com/vllm-project/vllm.git

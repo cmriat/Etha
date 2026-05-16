@@ -1,22 +1,3 @@
-[project]
-name = "etha"
-version = "0.1.0"
-description = "etha"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
-
-[build-system]
-build-backend = "hatchling.build"
-requires = ["hatchling"]
-
-[tool.hatch.build.targets.sdist]
-exclude = [
-  "/.github",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/etha"]
-
 [tool.ruff]
 line-length = 120
 output-format = "grouped"

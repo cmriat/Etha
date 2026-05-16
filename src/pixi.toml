@@ -1,0 +1,20 @@
+[package]
+name = "etha"
+version = "0.1.0"
+
+[package.build]
+backend = { name = "pixi-build-python", version = "*" }
+
+[package.host-dependencies]
+python = "3.12.*"
+hatchling = "*"
+
+[package.run-dependencies]
+python = "3.12.*"
+pytorch = "*"
+python-lmdb = "*"
+msgspec = "*"
+universal-pathlib = "*"
+posix_ipc = "*"
+etcdpy = "*"
+sortedcontainers = "*"

@@ -13,10 +13,9 @@ preview = ["pixi-build"]
 cuda = "12.9"
 
 [dependencies]
-etha = { path = "." }
+etha = { path = "src" }
 
 [feature.dev.dependencies]
-transformers = "*"
 matplotlib = "*"
 seaborn = "*"
 pandas = "*"
@@ -34,16 +33,10 @@ test = "pytest tests"
 submit = { cmd = "kjobctl create slurm --first-node-ip -- --chdir $PIXI_PROJECT_ROOT --output $PIXI_PROJECT_ROOT/jobs-%j-%N.out --error $PIXI_PROJECT_ROOT/jobs-%j-%N.err {{ script }}", args = ["script"] }
 
 [feature.vllm.dependencies]
-vllm = { path = "external/vllm-build" }
+vllm = { path = "recipes/vllm" }
 
 [feature.vllm.pypi-dependencies]
 model-hosting-container-standards = ">=0.1.13, <1"
-
-[feature.vllm.activation.env]
-CUDA_HOME = "$CONDA_PREFIX"
-LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/stubs"
-CPATH = "$CONDA_PREFIX/targets/x86_64-linux/include"
-VLLM_ALLOW_INSECURE_SERIALIZATION = "1"
 
 [feature.vllm.tasks]
 vllm_weight_sync = "python examples/vllm_weight_sync/launch.py"
@@ -51,24 +44,3 @@ vllm_weight_sync = "python examples/vllm_weight_sync/launch.py"
 [environments]
 dev = { features = ["dev"], solve-group = "default" }
 vllm = { features = ["dev", "vllm"], solve-group = "vllm" }
-
-[package]
-name = "etha"
-version = "0.1.0"
-
-[package.build]
-backend = { name = "pixi-build-python", version = "*" }
-
-[package.host-dependencies]
-python = "3.12.*"
-hatchling = "*"
-
-[package.run-dependencies]
-python = "3.12.*"
-pytorch = "*"
-python-lmdb = "*"
-msgspec = "*"
-universal-pathlib = "*"
-posix_ipc = "*"
-etcdpy = "*"
-sortedcontainers = "*"

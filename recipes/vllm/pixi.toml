@@ -1,0 +1,6 @@
+[package]
+name = "vllm"
+version = "0.20.2"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*", channels = ["conda-forge"] }
