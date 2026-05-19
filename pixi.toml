@@ -13,7 +13,7 @@ preview = ["pixi-build"]
 cuda = "12.9"
 
 [dependencies]
-etha = { path = "src" }
+etha = { path = "." }
 
 [feature.dev.dependencies]
 matplotlib = "*"
@@ -44,3 +44,24 @@ vllm_weight_sync = "python examples/vllm_weight_sync/launch.py"
 [environments]
 dev = { features = ["dev"], solve-group = "default" }
 vllm = { features = ["dev", "vllm"], solve-group = "vllm" }
+
+[package]
+name = "etha"
+version = "0.1.0"
+
+[package.build]
+backend = { name = "pixi-build-python", version = "*" }
+
+[package.host-dependencies]
+python = "3.12.*"
+hatchling = "*"
+
+[package.run-dependencies]
+python = "3.12.*"
+pytorch = "*"
+python-lmdb = "*"
+msgspec = "*"
+universal-pathlib = "*"
+posix_ipc = "*"
+etcdpy = "*"
+sortedcontainers = "*"
