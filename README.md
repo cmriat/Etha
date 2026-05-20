@@ -1,30 +1,37 @@
 # Etha
 
-> M-to-N tensor transfer between PyTorch process groups.
+> M-to-N DTensor redistribute across PyTorch process groups — any (mesh, placement) → any (mesh, placement).
 > Named after the [Sub-Etha](https://hitchhikers.fandom.com/wiki/Sub-Etha).
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/github/actions/workflow/status/cmriat/Etha/docs.yml?branch=main&label=docs)](https://cmriat.github.io/Etha/)
 
-Etha is a tensor transfer library for PyTorch distributed jobs that need to
-move tensors between two independently-launched process groups — for example,
-shipping model weights from a training cluster to an inference cluster in a
-disaggregated RL setup.
+Etha redistributes a tensor described as `(DeviceMesh, Placement)` on one
+PyTorch process group into a different `(DeviceMesh, Placement)` on a second,
+independently-launched process group — the same redistribution `DTensor` does
+in-process, generalized to two unrelated jobs.
 
-It plans the cross-process-group **resharding** (`DeviceMesh` + `Placement`
-on each side) once per pair, then specializes that plan per batch into
-NCCL send / recv ops bucketed for throughput.
+The canonical use case: shipping model weights from a training cluster to an
+inference cluster in a disaggregated RL setup, where the two sides were
+launched separately and run different parallelism configurations.
 
-Two compounding properties keep the data path tight:
+Four properties define the surface:
 
-- **Zero-copy** worker → agent handoff via CUDA IPC handles. The agent
-  runs NCCL send / recv directly against the worker's registered tensor,
-  with no host roundtrip and no staging buffer on either side.
-- **Zero-duplicate** wire traffic from the M-to-N M2M plan. Each source
-  rank sends only the shards it owns straight to the target ranks that
-  need them — no intermediate rank ever materializes a full copy of the
-  tensor. (A naive gather-then-broadcast baseline, by contrast,
-  reconstitutes the whole tensor on every rank before redistributing.)
+- **PyTorch-native.** Source and target layouts are PyTorch's own
+  `DeviceMesh` + `Placement` — the same primitives `DTensor` uses in-process.
+  No Etha-specific tensor wrapper, no parallel layout DSL to learn.
+- **Zero-copy.** Worker → agent handoff is via CUDA IPC handles. The agent
+  runs NCCL send / recv directly against the worker's registered tensor —
+  no host roundtrip, no staging buffer on either side.
+- **M-to-N, zero-duplicate.** Source ranks send the shards they own
+  directly to the target ranks that need them — no intermediate rank
+  ever materializes a full copy of the tensor. (A naive
+  gather-then-broadcast baseline, by contrast, reconstitutes the whole
+  tensor on every rank before redistributing.)
+- **Low-intrusion.** The host ↔ agent split lets Etha drop into existing
+  training / inference code as a library — you instantiate a
+  `TensorBusClient` and hand it tensors. No model wrappers, no
+  restructuring of your distributed init, no framework to adopt.
 
 ## Architecture
 
