@@ -1,15 +1,15 @@
 # Etha
 
-> M-to-N tensor transfer between PyTorch process groups.
+> Cross-process-group DTensor redistribute — any (mesh, placement) → any (mesh, placement).
 
-Etha is a tensor transfer library for PyTorch distributed jobs that need to
-move tensors between two independently-launched process groups — for example,
-shipping model weights from a training cluster to an inference cluster in a
-disaggregated RL setup.
+Etha redistributes a tensor described as `(DeviceMesh, Placement)` on one
+PyTorch process group into a different `(DeviceMesh, Placement)` on a second,
+independently-launched process group — the same redistribution `DTensor` does
+in-process, generalized to two unrelated jobs.
 
-It plans the cross-process-group **resharding** (`DeviceMesh` + `Placement`
-on each side) once per pair, then specializes that plan per batch into
-NCCL send / recv ops bucketed for throughput.
+The canonical use case: shipping model weights from a training cluster to an
+inference cluster in a disaggregated RL setup, where the two sides were
+launched separately and run different parallelism configurations.
 
 ```{toctree}
 :caption: Design
