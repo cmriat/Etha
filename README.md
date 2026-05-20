@@ -4,6 +4,7 @@
 > Named after the [Sub-Etha](https://hitchhikers.fandom.com/wiki/Sub-Etha).
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/github/actions/workflow/status/cmriat/Etha/docs.yml?branch=main&label=docs)](https://cmriat.github.io/Etha/)
 
 Etha is a tensor transfer library for PyTorch distributed jobs that need to
 move tensors between two independently-launched process groups — for example,
