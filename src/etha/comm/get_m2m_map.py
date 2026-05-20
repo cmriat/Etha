@@ -8,7 +8,7 @@ from collections import defaultdict
 import torch
 import torch.distributed as dist
 from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
-from torch.distributed.tensor.placement_types import Placement
+from torch.distributed.tensor.placement_types import Partial, Placement
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,25 @@ def get_m2m_map(
     group: dist.ProcessGroup,
     device: str = "cpu",
 ) -> tuple[dict[int, dict[tuple, list[tuple[int, tuple]]]], list[int], list[int]]:
-    """Get P2P communication map for tensor redistribution."""
+    """Get P2P communication map for tensor redistribution.
+
+    Only ``Shard`` and ``Replicate`` placements are supported. ``Partial`` is
+    rejected because the map is built by encoding ``rank`` + ``coord`` into a
+    middle tensor and shipping it via ``DTensor.full_tensor()``; for ``Partial``
+    that triggers an all-reduce which sums the encoded values across ranks and
+    corrupts the map.
+
+    Raises:
+        NotImplementedError: If any of ``source_placements`` or
+            ``target_placements`` contains a ``Partial``.
+    """
+    for placements, side in ((source_placements, "source"), (target_placements, "target")):
+        if any(isinstance(p, Partial) for p in placements):
+            raise NotImplementedError(
+                f"Partial placement is not supported (found in {side}_placements={placements}). "
+                "Etha currently supports only Shard and Replicate; redistribute Partial to "
+                "Replicate or Shard on the source mesh before handing the DTensor to Etha."
+            )
     rank = dist.get_rank()
     target_mesh_ranks = target_mesh.mesh.flatten().tolist()
     source_mesh_ranks = source_mesh.mesh.flatten().tolist()
