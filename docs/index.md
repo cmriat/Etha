@@ -1,6 +1,6 @@
 # Etha
 
-> Cross-process-group DTensor redistribute — any (mesh, placement) → any (mesh, placement).
+> M-to-N DTensor redistribute across PyTorch process groups — any (mesh, placement) → any (mesh, placement).
 
 Etha redistributes a tensor described as `(DeviceMesh, Placement)` on one
 PyTorch process group into a different `(DeviceMesh, Placement)` on a second,

@@ -1,6 +1,6 @@
 # Etha
 
-> Cross-process-group DTensor redistribute — any (mesh, placement) → any (mesh, placement).
+> M-to-N DTensor redistribute across PyTorch process groups — any (mesh, placement) → any (mesh, placement).
 > Named after the [Sub-Etha](https://hitchhikers.fandom.com/wiki/Sub-Etha).
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -23,11 +23,11 @@ Four properties define the surface:
 - **Zero-copy.** Worker → agent handoff is via CUDA IPC handles. The agent
   runs NCCL send / recv directly against the worker's registered tensor —
   no host roundtrip, no staging buffer on either side.
-- **Zero-duplicate.** The M-to-N M2M plan ships each shard exactly once
-  from its owner to the ranks that need it; no intermediate rank ever
-  materializes a full copy of the tensor. (A naive gather-then-broadcast
-  baseline, by contrast, reconstitutes the whole tensor on every rank
-  before redistributing.)
+- **M-to-N, zero-duplicate.** Source ranks send the shards they own
+  directly to the target ranks that need them — no intermediate rank
+  ever materializes a full copy of the tensor. (A naive
+  gather-then-broadcast baseline, by contrast, reconstitutes the whole
+  tensor on every rank before redistributing.)
 - **Low-intrusion.** The host ↔ agent split lets Etha drop into existing
   training / inference code as a library — you instantiate a
   `TensorBusClient` and hand it tensors. No model wrappers, no
