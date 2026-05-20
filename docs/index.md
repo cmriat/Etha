@@ -11,6 +11,12 @@ The canonical use case: shipping model weights from a training cluster to an
 inference cluster in a disaggregated RL setup, where the two sides were
 launched separately and run different parallelism configurations.
 
+:::{note}
+Supported placements are currently `Shard` and `Replicate`. `Partial` is
+rejected with `NotImplementedError` — redistribute it to `Replicate` or
+`Shard` on the source mesh before handing the DTensor to Etha.
+:::
+
 ```{toctree}
 :caption: Design
 :maxdepth: 2
