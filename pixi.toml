@@ -13,6 +13,8 @@ preview = ["pixi-build"]
 cuda = "12.9"
 
 [dependencies]
+
+[feature.runtime.dependencies]
 etha = { path = "." }
 
 [feature.dev.dependencies]
@@ -41,9 +43,27 @@ model-hosting-container-standards = ">=0.1.13, <1"
 [feature.vllm.tasks]
 vllm_weight_sync = "python examples/vllm_weight_sync/launch.py"
 
+[feature.docs.dependencies]
+python = "3.12.*"
+sphinx = ">=7"
+myst-parser = "*"
+sphinx-autoapi = "*"
+sphinx-book-theme = "*"
+sphinx-design = "*"
+sphinx-copybutton = "*"
+sphinx-autobuild = "*"
+sphinxcontrib-mermaid = "*"
+linkify-it-py = "*"
+
+[feature.docs.tasks]
+docs = "sphinx-build -b html docs docs/_build/html"
+docs-serve = "sphinx-autobuild docs docs/_build/html --open-browser"
+docs-clean = "rm -rf docs/_build"
+
 [environments]
-dev = { features = ["dev"], solve-group = "default" }
-vllm = { features = ["dev", "vllm"], solve-group = "vllm" }
+dev = { features = ["runtime", "dev"], solve-group = "default" }
+vllm = { features = ["runtime", "dev", "vllm"], solve-group = "vllm" }
+docs = { features = ["docs"], solve-group = "docs" }
 
 [package]
 name = "etha"

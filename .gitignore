@@ -21,3 +21,5 @@ dbs
 logs
 
 trace_processor
+
+docs/_build/
