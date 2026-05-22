@@ -1,13 +1,22 @@
 """Intermediate Representation for tensor transfer operations."""
 
 import logging
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 
 import torch
+import torch.distributed as dist
 
 from .transfer import Transferable, TransferType
 
 logger = logging.getLogger(__name__)
+
+_REDUCE_OP_MAP = {
+    "sum": dist.ReduceOp.SUM,
+    "avg": dist.ReduceOp.AVG,
+    "max": dist.ReduceOp.MAX,
+    "min": dist.ReduceOp.MIN,
+    "product": dist.ReduceOp.PRODUCT,
+}
 
 
 @dataclass(slots=True, kw_only=True)
@@ -21,6 +30,10 @@ class Chunk(Transferable):
     src_idx: tuple  # Multi-dimensional index in source tensor
     dst_idx: tuple | None = None  # Multi-dimensional index in target tensor (recv/self-copy only)
     src_slice_tuples: tuple[slice, ...] | None = None  # Source slice (self-copy only)
+    # NCCL sub-groups + reduce_op for collapsing source Partial to Replicate
+    # before send. Routing emits a chunk per (member, cell) so every member
+    # reaches the collective; SHADOW chunks participate without shipping.
+    source_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = field(default=None)
 
     def __post_init__(self) -> None:
         if self.transfer_dtype is None:
@@ -36,10 +49,13 @@ class Chunk(Transferable):
         )
 
     def prepare(self, contiguous: bool = True) -> None:
-        """Prepare buffer from tensor slice.
+        """Prepare source/target buffer.
 
-        Args:
-            contiguous: Whether to make buffer contiguous (default True)
+        Source side performs (in order): slice → in-place all-reduce on
+        Partial sub-groups (in source dtype) → cast to ``transfer_dtype``.
+        Reducing before the cast matches DTensor ``Partial → Replicate``
+        semantics; running the all-reduce in the (possibly lower-precision)
+        wire dtype would change numerical results.
         """
         if self.transfer_type == TransferType.SELF_COPY:
             buffer = self.tensor[self.src_slice_tuples]
@@ -47,9 +63,20 @@ class Chunk(Transferable):
             buffer = self.tensor[self.slice_tuples]
             if contiguous:
                 buffer = buffer.contiguous()
-        # Source: convert to transfer_dtype if specified and different
-        if self.is_source and self.transfer_dtype and self.transfer_dtype != buffer.dtype:
-            buffer = buffer.to(self.transfer_dtype)
+
+        if self.is_source and self.transfer_type != TransferType.SELF_COPY:
+            if self.source_partial_groups:
+                # all_reduce is in-place; ensure we own the storage so the
+                # source tensor isn't mutated. Storage-level alias check —
+                # ``tensor.data_ptr()`` accounts for ``storage_offset`` and
+                # would miss non-zero-offset slices that still alias.
+                if buffer.untyped_storage().data_ptr() == self.tensor.untyped_storage().data_ptr():
+                    buffer = buffer.contiguous().clone()
+                for group, op_str in self.source_partial_groups:
+                    dist.all_reduce(buffer, op=_REDUCE_OP_MAP[op_str], group=group)
+            if self.transfer_dtype and self.transfer_dtype != buffer.dtype:
+                buffer = buffer.to(self.transfer_dtype)
+
         self.buffer = buffer
 
     def finalize(self) -> None:
@@ -67,8 +94,21 @@ class Chunk(Transferable):
 
     @property
     def bucket_key(self) -> tuple:
-        """Return bucket grouping key (src_rank, dst_ranks)."""
-        return (self.src_rank, self.dst_ranks)
+        """Return bucket grouping key.
+
+        ``cell_key`` is added for SHADOW Partial chunks only — they all share
+        ``dst_ranks=()`` and would otherwise bundle across cells, making the
+        bucket's all_reduce sequence per-rank-specific and out of sync with
+        peer ranks whose matching cells live in separate buckets. PRIMARY
+        chunks already differ by ``dst_ranks`` across cells.
+        """
+        partial_sig: tuple = ()
+        cell_key: tuple = ()
+        if self.source_partial_groups:
+            partial_sig = tuple((id(g), op) for g, op in self.source_partial_groups)
+            if not self.dst_ranks:
+                cell_key = self.src_idx
+        return (self.src_rank, self.dst_ranks, partial_sig, cell_key)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -96,8 +136,12 @@ class Bucket(Transferable):
         return f"Bucket({kind}, key={self.key} entries_len={len(self.entries)} src_rank={self.src_rank}→dst_ranks={self.dst_ranks})"
 
     def prepare(self) -> None:
-        """Prepare buffer for communication."""
-        # Single entry fast path
+        """Prepare buffer for communication.
+
+        Source-side Partial reduce and dtype cast both live inside
+        ``Chunk.prepare``; this method only assembles entries into the
+        bucket buffer.
+        """
         if len(self.entries) == 1:
             chunk = self.entries[0].chunk
             chunk.prepare()
@@ -106,7 +150,6 @@ class Bucket(Transferable):
                 chunk.buffer = None
             return
 
-        # Multi-entry: allocate bucket buffer
         self.buffer = torch.empty(self.total_bytes, dtype=torch.uint8, device=self.device)
         needs_copy = self.is_source or self.transfer_type == TransferType.SELF_COPY
 

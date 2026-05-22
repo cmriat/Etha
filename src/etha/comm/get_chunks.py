@@ -1,6 +1,7 @@
 """Get chunks from m2m map."""
 
 import torch
+import torch.distributed as dist
 
 from .ir import Chunk, TransferType
 from .utils import (
@@ -28,6 +29,7 @@ def map_to_chunk_ops(
     source_tensor: torch.Tensor | None = None,
     target_tensor: torch.Tensor | None = None,
     transfer_dtype: torch.dtype | None = None,
+    source_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = None,
 ) -> list[Chunk]:
     if not m2m_map:
         return []
@@ -56,7 +58,10 @@ def map_to_chunk_ops(
     chunks: list[Chunk] = []
     for src_rank, src_map in m2m_map.items():
         for src_idx, dst_list in src_map.items():
-            if len(dst_list) > 1:
+            if not dst_list:
+                # Partial sub-group member with no ship task — joins reduce only.
+                transfer_type = TransferType.SHADOW
+            elif len(dst_list) > 1:
                 transfer_type = TransferType.BROADCAST
             else:
                 transfer_type = TransferType.P2P
@@ -79,6 +84,7 @@ def map_to_chunk_ops(
                         slice_tuples=src_slice_tuples,
                         tensor=source_tensor,
                         transfer_dtype=transfer_dtype,
+                        source_partial_groups=source_partial_groups,
                     )
                 )
             for dst_rank, dst_idx in dst_list:
