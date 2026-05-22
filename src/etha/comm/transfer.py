@@ -15,6 +15,10 @@ class TransferType(Enum):
     SELF_COPY = "self_copy"  # Local copy within same rank
     P2P = "p2p"
     BROADCAST = "broadcast"
+    # Reduce-only chunks: a source rank participates in the source-Partial
+    # all-reduce (collective; every sub-group member must call) but isn't the
+    # ship-primary for this logical cell. After reduce, the buffer is discarded.
+    SHADOW = "shadow"
 
 
 def _execute_p2p(
@@ -56,10 +60,12 @@ class Transferable:
         """Execute transfer operation.
 
         Returns:
-            Work handle for async operations, None for SELF_COPY.
+            Work handle for async operations, None for SELF_COPY / SHADOW.
         """
         match self.transfer_type:
             case TransferType.SELF_COPY:
+                return None
+            case TransferType.SHADOW:
                 return None
             case TransferType.P2P:
                 return _execute_p2p(self.buffer, self.is_source, self.src_rank, self.dst_ranks[0])

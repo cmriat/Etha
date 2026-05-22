@@ -61,7 +61,7 @@ def run_test_communication(
 
     # Generate chunk IR using new API
     # Step 1: Get M2M map
-    m2m_map, source_num_slicers, target_num_slicers = get_m2m_map(
+    m2m_map, source_num_slicers, target_num_slicers, _ = get_m2m_map(
         source_mesh=source_mesh,
         source_placements=source_specs,
         target_mesh=target_mesh,

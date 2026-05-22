@@ -60,7 +60,7 @@ def run_test_communication(
 
     # Test: Call get_m2m_map twice with reversed source/target to test for deadlock
     # Direction 1: A -> B
-    m2m_map_a_to_b, source_slicers_a, target_slicers_b = get_m2m_map(
+    m2m_map_a_to_b, source_slicers_a, target_slicers_b, _ = get_m2m_map(
         source_mesh=mesh_a,
         source_placements=specs,
         target_mesh=mesh_b,
@@ -70,7 +70,7 @@ def run_test_communication(
     )
 
     # Direction 2: B -> A (reversed to test deadlock)
-    m2m_map_b_to_a, source_slicers_b, target_slicers_a = get_m2m_map(
+    m2m_map_b_to_a, source_slicers_b, target_slicers_a, _ = get_m2m_map(
         source_mesh=mesh_b,
         source_placements=specs,
         target_mesh=mesh_a,

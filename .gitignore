@@ -23,3 +23,5 @@ logs
 trace_processor
 
 docs/_build/
+
+.claude/

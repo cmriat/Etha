@@ -33,9 +33,9 @@ Four properties define the surface:
   `TensorBusClient` and hand it tensors. No model wrappers, no
   restructuring of your distributed init, no framework to adopt.
 
-> **Supported placements:** `Shard` and `Replicate`. `Partial` is rejected
-> with `NotImplementedError` — redistribute it to `Replicate` or `Shard` on
-> the source mesh before handing the DTensor to Etha.
+> **Placements:** source supports `Shard` / `Replicate` / `Partial`
+> (collapsed to `Replicate` via a source-side all-reduce before send).
+> Target `Partial` is rejected.
 
 ## Architecture
 

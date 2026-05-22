@@ -19,7 +19,7 @@ import posix_ipc
 import torch.distributed as dist
 from upath import UPath
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor.placement_types import Placement
+from torch.distributed.tensor.placement_types import Partial, Placement
 
 from etha.comm import (
     chunk_comm,
@@ -31,6 +31,7 @@ from etha.comm import (
 from etha.comm.ir import Chunk
 from etha.kvstore import KVStore, create_store
 from etha.pg_utils import get_or_create_process_group
+from etha.comm.utils import enumerate_partial_subgroup_ranks
 
 from .utils import setup_cuda_rebuild_patch
 from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors
@@ -41,6 +42,33 @@ from .command_queue import CommandQueue
 logger = logging.getLogger(__name__)
 
 TIME_INTERVAL = 0.001  # 1ms
+
+
+def _create_partial_groups(
+    mesh_tensor: torch.Tensor,
+    partial_reductions: list[tuple[int, str]],
+    this_rank: int,
+    full_source_ranks: list[int],
+    full_source_group: dist.ProcessGroup,
+) -> list[tuple[dist.ProcessGroup, str]]:
+    """Create NCCL sub-groups for each Partial dim; return groups this rank belongs to.
+
+    ``dist.new_group`` is collective on WORLD, so every WORLD rank must call it in
+    the same order — non-members included. Reuses ``full_source_group`` when a
+    sub-group spans the entire source side (the common 1D-mesh-single-Partial case),
+    avoiding a redundant new_group bootstrap.
+    """
+    my_groups: list[tuple[dist.ProcessGroup, str]] = []
+    full_set = set(full_source_ranks)
+    for mesh_dim_idx, reduce_op in partial_reductions:
+        for sub_ranks in enumerate_partial_subgroup_ranks(mesh_tensor, mesh_dim_idx):
+            if set(sub_ranks) == full_set:
+                group = full_source_group
+            else:
+                group = get_or_create_process_group(sub_ranks)
+            if this_rank in sub_ranks:
+                my_groups.append((group, reduce_op))
+    return my_groups
 
 
 class TensorBusAgent:
@@ -267,6 +295,11 @@ class TensorBusAgent:
         # We use alphabetical order of role names as the tie-breaker
         local_is_first = local_name < remote_name
 
+        # Canonical (first, second) swap helper. Same on every rank, used to align
+        # paired-by-side data (mesh, placements, ranks, group) before collectives.
+        def _order(loc, rem):
+            return (loc, rem) if local_is_first else (rem, loc)
+
         if local_mesh_info and remote_mesh_info:
             # Get local mesh info (this process's mesh)
             local_mesh_shape, local_placements = local_mesh_info[0]
@@ -280,62 +313,71 @@ class TensorBusAgent:
             logger.info(f"Agent {self.rank}: Local mesh: {local_mesh_tensor} with placements: {local_placements}")
             logger.info(f"Agent {self.rank}: Remote mesh: {remote_mesh_tensor} with placements: {remote_placements}")
 
-            if local_is_first:
-                first_mesh = DeviceMesh("cpu", local_mesh_tensor)
-                second_mesh = DeviceMesh("cpu", remote_mesh_tensor)
-                first_placements = local_placements
-                second_placements = remote_placements
-            else:
-                first_mesh = DeviceMesh("cpu", remote_mesh_tensor)
-                second_mesh = DeviceMesh("cpu", local_mesh_tensor)
-                first_placements = remote_placements
-                second_placements = local_placements
+            first_mesh_tensor, second_mesh_tensor = _order(local_mesh_tensor, remote_mesh_tensor)
+            first_mesh = DeviceMesh("cpu", first_mesh_tensor)
+            second_mesh = DeviceMesh("cpu", second_mesh_tensor)
+            first_placements, second_placements = _order(local_placements, remote_placements)
             logger.info(f"Agent {self.rank}: Generating M2M maps for pair '{pair_name}'")
 
             # Generate M2M Maps (topology layer, shape-independent)
             # IMPORTANT: All ranks must call in the same order to avoid deadlock
-            # First call: first_mesh -> second_mesh
-            map_1, src_slicers_1, tgt_slicers_1 = get_m2m_map(
-                source_mesh=first_mesh,
-                source_placements=first_placements,
-                target_mesh=second_mesh,
-                target_placements=second_placements,
-                group=pair_group,
-                device="cpu",
-            )
-            # Second call: second_mesh -> first_mesh
-            map_2, src_slicers_2, tgt_slicers_2 = get_m2m_map(
-                source_mesh=second_mesh,
-                source_placements=second_placements,
-                target_mesh=first_mesh,
-                target_placements=first_placements,
-                group=pair_group,
-                device="cpu",
-            )
+            # in get_m2m_map's collective ops. Partial is supported only on
+            # *source* — skip the direction whose target side has Partial
+            # (cross-PG decomposition into Partial is undefined). Placement
+            # info is consistent across ranks via _collect_mesh_placement_info,
+            # so this branch is taken identically everywhere.
+            first_has_partial = any(isinstance(p, Partial) for p in first_placements)
+            second_has_partial = any(isinstance(p, Partial) for p in second_placements)
 
-            # Assign to send/recv based on which mesh is local
-            if local_is_first:
-                m2m_map_send = M2MMap(
-                    m2m_map=map_1,
-                    source_num_slicers=src_slicers_1,
-                    target_num_slicers=tgt_slicers_1,
-                )
-                m2m_map_recv = M2MMap(
-                    m2m_map=map_2,
-                    source_num_slicers=src_slicers_2,
-                    target_num_slicers=tgt_slicers_2,
+            map_1 = src_slicers_1 = tgt_slicers_1 = partial_red_1 = None
+            map_2 = src_slicers_2 = tgt_slicers_2 = partial_red_2 = None
+
+            # First call: first_mesh -> second_mesh (skip if second is Partial target)
+            if not second_has_partial:
+                map_1, src_slicers_1, tgt_slicers_1, partial_red_1 = get_m2m_map(
+                    source_mesh=first_mesh,
+                    source_placements=first_placements,
+                    target_mesh=second_mesh,
+                    target_placements=second_placements,
+                    group=pair_group,
+                    device="cpu",
                 )
             else:
-                m2m_map_send = M2MMap(
-                    m2m_map=map_2,
-                    source_num_slicers=src_slicers_2,
-                    target_num_slicers=tgt_slicers_2,
+                logger.info(
+                    f"Agent {self.rank}: Skipping first->second M2M map for pair '{pair_name}' "
+                    f"(second side has Partial placement; cross-PG Partial target is not supported)"
                 )
-                m2m_map_recv = M2MMap(
-                    m2m_map=map_1,
-                    source_num_slicers=src_slicers_1,
-                    target_num_slicers=tgt_slicers_1,
+
+            # Second call: second_mesh -> first_mesh (skip if first is Partial target)
+            if not first_has_partial:
+                map_2, src_slicers_2, tgt_slicers_2, partial_red_2 = get_m2m_map(
+                    source_mesh=second_mesh,
+                    source_placements=second_placements,
+                    target_mesh=first_mesh,
+                    target_placements=first_placements,
+                    group=pair_group,
+                    device="cpu",
                 )
+            else:
+                logger.info(
+                    f"Agent {self.rank}: Skipping second->first M2M map for pair '{pair_name}' "
+                    f"(first side has Partial placement; cross-PG Partial target is not supported)"
+                )
+
+            def _wrap(m, srcs, tgts, partial_red):
+                if m is None:
+                    return None
+                return M2MMap(
+                    m2m_map=m,
+                    source_num_slicers=srcs,
+                    target_num_slicers=tgts,
+                    source_partial_reductions=partial_red,
+                )
+
+            m2m_first_to_second = _wrap(map_1, src_slicers_1, tgt_slicers_1, partial_red_1)
+            m2m_second_to_first = _wrap(map_2, src_slicers_2, tgt_slicers_2, partial_red_2)
+            # Send is "local -> remote", so it's map_1 when local is first.
+            m2m_map_send, m2m_map_recv = _order(m2m_first_to_second, m2m_second_to_first)
             logger.info(
                 f"Agent {self.rank}: Generated P2P maps for pair '{pair_name}'. m2m_map_send: {m2m_map_send} m2m_map_recv: {m2m_map_recv}"
             )
@@ -349,13 +391,32 @@ class TensorBusAgent:
         else:
             logger.info(f"Agent {self.rank}: Skipping P2P map generation - missing or inconsistent mesh/placement info")
 
-        # Step 9: Create PairState
-        if local_is_first:
-            local_group = get_or_create_process_group(local_ranks)
-            get_or_create_process_group(remote_ranks)
-        else:
-            get_or_create_process_group(remote_ranks)
-            local_group = get_or_create_process_group(local_ranks)
+        # Step 9: Create local_group and remote_group (NCCL groups for send/recv side).
+        # Create in canonical (first, second) order so non-member ranks call new_group
+        # in the same sequence — new_group is WORLD-collective.
+        first_ranks, second_ranks = _order(local_ranks, remote_ranks)
+        first_group = get_or_create_process_group(first_ranks)
+        second_group = get_or_create_process_group(second_ranks)
+        local_group, remote_group = _order(first_group, second_group)
+
+        # Both directions' Partial sub-groups are created in deterministic order
+        # for the same reason; only the local-side groups are kept.
+        source_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = None
+        if local_mesh_info and remote_mesh_info:
+            mesh_1_partial_groups = _create_partial_groups(
+                first_mesh_tensor, partial_red_1, self.rank, first_ranks, first_group
+            )
+            mesh_2_partial_groups = _create_partial_groups(
+                second_mesh_tensor, partial_red_2, self.rank, second_ranks, second_group
+            )
+
+            local_partial_groups, _ = _order(mesh_1_partial_groups, mesh_2_partial_groups)
+            source_partial_groups = local_partial_groups or None
+            if source_partial_groups:
+                logger.info(
+                    f"Agent {self.rank}: Created {len(source_partial_groups)} source Partial sub-group(s) "
+                    f"for pair '{pair_name}'"
+                )
 
         state = PairState(
             pair_name=pair_name,
@@ -369,6 +430,7 @@ class TensorBusAgent:
             local_is_first=local_is_first,
             m2m_send=m2m_map_send,
             m2m_recv=m2m_map_recv,
+            source_partial_groups=source_partial_groups,
         )
         self.pairs[pair_name] = state
 
@@ -429,6 +491,15 @@ class TensorBusAgent:
                     f"Agent {self.rank}: Batch {batch_id}: Executing chunk-based transfer with {len(chunks)} chunks"
                 )
                 chunk_comm(chunks=chunks)
+            else:
+                # The other direction produced chunks, but this one is empty —
+                # init_pair skipped it because the target side has a Partial
+                # placement (cross-PG Partial target is unsupported).
+                raise RuntimeError(
+                    f"Batch {batch_id}: no {transfer_type} chunks. The pair's "
+                    f"{transfer_type} direction has a Partial target, which is "
+                    f"not supported. Partial is only valid as a source placement."
+                )
         else:
             # Fall back to simple send/recv without P2P optimization
             logger.info(f"Agent {self.rank}: Batch {batch_id}: Using simple send/recv transfer (no P2P map available)")
@@ -574,7 +645,7 @@ class TensorBusAgent:
                 batch_state.pair_target_dtypes[pair_name].append(target_dtype)
                 logger.debug(f"Agent {self.rank}: Batch {batch_id}: tensor {i} target dtype {target_dtype}")
 
-                if pair_state.m2m_send and pair_state.m2m_recv:
+                if pair_state.m2m_send or pair_state.m2m_recv:
                     logger.debug(
                         f"Agent {self.rank}: Batch {batch_id}: Generating chunks for tensor {i} with shape {tensor.shape}"
                     )
@@ -590,29 +661,30 @@ class TensorBusAgent:
                             f"(my={tensor.dtype}, remote={target_dtype})"
                         )
 
-                    # Generate send chunks for this tensor
-                    send_chunks = map_to_chunk_ops(
-                        m2m_map=pair_state.m2m_send.m2m_map,
-                        rank=self.rank,
-                        source_num_slicers=pair_state.m2m_send.source_num_slicers,
-                        target_num_slicers=pair_state.m2m_send.target_num_slicers,
-                        source_tensor=tensor,
-                        target_tensor=None,
-                        transfer_dtype=transfer_dtype,
-                    )
-                    pair_send_chunks.extend(send_chunks)
+                    if pair_state.m2m_send is not None:
+                        send_chunks = map_to_chunk_ops(
+                            m2m_map=pair_state.m2m_send.m2m_map,
+                            rank=self.rank,
+                            source_num_slicers=pair_state.m2m_send.source_num_slicers,
+                            target_num_slicers=pair_state.m2m_send.target_num_slicers,
+                            source_tensor=tensor,
+                            target_tensor=None,
+                            transfer_dtype=transfer_dtype,
+                            source_partial_groups=pair_state.source_partial_groups,
+                        )
+                        pair_send_chunks.extend(send_chunks)
 
-                    # Generate recv chunks for this tensor
-                    recv_chunks = map_to_chunk_ops(
-                        m2m_map=pair_state.m2m_recv.m2m_map,
-                        rank=self.rank,
-                        source_num_slicers=pair_state.m2m_recv.source_num_slicers,
-                        target_num_slicers=pair_state.m2m_recv.target_num_slicers,
-                        source_tensor=None,
-                        target_tensor=tensor,
-                        transfer_dtype=transfer_dtype,
-                    )
-                    pair_recv_chunks.extend(recv_chunks)
+                    if pair_state.m2m_recv is not None:
+                        recv_chunks = map_to_chunk_ops(
+                            m2m_map=pair_state.m2m_recv.m2m_map,
+                            rank=self.rank,
+                            source_num_slicers=pair_state.m2m_recv.source_num_slicers,
+                            target_num_slicers=pair_state.m2m_recv.target_num_slicers,
+                            source_tensor=None,
+                            target_tensor=tensor,
+                            transfer_dtype=transfer_dtype,
+                        )
+                        pair_recv_chunks.extend(recv_chunks)
 
             # Accumulate to flattened lists
             all_send_chunks.extend(pair_send_chunks)
