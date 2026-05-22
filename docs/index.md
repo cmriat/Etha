@@ -12,9 +12,11 @@ inference cluster in a disaggregated RL setup, where the two sides were
 launched separately and run different parallelism configurations.
 
 :::{note}
-Supported placements are currently `Shard` and `Replicate`. `Partial` is
-rejected with `NotImplementedError` — redistribute it to `Replicate` or
-`Shard` on the source mesh before handing the DTensor to Etha.
+Supported source placements: `Shard`, `Replicate`, `Partial`. For `Partial`,
+Etha collapses it to `Replicate` on the source mesh via a chunk-level
+all-reduce before send. `Partial` on the target side is rejected:
+cross-process-group decomposition of a logical tensor into a Partial
+contribution is not uniquely defined.
 :::
 
 ```{toctree}
