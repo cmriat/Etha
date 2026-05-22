@@ -200,10 +200,10 @@ class TensorBusClient:
             remote_name: Name of remote peer
             expected_world_size: Number of ranks for local peer
             device_mesh: Local device mesh configuration
-            placements: Local tensor placement strategy. Only ``Shard`` and
-                ``Replicate`` are supported; ``Partial`` is rejected at M2M
-                map construction time (redistribute it to ``Replicate`` or
-                ``Shard`` on the source mesh first).
+            placements: Local tensor placement strategy. ``Shard``, ``Replicate``
+                and ``Partial`` are supported on the source side; ``Partial`` is
+                collapsed to ``Replicate`` via an all-reduce on the source mesh
+                sub-group before send. ``Partial`` on the target side is rejected.
 
         Blocks until:
             - Agent registers to TCPStore

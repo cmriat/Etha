@@ -13,6 +13,10 @@ class M2MMap(msgspec.Struct):
     m2m_map: dict[int, dict[tuple, list[tuple[int, tuple]]]] | None = None
     source_num_slicers: list[int] | None = None  # How source tensor is partitioned
     target_num_slicers: list[int] | None = None  # How target tensor is partitioned
+    # Partial placements found on the source mesh, as (mesh_dim_idx, reduce_op).
+    # The caller must all-reduce each Partial dim on the corresponding source
+    # sub-group before send; empty when source has no Partial.
+    source_partial_reductions: list[tuple[int, str]] = []
 
 
 class PairState(msgspec.Struct):
@@ -36,3 +40,9 @@ class PairState(msgspec.Struct):
     # Topology layer: M2M maps (shape-independent, reusable across batches)
     m2m_send: M2MMap | None = None  # Map for sending (local -> remote)
     m2m_recv: M2MMap | None = None  # Map for receiving (remote -> local)
+
+    # NCCL sub-groups for the partial dims on the *local* side of m2m_send
+    # (None if no Partial placements). Each entry: (sub_group, reduce_op_str);
+    # populated only on the sender side of the pair. The send pipeline runs
+    # an in-place all-reduce on these groups before the actual P2P send.
+    source_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = None
