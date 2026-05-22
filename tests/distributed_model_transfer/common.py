@@ -14,7 +14,7 @@ MESH_CONFIGS = {
 }
 
 STORE_HOST = os.environ.get("MASTER_ADDR", "localhost")
-STORE_PORT = 40001
+STORE_PORT = int(os.environ.get("ETHA_STORE_PORT", 40001))
 STORE_BACKEND = "tcp"
 LMDB_ROOT = os.environ.get("LMDB_ROOT", "/tmp/dbs")
 

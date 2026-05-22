@@ -4,10 +4,36 @@ import os
 import time
 import shutil
 import signal
+import socket
 import subprocess
 from pathlib import Path
 
 import pytest
+
+
+def _find_free_port() -> int:
+    """Bind to an OS-assigned ephemeral port, close, return the number.
+
+    There's still a TOCTOU window before the child re-binds, but four parallel
+    ports collide with our long-running agent only when the agent's internal
+    TCPStores grab the same number — picking from the ephemeral range moments
+    before launch is good enough for a test harness.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _find_n_free_ports(n: int) -> tuple[int, ...]:
+    """``_find_free_port`` ``n`` times, with within-call dedup.
+
+    Back-to-back ``bind(0)`` calls *can* return the same port; the kernel makes
+    it rare but does not promise uniqueness. Loop until we have ``n`` distinct.
+    """
+    selected: set[int] = set()
+    while len(selected) < n:
+        selected.add(_find_free_port())
+    return tuple(selected)
 
 
 def _spawn_process(cmd: list[str], env: dict[str, str], cwd: Path, log_path: Path) -> tuple[subprocess.Popen, object]:
@@ -56,18 +82,24 @@ def test_distributed_model_transfer_end_to_end(training_dtype: str, inference_dt
     for candidate in lmdb_root.glob("*"):
         candidate.unlink(missing_ok=True)
 
+    # Pick four free ephemeral ports per case to avoid collisions between cases
+    # (agent's pair-handshake TCPStores grab ephemeral ports — a hard-coded
+    # master-port for the next case can race with them).
+    agent_port, train_port, inference_port, store_port = _find_n_free_ports(4)
+
     base_env = os.environ.copy()
     base_env.setdefault("PIXI_PROJECT_ROOT", str(project_root))
     base_env.setdefault("MASTER_ADDR", "127.0.0.1")
     base_env.setdefault("HF_HOME", "/data/hf")
     base_env.setdefault("HF_HUB_OFFLINE", "1")
+    base_env["ETHA_STORE_PORT"] = str(store_port)
 
     processes: list[tuple[subprocess.Popen, object]] = []
 
     agent_cmd = [
         "torchrun",
         "--nproc_per_node=8",
-        "--master-port=39500",
+        f"--master-port={agent_port}",
         "tests/distributed_model_transfer/agent.py",
     ]
     agent_proc = _spawn_process(agent_cmd, base_env, project_root, agent_log_path)
@@ -83,7 +115,7 @@ def test_distributed_model_transfer_end_to_end(training_dtype: str, inference_dt
     training_cmd = [
         "torchrun",
         "--nproc_per_node=4",
-        "--master-port=39501",
+        f"--master-port={train_port}",
         "tests/distributed_model_transfer/train.py",
     ]
     train_proc = _spawn_process(training_cmd, training_env, project_root, train_log_path)
@@ -97,7 +129,7 @@ def test_distributed_model_transfer_end_to_end(training_dtype: str, inference_dt
     inference_cmd = [
         "torchrun",
         "--nproc_per_node=4",
-        "--master-port=39502",
+        f"--master-port={inference_port}",
         "tests/distributed_model_transfer/inference.py",
     ]
     inference_proc = _spawn_process(inference_cmd, inference_env, project_root, inference_log_path)

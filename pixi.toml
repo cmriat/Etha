@@ -29,6 +29,7 @@ nccl-tests = ">=2.16.7,<3"
 pytest-timeout = ">=2.4.0,<3"
 mypy = ">=1.18.2,<2"
 tyro = ">=0.9.35,<0.10"
+transformers = "*"
 
 [feature.dev.tasks]
 test = "pytest tests"
