@@ -17,11 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 def _dict_to_routes(m2m_map: dict[int, dict[tuple, list[tuple[int, tuple]]]]) -> list[Route]:
-    """Materialize the nested build dict into a canonical list of Routes.
+    """Materialize the build dict into a canonical list of Routes.
 
     Sorted by ``(src_rank, cell)`` so every rank produces the same order — the
-    lock-step contract that chunk-level NCCL collectives (Partial reduce) rely
-    on. ``kind`` is classified here, once: empty dsts -> SHADOW, >1 -> BROADCAST.
+    lock-step contract chunk-level NCCL collectives (Partial reduce) rely on.
     """
     routes: list[Route] = []
     for src_rank in sorted(m2m_map):
@@ -111,8 +110,8 @@ def _expand_partial_shadows(
                 if r != src_rank:
                     expanded.setdefault(r, {}).setdefault(cell, [])
 
-    # Sort cells so all component members iterate in lock-step.
-    return {r: {cell: expanded[r][cell] for cell in sorted(expanded[r].keys())} for r in expanded}
+    # Cell ordering is enforced in _dict_to_routes; don't re-sort here.
+    return expanded
 
 
 def get_m2m_map(
