@@ -73,7 +73,7 @@ def run_test_communication(
         logger.info(f"Generated m2m map: {m2m_map}")
     # Step 2: Generate execution-ready chunks directly
     chunks = map_to_chunk_ops(
-        m2m_map=m2m_map,
+        routes=m2m_map,
         rank=rank,
         source_num_slicers=source_num_slicers,
         target_num_slicers=target_num_slicers,
@@ -90,7 +90,7 @@ def run_test_communication(
     target_dist_tensor_bucket = distribute_tensor(target_origin_tensor_bucket, target_mesh, target_specs)
     target_local_bucket = target_dist_tensor_bucket.to_local()
     bucket_chunks = map_to_chunk_ops(
-        m2m_map=m2m_map,
+        routes=m2m_map,
         rank=rank,
         source_num_slicers=source_num_slicers,
         target_num_slicers=target_num_slicers,

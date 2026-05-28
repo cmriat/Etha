@@ -707,7 +707,7 @@ def main():
                         target_local_tensor = target_local_tensors[i]
 
                     chunks = map_to_chunk_ops(
-                        m2m_map=m2m_map,
+                        routes=m2m_map,
                         rank=rank,
                         source_num_slicers=source_num_slicers,
                         target_num_slicers=target_num_slicers,

@@ -4,11 +4,39 @@ import logging
 from dataclasses import field, dataclass
 
 import torch
+import msgspec
 import torch.distributed as dist
 
 from .transfer import Transferable, TransferType
 
 logger = logging.getLogger(__name__)
+
+
+class Endpoint(msgspec.Struct, frozen=True):
+    """One chunk location: a rank and its cell coordinate in the transfer grid.
+
+    ``cell`` is the multi-dimensional index of the chunk within that rank's
+    local shard (fed to ``get_slice_from_multi_index`` to get the byte slice).
+    Leaf data (int + tuple of ints), so no reference cycles.
+    """
+
+    rank: int
+    cell: tuple[int, ...]
+
+
+class Route(msgspec.Struct, frozen=True):
+    """One source cell's delivery plan: ``src`` endpoint to a set of ``dsts``.
+
+    ``kind`` is the route-level classification, set once at construction:
+    SHADOW (empty ``dsts``, reduce-only), BROADCAST (>1 dst), or P2P (1 dst).
+    SELF_COPY is not a route kind — it is refined per-dst at execution when a
+    dst lands on the source rank.
+    """
+
+    src: Endpoint
+    dsts: tuple[Endpoint, ...]
+    kind: TransferType
+
 
 _REDUCE_OP_MAP = {
     "sum": dist.ReduceOp.SUM,

@@ -85,7 +85,7 @@ def run_test_communication(
     if is_in_mesh_a:
         # Mesh A sends to Mesh B
         chunks = map_to_chunk_ops(
-            m2m_map=m2m_map_a_to_b,
+            routes=m2m_map_a_to_b,
             rank=rank,
             source_num_slicers=source_slicers_a,
             target_num_slicers=target_slicers_b,
@@ -95,7 +95,7 @@ def run_test_communication(
     else:
         # Mesh B receives from Mesh A
         chunks = map_to_chunk_ops(
-            m2m_map=m2m_map_a_to_b,
+            routes=m2m_map_a_to_b,
             rank=rank,
             source_num_slicers=source_slicers_a,
             target_num_slicers=target_slicers_b,

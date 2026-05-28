@@ -142,7 +142,7 @@ def _run(
     )
 
     chunks = map_to_chunk_ops(
-        m2m_map=m2m_map,
+        routes=m2m_map,
         rank=rank,
         source_num_slicers=src_slicers,
         target_num_slicers=tgt_slicers,
@@ -273,7 +273,7 @@ def _run_partial_mixed_dtype(
     )
 
     chunks = map_to_chunk_ops(
-        m2m_map=m2m_map,
+        routes=m2m_map,
         rank=rank,
         source_num_slicers=src_slicers,
         target_num_slicers=tgt_slicers,
