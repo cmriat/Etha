@@ -4,18 +4,20 @@ A batch represents one call to register_tensors(). Multiple batches can exist
 for the same pair, each with independent tensors and handlers.
 """
 
+from dataclasses import field, dataclass
+
 import torch
-import msgspec
 import torch.distributed as dist
 
 from etha.comm.ir import Bucket
 
 
-class BatchState(msgspec.Struct):
-    """State for a single batch of registered tensors.
+@dataclass(kw_only=True)
+class BatchState:
+    """Runtime state for a single batch of registered tensors, held on the Agent.
 
-    A batch is created for each register_tensors() call and contains all
-    tensor data and execution plans for that specific registration.
+    Created per register_tensors() call. Holds live tensors, process-group
+    handles, and execution plans (buckets with CUDA work) — in-memory only.
 
     Key design: buckets are FLATTENED across all pairs in the batch, allowing
     single-pass execution via bucket_comm().
@@ -30,8 +32,8 @@ class BatchState(msgspec.Struct):
     batch_group: dist.ProcessGroup | None = None  # all ranks in batch (local + remote across all pairs)
 
     # Data layer: Per-pair organization (for fallback and debugging)
-    pair_tensors: dict[str, list[torch.Tensor]] = msgspec.field(default_factory=dict)
-    pair_target_dtypes: dict[str, list[torch.dtype]] = msgspec.field(default_factory=dict)
+    pair_tensors: dict[str, list[torch.Tensor]] = field(default_factory=dict)
+    pair_target_dtypes: dict[str, list[torch.dtype]] = field(default_factory=dict)
 
     # Execution layer: FLATTENED across all pairs for efficient execution
     send_buckets: list[Bucket] | None = None
