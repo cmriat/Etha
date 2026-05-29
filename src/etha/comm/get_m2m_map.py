@@ -10,9 +10,31 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Partial, Placement
 
+from .ir import Route, Endpoint, TransferType
 from .utils import enumerate_partial_subgroup_ranks
 
 logger = logging.getLogger(__name__)
+
+
+def _dict_to_routes(m2m_map: dict[int, dict[tuple, list[tuple[int, tuple]]]]) -> list[Route]:
+    """Materialize the build dict into a canonical list of Routes.
+
+    Sorted by ``(src_rank, cell)`` so every rank produces the same order — the
+    lock-step contract chunk-level NCCL collectives (Partial reduce) rely on.
+    """
+    routes: list[Route] = []
+    for src_rank in sorted(m2m_map):
+        cells = m2m_map[src_rank]
+        for cell in sorted(cells):
+            dsts = tuple(Endpoint(rank=r, cell=c) for r, c in cells[cell])
+            if not dsts:
+                kind = TransferType.SHADOW
+            elif len(dsts) > 1:
+                kind = TransferType.BROADCAST
+            else:
+                kind = TransferType.P2P
+            routes.append(Route(src=Endpoint(rank=src_rank, cell=cell), dsts=dsts, kind=kind))
+    return routes
 
 
 def _get_tensor_ndim(placements: tuple[Placement, ...]) -> int:
@@ -88,8 +110,8 @@ def _expand_partial_shadows(
                 if r != src_rank:
                     expanded.setdefault(r, {}).setdefault(cell, [])
 
-    # Sort cells so all component members iterate in lock-step.
-    return {r: {cell: expanded[r][cell] for cell in sorted(expanded[r].keys())} for r in expanded}
+    # Cell ordering is enforced in _dict_to_routes; don't re-sort here.
+    return expanded
 
 
 def get_m2m_map(
@@ -100,7 +122,7 @@ def get_m2m_map(
     group: dist.ProcessGroup,
     device: str = "cpu",
 ) -> tuple[
-    dict[int, dict[tuple, list[tuple[int, tuple]]]],
+    list[Route],
     list[int],
     list[int],
     list[tuple[int, str]],
@@ -114,7 +136,7 @@ def get_m2m_map(
     across an independent process-group boundary.
 
     Returns:
-        ``(m2m_map, source_num_slicers, target_num_slicers, source_partial_reductions)``.
+        ``(routes, source_num_slicers, target_num_slicers, source_partial_reductions)``.
         The last is a list of ``(mesh_dim_idx, reduce_op_str)`` per Partial dim,
         empty when source has no Partial.
     """
@@ -239,4 +261,6 @@ def get_m2m_map(
 
     final_m2m_map = _expand_partial_shadows(final_m2m_map, source_mesh, source_placements)
 
-    return final_m2m_map, source_num_slicers, target_num_slicers, source_partial_reductions
+    routes = _dict_to_routes(final_m2m_map)
+
+    return routes, source_num_slicers, target_num_slicers, source_partial_reductions

@@ -3,14 +3,16 @@
 import msgspec
 import torch.distributed as dist
 
+from etha.comm.ir import Route
+
 
 class M2MMap(msgspec.Struct):
-    """Mesh to mesh topology using M2MMap (shape-independent).
+    """Mesh to mesh topology (shape-independent).
 
-    M2MMap structure: dict[src_rank, dict[src_idx, list[tuple[dst_rank, dst_idx]]]]
+    ``routes`` is a flat list of per-cell delivery plans; see ``comm.ir.Route``.
     """
 
-    m2m_map: dict[int, dict[tuple, list[tuple[int, tuple]]]] | None = None
+    routes: list[Route] | None = None
     source_num_slicers: list[int] | None = None  # How source tensor is partitioned
     target_num_slicers: list[int] | None = None  # How target tensor is partitioned
     # Partial placements found on the source mesh, as (mesh_dim_idx, reduce_op).

@@ -364,11 +364,11 @@ class TensorBusAgent:
                     f"(first side has Partial placement; cross-PG Partial target is not supported)"
                 )
 
-            def _wrap(m, srcs, tgts, partial_red):
-                if m is None:
+            def _wrap(routes, srcs, tgts, partial_red):
+                if routes is None:
                     return None
                 return M2MMap(
-                    m2m_map=m,
+                    routes=routes,
                     source_num_slicers=srcs,
                     target_num_slicers=tgts,
                     source_partial_reductions=partial_red,
@@ -663,7 +663,7 @@ class TensorBusAgent:
 
                     if pair_state.m2m_send is not None:
                         send_chunks = map_to_chunk_ops(
-                            m2m_map=pair_state.m2m_send.m2m_map,
+                            routes=pair_state.m2m_send.routes,
                             rank=self.rank,
                             source_num_slicers=pair_state.m2m_send.source_num_slicers,
                             target_num_slicers=pair_state.m2m_send.target_num_slicers,
@@ -676,7 +676,7 @@ class TensorBusAgent:
 
                     if pair_state.m2m_recv is not None:
                         recv_chunks = map_to_chunk_ops(
-                            m2m_map=pair_state.m2m_recv.m2m_map,
+                            routes=pair_state.m2m_recv.routes,
                             rank=self.rank,
                             source_num_slicers=pair_state.m2m_recv.source_num_slicers,
                             target_num_slicers=pair_state.m2m_recv.target_num_slicers,
