@@ -29,14 +29,14 @@ def _build_bucket(
 ) -> Bucket:
     first_chunk = entries[0].chunk
     device = first_chunk.tensor.device
-    transfer_type = first_chunk.transfer_type
     dst_ranks = first_chunk.dst_ranks
     src_rank = first_chunk.src_rank
     total_bytes = entries[-1].offset + entries[-1].nbytes
     key = first_chunk.bucket_key
     return Bucket(
-        transfer_type=transfer_type,
+        transport=first_chunk.transport,
         is_source=first_chunk.is_source,
+        is_target=first_chunk.is_target,
         dst_ranks=dst_ranks,
         src_rank=src_rank,
         device=device,
