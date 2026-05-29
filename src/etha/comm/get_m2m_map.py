@@ -10,7 +10,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Partial, Placement
 
-from .ir import Route, Endpoint, TransferType
+from .ir import Route, Endpoint, Transport
 from .utils import enumerate_partial_subgroup_ranks
 
 logger = logging.getLogger(__name__)
@@ -28,11 +28,11 @@ def _dict_to_routes(m2m_map: dict[int, dict[tuple, list[tuple[int, tuple]]]]) ->
         for cell in sorted(cells):
             dsts = tuple(Endpoint(rank=r, cell=c) for r, c in cells[cell])
             if not dsts:
-                kind = TransferType.SHADOW
+                kind = Transport.NONE
             elif len(dsts) > 1:
-                kind = TransferType.BROADCAST
+                kind = Transport.BROADCAST
             else:
-                kind = TransferType.P2P
+                kind = Transport.P2P
             routes.append(Route(src=Endpoint(rank=src_rank, cell=cell), dsts=dsts, kind=kind))
     return routes
 
@@ -65,10 +65,10 @@ def _expand_partial_shadows(
     source_mesh: DeviceMesh,
     source_placements: tuple[Placement, ...],
 ) -> dict[int, dict[tuple, list[tuple[int, tuple]]]]:
-    """Insert SHADOW entries so every Partial sub-group member participates in reduce.
+    """Insert reduce-only entries so every Partial sub-group member participates in reduce.
 
-    Trace selects one primary per cell; the remaining Partial peers need SHADOW
-    entries (empty ``dst_list``) so they reach the chunk-level all-reduce.
+    Trace selects one primary per cell; the remaining Partial peers need
+    reduce-only entries (empty ``dst_list``) so they reach the chunk-level all-reduce.
     Propagation is transitive: a rank's chunk at cell C drives *all* of its
     sub-groups' reduces, so the whole connected component (sub-groups linked
     via shared members) must be present at C.
@@ -130,7 +130,7 @@ def get_m2m_map(
     """Get P2P communication map for tensor redistribution.
 
     Source Partial is supported by substituting Partial→Replicate for the trace,
-    then inserting SHADOW entries for the dropped peers via
+    then inserting reduce-only entries for the dropped peers via
     ``_expand_partial_shadows``. Target Partial is rejected — the decomposition
     of a logical tensor into Partial contributions is not uniquely defined
     across an independent process-group boundary.

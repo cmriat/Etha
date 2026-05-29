@@ -9,16 +9,13 @@ import torch.distributed as dist
 from .utils import get_or_create_process_group
 
 
-class TransferType(Enum):
-    """Transfer operation types."""
+class Transport(Enum):
+    """How a chunk's bytes cross ranks (orthogonal to its produce/consume role)."""
 
-    SELF_COPY = "self_copy"  # Local copy within same rank
     P2P = "p2p"
     BROADCAST = "broadcast"
-    # Reduce-only chunks: a source rank participates in the source-Partial
-    # all-reduce (collective; every sub-group member must call) but isn't the
-    # ship-primary for this logical cell. After reduce, the buffer is discarded.
-    SHADOW = "shadow"
+    LOCAL = "local"  # same-rank copy, no wire op
+    NONE = "none"  # reduce-only ("shadow"): participates in a collective but ships nothing
 
 
 def _execute_p2p(
@@ -47,10 +44,17 @@ def _execute_broadcast(
 
 @dataclass(slots=True, kw_only=True)
 class Transferable:
-    """Base class for transferable objects (chunks and buckets)."""
+    """Base class for transferable objects (chunks and buckets).
 
-    transfer_type: TransferType
+    Role and transport are orthogonal:
+    - ``is_source``: reads a local tensor into ``buffer`` (source side / self-copy).
+    - ``is_target``: writes ``buffer`` back into a local target tensor (recv / self-copy).
+    - ``transport``: how bytes cross ranks. ``LOCAL``/``NONE`` never hit the wire.
+    """
+
+    transport: Transport
     is_source: bool
+    is_target: bool
     src_rank: int
     dst_ranks: tuple[int, ...]
     buffer: torch.Tensor | None = None
@@ -60,14 +64,12 @@ class Transferable:
         """Execute transfer operation.
 
         Returns:
-            Work handle for async operations, None for SELF_COPY / SHADOW.
+            Work handle for async transports, None for LOCAL / NONE.
         """
-        match self.transfer_type:
-            case TransferType.SELF_COPY:
+        match self.transport:
+            case Transport.LOCAL | Transport.NONE:
                 return None
-            case TransferType.SHADOW:
-                return None
-            case TransferType.P2P:
+            case Transport.P2P:
                 return _execute_p2p(self.buffer, self.is_source, self.src_rank, self.dst_ranks[0])
-            case TransferType.BROADCAST:
+            case Transport.BROADCAST:
                 return _execute_broadcast(self.buffer, self.src_rank, self.dst_ranks)
