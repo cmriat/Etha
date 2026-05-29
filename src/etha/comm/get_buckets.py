@@ -1,63 +1,30 @@
-"""Get buckets from chunks."""
+"""Group chunks into buckets for coalesced transfer."""
 
-import math
 from collections import defaultdict
 
-from .ir import Chunk, Bucket, BucketEntry
+from .ir import Chunk, Bucket
 
 
-def _chunk_nbytes(chunk: Chunk) -> int:
-    """Calculate chunk size in bytes (uses wire dtype for transfer)."""
-    return math.prod(chunk.chunk_shape) * chunk.transfer_dtype.itemsize
-
-
-def _calculate_bucket_entries(
-    grouped_chunks: list[Chunk],
-) -> list[BucketEntry]:
-    """Calculate bucket entries with byte-based offsets."""
-    entries: list[BucketEntry] = []
-    cursor = 0
-    for chunk in grouped_chunks:
-        nbytes = _chunk_nbytes(chunk)
-        entries.append(BucketEntry(offset=cursor, nbytes=nbytes, chunk=chunk))
-        cursor += nbytes
-    return entries
-
-
-def _build_bucket(
-    entries: list[BucketEntry],
-) -> Bucket:
-    first_chunk = entries[0].chunk
-    device = first_chunk.tensor.device
-    dst_ranks = first_chunk.dst_ranks
-    src_rank = first_chunk.src_rank
-    total_bytes = entries[-1].offset + entries[-1].nbytes
-    key = first_chunk.bucket_key
-    return Bucket(
-        transport=first_chunk.transport,
-        is_source=first_chunk.is_source,
-        is_target=first_chunk.is_target,
-        dst_ranks=dst_ranks,
-        src_rank=src_rank,
-        device=device,
-        key=key,
-        total_bytes=total_bytes,
-        entries=entries,
-    )
+def _make_bucket(chunks: list[Chunk]) -> Bucket:
+    return Bucket(chunks=chunks, device=chunks[0].tensor.device)
 
 
 def chunk_to_bucket_ops(
     chunks: list[Chunk],
     bucket_size: int,
 ) -> list[Bucket]:
+    """Bundle same-route chunks (shared ``bucket_key``) up to ``bucket_size`` bytes.
+
+    A chunk at least ``bucket_size`` becomes its own bucket; ``bucket_size=1``
+    therefore gives one chunk per bucket (no coalescing).
+    """
     buckets: list[Bucket] = []
     grouped_state: dict[tuple, tuple[list[Chunk], int]] = defaultdict(lambda: ([], 0))
 
     for chunk in chunks:
-        chunk_bytes = _chunk_nbytes(chunk)
+        chunk_bytes = chunk.nbytes
         if chunk_bytes >= bucket_size:
-            entries = _calculate_bucket_entries([chunk])
-            buckets.append(_build_bucket(entries))
+            buckets.append(_make_bucket([chunk]))
             continue
 
         key = chunk.bucket_key
@@ -65,15 +32,12 @@ def chunk_to_bucket_ops(
         current_chunks.append(chunk)
         current_bytes += chunk_bytes
         if current_bytes >= bucket_size:
-            entries = _calculate_bucket_entries(current_chunks)
-            buckets.append(_build_bucket(entries))
+            buckets.append(_make_bucket(current_chunks))
             grouped_state[key] = ([], 0)
         else:
             grouped_state[key] = (current_chunks, current_bytes)
 
     for current_chunks, _ in grouped_state.values():
-        if not current_chunks:
-            continue
-        entries = _calculate_bucket_entries(current_chunks)
-        buckets.append(_build_bucket(entries))
+        if current_chunks:
+            buckets.append(_make_bucket(current_chunks))
     return buckets

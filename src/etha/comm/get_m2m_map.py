@@ -10,7 +10,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Partial, Placement
 
-from .ir import Route, Endpoint, Transport
+from .ir import Route, M2MMap, Endpoint, Transport
 from .utils import enumerate_partial_subgroup_ranks
 
 logger = logging.getLogger(__name__)
@@ -121,13 +121,8 @@ def get_m2m_map(
     target_placements: tuple[Placement, ...],
     group: dist.ProcessGroup,
     device: str = "cpu",
-) -> tuple[
-    list[Route],
-    list[int],
-    list[int],
-    list[tuple[int, str]],
-]:
-    """Get P2P communication map for tensor redistribution.
+) -> M2MMap:
+    """Compute the mesh-to-mesh redistribution map for a source/target pair.
 
     Source Partial is supported by substituting Partial→Replicate for the trace,
     then inserting reduce-only entries for the dropped peers via
@@ -135,10 +130,9 @@ def get_m2m_map(
     of a logical tensor into Partial contributions is not uniquely defined
     across an independent process-group boundary.
 
-    Returns:
-        ``(routes, source_num_slicers, target_num_slicers, source_partial_reductions)``.
-        The last is a list of ``(mesh_dim_idx, reduce_op_str)`` per Partial dim,
-        empty when source has no Partial.
+    Returns an ``M2MMap``; its ``source_partial_reductions`` is a list of
+    ``(mesh_dim_idx, reduce_op_str)`` per Partial dim, empty when source has no
+    Partial.
     """
     if any(isinstance(p, Partial) for p in target_placements):
         raise NotImplementedError(
@@ -263,4 +257,9 @@ def get_m2m_map(
 
     routes = _dict_to_routes(final_m2m_map)
 
-    return routes, source_num_slicers, target_num_slicers, source_partial_reductions
+    return M2MMap(
+        routes=routes,
+        source_num_slicers=source_num_slicers,
+        target_num_slicers=target_num_slicers,
+        source_partial_reductions=source_partial_reductions,
+    )

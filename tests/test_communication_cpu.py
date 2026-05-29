@@ -11,10 +11,9 @@ from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_t
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from etha.comm import (
-    chunk_comm,
     bucket_comm,
     get_m2m_map,
-    map_to_chunk_ops,
+    m2m_to_chunks,
     chunk_to_bucket_ops,
     gather_broadcast_comm,
 )
@@ -61,7 +60,7 @@ def run_test_communication(
 
     # Generate chunk IR using new API
     # Step 1: Get M2M map
-    m2m_map, source_num_slicers, target_num_slicers, _ = get_m2m_map(
+    m2m = get_m2m_map(
         source_mesh=source_mesh,
         source_placements=source_specs,
         target_mesh=target_mesh,
@@ -70,13 +69,11 @@ def run_test_communication(
         device=device,
     )
     if rank == 0:
-        logger.info(f"Generated m2m map: {m2m_map}")
+        logger.info(f"Generated routes: {m2m.routes}")
     # Step 2: Generate execution-ready chunks directly
-    chunks = map_to_chunk_ops(
-        routes=m2m_map,
+    chunks = m2m_to_chunks(
+        m2m,
         rank=rank,
-        source_num_slicers=source_num_slicers,
-        target_num_slicers=target_num_slicers,
         source_tensor=source_local_tensor,
         target_tensor=target_local_chunk,
     )
@@ -84,16 +81,14 @@ def run_test_communication(
     if rank == 0:
         logger.info(f"Generated {len(chunks)} chunks")
 
-    # Test M2M communication with unified chunks
-    chunk_comm(chunks=chunks)
+    # Test M2M communication as single-entry buckets (no coalescing)
+    bucket_comm(buckets=chunk_to_bucket_ops(chunks=chunks, bucket_size=1))
 
     target_dist_tensor_bucket = distribute_tensor(target_origin_tensor_bucket, target_mesh, target_specs)
     target_local_bucket = target_dist_tensor_bucket.to_local()
-    bucket_chunks = map_to_chunk_ops(
-        routes=m2m_map,
+    bucket_chunks = m2m_to_chunks(
+        m2m,
         rank=rank,
-        source_num_slicers=source_num_slicers,
-        target_num_slicers=target_num_slicers,
         source_tensor=source_local_tensor,
         target_tensor=target_local_bucket,
     )

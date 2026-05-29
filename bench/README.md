@@ -53,7 +53,7 @@ results/
 │   └── mesh_01_4_2_1_1_1_1_4_2/
 │       └── shape_(4096, 4096)/
 │           └── rank_0/
-│               ├── chunk_comm/
+│               ├── m2m/
 │               │   └── iteration_3/
 │               │       ├── rank0_trace.pt.trace.json
 │               │       └── rank0_memory_snapshot.pickle

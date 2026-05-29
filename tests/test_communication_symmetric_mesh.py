@@ -10,9 +10,10 @@ import torch.distributed as dist
 from torch.distributed._tensor import Shard, DeviceMesh, distribute_tensor
 
 from etha.comm import (
-    chunk_comm,
+    bucket_comm,
     get_m2m_map,
-    map_to_chunk_ops,
+    m2m_to_chunks,
+    chunk_to_bucket_ops,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -60,7 +61,7 @@ def run_test_communication(
 
     # Test: Call get_m2m_map twice with reversed source/target to test for deadlock
     # Direction 1: A -> B
-    m2m_map_a_to_b, source_slicers_a, target_slicers_b, _ = get_m2m_map(
+    m2m_a_to_b = get_m2m_map(
         source_mesh=mesh_a,
         source_placements=specs,
         target_mesh=mesh_b,
@@ -69,8 +70,9 @@ def run_test_communication(
         device=device,
     )
 
-    # Direction 2: B -> A (reversed to test deadlock)
-    m2m_map_b_to_a, source_slicers_b, target_slicers_a, _ = get_m2m_map(
+    # Direction 2: B -> A; result unused — this call only exercises the reversed
+    # source/target ordering to check for collective deadlock.
+    get_m2m_map(
         source_mesh=mesh_b,
         source_placements=specs,
         target_mesh=mesh_a,
@@ -84,36 +86,22 @@ def run_test_communication(
     # Generate chunks for the direction this rank participates in
     if is_in_mesh_a:
         # Mesh A sends to Mesh B
-        chunks = map_to_chunk_ops(
-            routes=m2m_map_a_to_b,
-            rank=rank,
-            source_num_slicers=source_slicers_a,
-            target_num_slicers=target_slicers_b,
-            source_tensor=local_tensor,
-            target_tensor=None,
-        )
+        chunks = m2m_to_chunks(m2m_a_to_b, rank=rank, source_tensor=local_tensor, target_tensor=None)
     else:
         # Mesh B receives from Mesh A
-        chunks = map_to_chunk_ops(
-            routes=m2m_map_a_to_b,
-            rank=rank,
-            source_num_slicers=source_slicers_a,
-            target_num_slicers=target_slicers_b,
-            source_tensor=None,
-            target_tensor=local_tensor,
-        )
+        chunks = m2m_to_chunks(m2m_a_to_b, rank=rank, source_tensor=None, target_tensor=local_tensor)
 
     logger.info(f"[rank={rank}] Generated {len(chunks)} chunks")
 
-    logger.info(f"[rank={rank}] About to start chunk_comm")
+    logger.info(f"[rank={rank}] About to start transfer")
 
     for chunk in chunks:
         logger.info(f"[rank={rank}] Chunk: {chunk}")
 
     # Execute communication
-    chunk_comm(chunks=chunks)
+    bucket_comm(buckets=chunk_to_bucket_ops(chunks=chunks, bucket_size=1))
 
-    logger.info(f"[rank={rank}] Finished chunk_comm")
+    logger.info(f"[rank={rank}] Finished transfer")
 
     # Verify results for receiver side
     if not is_in_mesh_a:

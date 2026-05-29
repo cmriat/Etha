@@ -1,5 +1,6 @@
 """Intermediate Representation for tensor transfer operations."""
 
+import math
 import logging
 from dataclasses import field, dataclass
 
@@ -7,7 +8,7 @@ import torch
 import msgspec
 import torch.distributed as dist
 
-from .transfer import Transport, Transferable
+from .transfer import Transport, _execute_p2p, _execute_broadcast
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,21 @@ class Route(msgspec.Struct, frozen=True):
     kind: Transport
 
 
+class M2MMap(msgspec.Struct):
+    """Mesh-to-mesh topology (shape-independent, reusable across batches).
+
+    ``routes`` is a flat list of per-cell delivery plans (see ``Route``);
+    ``source_num_slicers``/``target_num_slicers`` describe how each side
+    partitions the tensor; ``source_partial_reductions`` lists
+    ``(mesh_dim, reduce_op)`` per source Partial dim (empty when none).
+    """
+
+    routes: list[Route] | None = None
+    source_num_slicers: list[int] | None = None
+    target_num_slicers: list[int] | None = None
+    source_partial_reductions: list[tuple[int, str]] = []
+
+
 _REDUCE_OP_MAP = {
     "sum": dist.ReduceOp.SUM,
     "avg": dist.ReduceOp.AVG,
@@ -42,10 +58,19 @@ _REDUCE_OP_MAP = {
 
 
 @dataclass(slots=True, kw_only=True)
-class Chunk(Transferable):
-    """Unified chunk for all transfer operations."""
+class Chunk:
+    """A shape-dependent transfer descriptor: a tensor region plus its role.
 
-    chunk_shape: tuple[int, ...]  # Shape of the data being transferred
+    Not a transfer unit — a ``Bucket`` runs the wire op; a chunk only describes
+    one tensor region and how to prepare/finalize it.
+    """
+
+    transport: Transport
+    is_source: bool
+    is_target: bool
+    src_rank: int
+    dst_ranks: tuple[int, ...]
+    chunk_shape: tuple[int, ...]
     tensor: torch.Tensor | None = None
     src_slice: tuple[slice, ...] = ()  # read here when is_source
     dst_slice: tuple[slice, ...] = ()  # written here when is_target
@@ -57,6 +82,7 @@ class Chunk(Transferable):
     # reaches the collective; reduce-only (NONE transport) chunks participate
     # without shipping.
     source_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = field(default=None)
+    buffer: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if self.transfer_dtype is None:
@@ -106,10 +132,7 @@ class Chunk(Transferable):
         self.buffer = buffer
 
     def finalize(self) -> None:
-        """Finalize communication and cleanup."""
-        if self.work is not None:
-            self.work.wait()
-            self.work = None
+        """Write the produced/received buffer back to the target tensor."""
         if self.is_target:
             buffer = self.buffer
             if buffer.dtype != self.tensor.dtype:
@@ -140,43 +163,80 @@ class Chunk(Transferable):
                 cell_key = self.src_idx
         return (self.src_rank, self.dst_ranks, partial_sig, cell_key, self.transport)
 
-
-@dataclass(slots=True, kw_only=True)
-class BucketEntry:
-    """Bucket offset entry (byte-based)."""
-
-    offset: int  # Byte offset in bucket buffer
-    nbytes: int  # Size in bytes
-    chunk: Chunk
+    @property
+    def nbytes(self) -> int:
+        """Byte size on the wire (transfer dtype)."""
+        return math.prod(self.chunk_shape) * self.transfer_dtype.itemsize
 
 
 @dataclass(slots=True, kw_only=True)
-class Bucket(Transferable):
-    """Bucket for transfer operations (byte-based buffer)."""
+class Bucket:
+    """A transfer unit: one buffer + one wire op for its chunks.
 
-    total_bytes: int
-    key: tuple
-    entries: list[BucketEntry]
+    Identity (transport/role/ranks/key) is uniform across a bucket's chunks
+    (they share a ``bucket_key``), so it is read from the first chunk. Byte
+    offsets (the prefix sum of ``chunk.nbytes``) are computed once at
+    construction since a bucket is reused across transfers.
+    """
+
+    chunks: list[Chunk]
     device: torch.device | None = None
     buffer_ready_event: torch.cuda.Event | None = None
+    buffer: torch.Tensor | None = None
+    work: dist.Work | None = None
+    offsets: list[int] = field(init=False)
+
+    def __post_init__(self) -> None:
+        offsets, cursor = [], 0
+        for chunk in self.chunks:
+            offsets.append(cursor)
+            cursor += chunk.nbytes
+        self.offsets = offsets
+
+    @property
+    def transport(self) -> Transport:
+        return self.chunks[0].transport
+
+    @property
+    def is_source(self) -> bool:
+        return self.chunks[0].is_source
+
+    @property
+    def is_target(self) -> bool:
+        return self.chunks[0].is_target
+
+    @property
+    def src_rank(self) -> int:
+        return self.chunks[0].src_rank
+
+    @property
+    def dst_ranks(self) -> tuple[int, ...]:
+        return self.chunks[0].dst_ranks
+
+    @property
+    def key(self) -> tuple:
+        return self.chunks[0].bucket_key
+
+    @property
+    def total_bytes(self) -> int:
+        return self.offsets[-1] + self.chunks[-1].nbytes
 
     def __repr__(self) -> str:
         """Return a concise representation for debugging."""
         role = "".join(c for c, on in (("S", self.is_source), ("T", self.is_target)) if on) or "-"
-        return f"Bucket({self.transport.name[:3]}/{role}, key={self.key} entries_len={len(self.entries)} src_rank={self.src_rank}→dst_ranks={self.dst_ranks})"
+        return f"Bucket({self.transport.name[:3]}/{role}, key={self.key} n={len(self.chunks)} src_rank={self.src_rank}→dst_ranks={self.dst_ranks})"
 
     def prepare(self) -> None:
-        """Prepare buffer for communication.
+        """Assemble the bucket buffer from its chunks.
 
         Source-side Partial reduce and dtype cast both live inside
-        ``Chunk.prepare``; this method only assembles entries into the
-        bucket buffer. A producing chunk's data is copied into the bucket;
+        ``Chunk.prepare``. A producing chunk's data is copied into the bucket;
         the per-chunk buffer is kept only when the chunk also ``is_target``
         (self-copy), so ``finalize`` can write it to the target. A consume-only
         recv instead points its buffer at the bucket slice to land directly.
         """
-        if len(self.entries) == 1:
-            chunk = self.entries[0].chunk
+        if len(self.chunks) == 1:
+            chunk = self.chunks[0]
             chunk.prepare()
             self.buffer = chunk.buffer.view(torch.uint8)
             if not chunk.is_target:
@@ -185,11 +245,11 @@ class Bucket(Transferable):
 
         self.buffer = torch.empty(self.total_bytes, dtype=torch.uint8, device=self.device)
 
-        for entry in self.entries:
-            chunk = entry.chunk
+        for offset, chunk in zip(self.offsets, self.chunks, strict=True):
             dtype = chunk.transfer_dtype
-            numel = entry.nbytes // dtype.itemsize
-            buffer_slice = self.buffer.narrow(0, entry.offset, entry.nbytes).view(dtype)[:numel].view(chunk.chunk_shape)
+            nbytes = chunk.nbytes
+            numel = nbytes // dtype.itemsize
+            buffer_slice = self.buffer.narrow(0, offset, nbytes).view(dtype)[:numel].view(chunk.chunk_shape)
 
             if self.is_source:
                 chunk.prepare(contiguous=False)
@@ -204,17 +264,23 @@ class Bucket(Transferable):
             self.buffer_ready_event = event
 
     def launch(self) -> bool:
-        """Launch communication operation.
+        """Issue the wire op once the assembled buffer is ready.
 
-        Returns:
-            True if launched, False if still waiting for buffer to be ready.
+        Returns False if the buffer-assembly event hasn't fired yet; otherwise
+        issues the transport (no-op for LOCAL/NONE) and returns True.
         """
         if self.buffer_ready_event is not None:
             if not self.buffer_ready_event.query():
                 return False
             self.buffer_ready_event = None
 
-        self.work = self.execute()
+        match self.transport:
+            case Transport.LOCAL | Transport.NONE:
+                self.work = None
+            case Transport.P2P:
+                self.work = _execute_p2p(self.buffer, self.is_source, self.src_rank, self.dst_ranks[0])
+            case Transport.BROADCAST:
+                self.work = _execute_broadcast(self.buffer, self.src_rank, self.dst_ranks)
         return True
 
     def is_complete(self) -> bool:
@@ -238,7 +304,7 @@ class Bucket(Transferable):
             self.work = None
 
         if self.is_target:
-            for entry in self.entries:
-                entry.chunk.finalize()
+            for chunk in self.chunks:
+                chunk.finalize()
 
         self.buffer = None

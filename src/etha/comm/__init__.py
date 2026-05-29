@@ -1,15 +1,16 @@
 """Communication utilities."""
 
-from .get_chunks import map_to_chunk_ops
+from .ir import M2MMap
+from .get_chunks import m2m_to_chunks
 from .get_buckets import chunk_to_bucket_ops
 from .get_m2m_map import get_m2m_map
-from .comm_methods import chunk_comm, bucket_comm, gather_broadcast_comm
+from .comm_methods import bucket_comm, gather_broadcast_comm
 
 __all__ = [
+    "M2MMap",
     "get_m2m_map",
-    "map_to_chunk_ops",
+    "m2m_to_chunks",
     "chunk_to_bucket_ops",
-    "chunk_comm",
     "bucket_comm",
     "gather_broadcast_comm",
 ]

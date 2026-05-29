@@ -1,7 +1,6 @@
 """Transfer operation types and execution."""
 
 from enum import Enum
-from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -40,36 +39,3 @@ def _execute_broadcast(
     group_ranks = sorted([src_rank, *dst_ranks])
     group = get_or_create_process_group(group_ranks)
     return dist.broadcast(buffer, src=src_rank, group=group, async_op=True)
-
-
-@dataclass(slots=True, kw_only=True)
-class Transferable:
-    """Base class for transferable objects (chunks and buckets).
-
-    Role and transport are orthogonal:
-    - ``is_source``: reads a local tensor into ``buffer`` (source side / self-copy).
-    - ``is_target``: writes ``buffer`` back into a local target tensor (recv / self-copy).
-    - ``transport``: how bytes cross ranks. ``LOCAL``/``NONE`` never hit the wire.
-    """
-
-    transport: Transport
-    is_source: bool
-    is_target: bool
-    src_rank: int
-    dst_ranks: tuple[int, ...]
-    buffer: torch.Tensor | None = None
-    work: dist.Work | None = None
-
-    def execute(self) -> dist.Work | None:
-        """Execute transfer operation.
-
-        Returns:
-            Work handle for async transports, None for LOCAL / NONE.
-        """
-        match self.transport:
-            case Transport.LOCAL | Transport.NONE:
-                return None
-            case Transport.P2P:
-                return _execute_p2p(self.buffer, self.is_source, self.src_rank, self.dst_ranks[0])
-            case Transport.BROADCAST:
-                return _execute_broadcast(self.buffer, self.src_rank, self.dst_ranks)
