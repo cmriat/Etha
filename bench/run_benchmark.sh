@@ -5,12 +5,16 @@
 #SBATCH --ntasks=2
 #SBATCH --time=1:00:00
 
+# Surface a torchrun crash instead of exiting 0 + "Benchmark completed".
+# Diagnostics below use ${VAR:-} so unset SLURM vars don't trip -u.
+set -euo pipefail
+
 # Job information
 echo "============================================"
-echo "Job ID: ${SLURM_JOB_ID}"
-echo "Node list: ${SLURM_JOB_NODELIST}"
-echo "Node ID: ${SLURM_NODEID}"
-echo "Task ID: ${SLURM_ARRAY_TASK_ID}"
+echo "Job ID: ${SLURM_JOB_ID:-}"
+echo "Node list: ${SLURM_JOB_NODELIST:-}"
+echo "Node ID: ${SLURM_NODEID:-}"
+echo "Task ID: ${SLURM_ARRAY_TASK_ID:-}"
 echo "============================================"
 
 # NCCL configuration for distributed training
@@ -24,7 +28,9 @@ export NCCL_NCHANNELS_PER_NET_PEER=4
 # Distributed training environment variables
 export NODE_RANK=${JOB_COMPLETION_INDEX}
 export MASTER_ADDR=${SLURM_JOB_FIRST_NODE_IP}
-export MASTER_PORT=23456
+# Per-allocation port (avoids EADDRINUSE from a stale process on a fixed port).
+# cksum is deterministic and MASTER_ADDR is identical across nodes, so all ranks agree.
+export MASTER_PORT=$(( 20000 + $(printf '%s' "${MASTER_ADDR}" | cksum | cut -d' ' -f1) % 20000 ))
 
 echo "Node rank: ${NODE_RANK}"
 echo "Master address: ${MASTER_ADDR}"
