@@ -1,17 +1,19 @@
 """State."""
 
-import msgspec
+from dataclasses import dataclass
+
 import torch.distributed as dist
 
 from etha.comm.ir import M2MMap
 
 
-class PairState(msgspec.Struct):
-    """State of a registered Pair.
+@dataclass(kw_only=True)
+class PairState:
+    """Runtime state of a registered Pair, held in-memory on the Agent.
 
-    PairState is created once per pair via register_pair() and represents
-    the communication topology. It contains NO tensor data or execution state.
-    All tensor data and execution plans are now stored in BatchState.
+    Created once per pair via register_pair(). Holds live process-group handles
+    and the shape-independent M2M topology; never crosses a process boundary
+    (the Agent only exposes scalar signals to the Client over LMDB).
     """
 
     pair_name: str
