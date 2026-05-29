@@ -3,12 +3,10 @@
 import torch
 import torch.distributed as dist
 
+from etha.pg_utils import get_or_create_process_group
+
 from .ir import Chunk, M2MMap, Transport
-from .utils import (
-    get_slicer_tuples,
-    get_slice_from_multi_index,
-    get_or_create_process_group,
-)
+from .utils import get_slicer_tuples, get_slice_from_multi_index
 
 
 def calculate_chunk_shape(

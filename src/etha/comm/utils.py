@@ -7,11 +7,7 @@ import itertools
 
 import torch
 
-# Re-export for backward compatibility
-from etha.pg_utils import get_or_create_process_group
-
 __all__ = [
-    "get_or_create_process_group",
     "get_slicer_tuples",
     "get_slice_from_multi_index",
     "enumerate_partial_subgroup_ranks",

@@ -5,7 +5,7 @@ from enum import Enum
 import torch
 import torch.distributed as dist
 
-from .utils import get_or_create_process_group
+from etha.pg_utils import get_or_create_process_group
 
 
 class Transport(Enum):
