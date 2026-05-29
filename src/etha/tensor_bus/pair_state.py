@@ -3,22 +3,7 @@
 import msgspec
 import torch.distributed as dist
 
-from etha.comm.ir import Route
-
-
-class M2MMap(msgspec.Struct):
-    """Mesh to mesh topology (shape-independent).
-
-    ``routes`` is a flat list of per-cell delivery plans; see ``comm.ir.Route``.
-    """
-
-    routes: list[Route] | None = None
-    source_num_slicers: list[int] | None = None  # How source tensor is partitioned
-    target_num_slicers: list[int] | None = None  # How target tensor is partitioned
-    # Partial placements found on the source mesh, as (mesh_dim_idx, reduce_op).
-    # The caller must all-reduce each Partial dim on the corresponding source
-    # sub-group before send; empty when source has no Partial.
-    source_partial_reductions: list[tuple[int, str]] = []
+from etha.comm.ir import M2MMap
 
 
 class PairState(msgspec.Struct):

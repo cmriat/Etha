@@ -22,10 +22,9 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Partial, Placement
 
 from etha.comm import (
-    chunk_comm,
     bucket_comm,
     get_m2m_map,
-    map_to_chunk_ops,
+    m2m_to_chunks,
     chunk_to_bucket_ops,
 )
 from etha.comm.ir import Chunk
@@ -35,7 +34,7 @@ from etha.comm.utils import enumerate_partial_subgroup_ranks
 
 from .utils import setup_cuda_rebuild_patch
 from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors
-from .pair_state import M2MMap, PairState
+from .pair_state import PairState
 from .batch_state import BatchState
 from .command_queue import CommandQueue
 
@@ -329,12 +328,12 @@ class TensorBusAgent:
             first_has_partial = any(isinstance(p, Partial) for p in first_placements)
             second_has_partial = any(isinstance(p, Partial) for p in second_placements)
 
-            map_1 = src_slicers_1 = tgt_slicers_1 = partial_red_1 = None
-            map_2 = src_slicers_2 = tgt_slicers_2 = partial_red_2 = None
+            m2m_first_to_second = None
+            m2m_second_to_first = None
 
             # First call: first_mesh -> second_mesh (skip if second is Partial target)
             if not second_has_partial:
-                map_1, src_slicers_1, tgt_slicers_1, partial_red_1 = get_m2m_map(
+                m2m_first_to_second = get_m2m_map(
                     source_mesh=first_mesh,
                     source_placements=first_placements,
                     target_mesh=second_mesh,
@@ -350,7 +349,7 @@ class TensorBusAgent:
 
             # Second call: second_mesh -> first_mesh (skip if first is Partial target)
             if not first_has_partial:
-                map_2, src_slicers_2, tgt_slicers_2, partial_red_2 = get_m2m_map(
+                m2m_second_to_first = get_m2m_map(
                     source_mesh=second_mesh,
                     source_placements=second_placements,
                     target_mesh=first_mesh,
@@ -364,19 +363,7 @@ class TensorBusAgent:
                     f"(first side has Partial placement; cross-PG Partial target is not supported)"
                 )
 
-            def _wrap(routes, srcs, tgts, partial_red):
-                if routes is None:
-                    return None
-                return M2MMap(
-                    routes=routes,
-                    source_num_slicers=srcs,
-                    target_num_slicers=tgts,
-                    source_partial_reductions=partial_red,
-                )
-
-            m2m_first_to_second = _wrap(map_1, src_slicers_1, tgt_slicers_1, partial_red_1)
-            m2m_second_to_first = _wrap(map_2, src_slicers_2, tgt_slicers_2, partial_red_2)
-            # Send is "local -> remote", so it's map_1 when local is first.
+            # Send is "local -> remote", so it's first->second when local is first.
             m2m_map_send, m2m_map_recv = _order(m2m_first_to_second, m2m_second_to_first)
             logger.info(
                 f"Agent {self.rank}: Generated P2P maps for pair '{pair_name}'. m2m_map_send: {m2m_map_send} m2m_map_recv: {m2m_map_recv}"
@@ -403,6 +390,8 @@ class TensorBusAgent:
         # for the same reason; only the local-side groups are kept.
         source_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = None
         if local_mesh_info and remote_mesh_info:
+            partial_red_1 = m2m_first_to_second.source_partial_reductions if m2m_first_to_second else []
+            partial_red_2 = m2m_second_to_first.source_partial_reductions if m2m_second_to_first else []
             mesh_1_partial_groups = _create_partial_groups(
                 first_mesh_tensor, partial_red_1, self.rank, first_ranks, first_group
             )
@@ -472,25 +461,18 @@ class TensorBusAgent:
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
 
-        # Execute transfer using flattened chunks/buckets
-        if batch_state.send_chunks or batch_state.recv_chunks:
+        # Execute transfer using the flattened buckets
+        if batch_state.send_buckets or batch_state.recv_buckets:
             if transfer_type == "send":
                 buckets = batch_state.send_buckets
-                chunks = batch_state.send_chunks
             else:
                 buckets = batch_state.recv_buckets
-                chunks = batch_state.recv_chunks
 
             if buckets:
                 logger.info(
                     f"Agent {self.rank}: Batch {batch_id}: Executing bucketized transfer with {len(buckets)} buckets"
                 )
                 bucket_comm(buckets=buckets)
-            elif chunks:
-                logger.info(
-                    f"Agent {self.rank}: Batch {batch_id}: Executing chunk-based transfer with {len(chunks)} chunks"
-                )
-                chunk_comm(chunks=chunks)
             else:
                 # The other direction produced chunks, but this one is empty —
                 # init_pair skipped it because the target side has a Partial
@@ -662,11 +644,9 @@ class TensorBusAgent:
                         )
 
                     if pair_state.m2m_send is not None:
-                        send_chunks = map_to_chunk_ops(
-                            routes=pair_state.m2m_send.routes,
+                        send_chunks = m2m_to_chunks(
+                            pair_state.m2m_send,
                             rank=self.rank,
-                            source_num_slicers=pair_state.m2m_send.source_num_slicers,
-                            target_num_slicers=pair_state.m2m_send.target_num_slicers,
                             source_tensor=tensor,
                             target_tensor=None,
                             transfer_dtype=transfer_dtype,
@@ -675,11 +655,9 @@ class TensorBusAgent:
                         pair_send_chunks.extend(send_chunks)
 
                     if pair_state.m2m_recv is not None:
-                        recv_chunks = map_to_chunk_ops(
-                            routes=pair_state.m2m_recv.routes,
+                        recv_chunks = m2m_to_chunks(
+                            pair_state.m2m_recv,
                             rank=self.rank,
-                            source_num_slicers=pair_state.m2m_recv.source_num_slicers,
-                            target_num_slicers=pair_state.m2m_recv.target_num_slicers,
                             source_tensor=None,
                             target_tensor=tensor,
                             transfer_dtype=transfer_dtype,
@@ -692,29 +670,16 @@ class TensorBusAgent:
 
             logger.info(f"Agent {self.rank}: Batch {batch_id}: Completed registration for pair '{pair_name}'")
 
-        # Store flattened chunks and buckets in BatchState
-        batch_state.send_chunks = all_send_chunks
-        batch_state.recv_chunks = all_recv_chunks
-
+        # Bucketize (cross-pair, by channel key) into BatchState. bucket_size
+        # unset means no coalescing: every chunk becomes its own single-entry
+        # bucket. Chunks are only an intermediate; only buckets are executed.
+        coalesce_bytes = bucket_size or 1
+        batch_state.send_buckets = chunk_to_bucket_ops(chunks=all_send_chunks, bucket_size=coalesce_bytes)
+        batch_state.recv_buckets = chunk_to_bucket_ops(chunks=all_recv_chunks, bucket_size=coalesce_bytes)
         logger.info(
-            f"Agent {self.rank}: Batch {batch_id}: Flattened chunks: "
-            f"send ({len(all_send_chunks)}), recv ({len(all_recv_chunks)})"
+            f"Agent {self.rank}: Batch {batch_id}: Unified buckets: "
+            f"send ({len(batch_state.send_buckets)} buckets), recv ({len(batch_state.recv_buckets)} buckets)"
         )
-
-        # Unified bucketization (cross-pair, by channel key)
-        if bucket_size:
-            batch_state.send_buckets = chunk_to_bucket_ops(
-                chunks=all_send_chunks,
-                bucket_size=bucket_size,
-            )
-            batch_state.recv_buckets = chunk_to_bucket_ops(
-                chunks=all_recv_chunks,
-                bucket_size=bucket_size,
-            )
-            logger.info(
-                f"Agent {self.rank}: Batch {batch_id}: Unified buckets: "
-                f"send ({len(batch_state.send_buckets)} buckets), recv ({len(batch_state.recv_buckets)} buckets)"
-            )
 
         logger.info(
             f"Agent {self.rank}: Batch {batch_id}: Registration complete - "

@@ -1,9 +1,9 @@
-"""Get chunks from m2m map."""
+"""Build chunk descriptors from routes."""
 
 import torch
 import torch.distributed as dist
 
-from .ir import Chunk, Route, Transport
+from .ir import Chunk, M2MMap, Transport
 from .utils import (
     get_slicer_tuples,
     get_slice_from_multi_index,
@@ -21,18 +21,20 @@ def calculate_chunk_shape(
     return chunk_shape
 
 
-def map_to_chunk_ops(
-    routes: list[Route],
+def m2m_to_chunks(
+    m2m: M2MMap,
     rank: int,
-    source_num_slicers: list[int],
-    target_num_slicers: list[int],
     source_tensor: torch.Tensor | None = None,
     target_tensor: torch.Tensor | None = None,
     transfer_dtype: torch.dtype | None = None,
     source_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = None,
 ) -> list[Chunk]:
+    """Materialize an ``M2MMap`` (topology) onto local tensors into chunks."""
+    routes = m2m.routes
     if not routes:
         return []
+    source_num_slicers = m2m.source_num_slicers
+    target_num_slicers = m2m.target_num_slicers
     source_tensor_shape = source_tensor.shape if source_tensor is not None else None
     target_tensor_shape = target_tensor.shape if target_tensor is not None else None
     source_slicer_tuples = None

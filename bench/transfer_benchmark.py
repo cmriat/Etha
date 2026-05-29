@@ -18,10 +18,9 @@ from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_t
 from torch.distributed.tensor.placement_types import Partial, _StridedShard
 
 from etha.comm import (
-    chunk_comm,
     bucket_comm,
     get_m2m_map,
-    map_to_chunk_ops,
+    m2m_to_chunks,
     chunk_to_bucket_ops,
     gather_broadcast_comm,
 )
@@ -153,12 +152,13 @@ def benchmark_single_shape(
     # Check if we need to profile this shape
     should_profile = profiling_config is not None and shape in profiling_config["profile_shapes"]
 
-    # Chunks will be bound after they are created
+    # M2M method = single-entry buckets (no coalescing); built once, reused.
+    m2m_buckets = chunk_to_bucket_ops(chunks=chunks, bucket_size=1)
 
     # M2M method warmup
     dist.barrier()
     for _ in range(warmup_iter):
-        chunk_comm(chunks=chunks)
+        bucket_comm(buckets=m2m_buckets)
     if device == "cuda":
         torch.cuda.synchronize()
     dist.barrier()
@@ -168,7 +168,7 @@ def benchmark_single_shape(
         m2m_profiling_spec = ProfilingSpec(
             enable_profiling=True,
             dump_folder=UPath(profiling_config["dump_folder"]),
-            save_traces_folder=UPath(f"traces/{mesh_info}/shape_{shape[0]}/rank_{rank}/chunk_comm"),
+            save_traces_folder=UPath(f"traces/{mesh_info}/shape_{shape[0]}/rank_{rank}/m2m"),
             profile_freq=profiling_config["profile_freq"],
             warmup_steps=profiling_config["warmup_steps"],
             active_steps=profiling_config["active_steps"],
@@ -184,7 +184,7 @@ def benchmark_single_shape(
                     dist.barrier()
                     profiler.step()
                     for _ in range(10):
-                        chunk_comm(chunks=chunks)
+                        bucket_comm(buckets=m2m_buckets)
 
                     # Memory snapshot if requested
                     if m2m_profiling_spec.enable_memory_snapshot and step == m2m_profiling_spec.warmup_steps + 1:
@@ -203,7 +203,7 @@ def benchmark_single_shape(
 
     start_event.record()
     for _ in range(profile_iter):
-        chunk_comm(chunks=chunks)
+        bucket_comm(buckets=m2m_buckets)
     end_event.record()
 
     torch.cuda.synchronize()
@@ -652,7 +652,7 @@ def main():
                 torch.cuda.synchronize()
             dist.barrier()
             start_time = time.perf_counter()
-            m2m_map, source_num_slicers, target_num_slicers, _ = get_m2m_map(
+            m2m = get_m2m_map(
                 source_mesh=current_source_mesh,
                 source_placements=source_specs,
                 target_mesh=current_target_mesh,
@@ -706,11 +706,9 @@ def main():
                         source_local_tensor = None
                         target_local_tensor = target_local_tensors[i]
 
-                    chunks = map_to_chunk_ops(
-                        routes=m2m_map,
+                    chunks = m2m_to_chunks(
+                        m2m,
                         rank=rank,
-                        source_num_slicers=source_num_slicers,
-                        target_num_slicers=target_num_slicers,
                         source_tensor=source_local_tensor,
                         target_tensor=target_local_tensor,
                         source_partial_groups=source_partial_groups,
@@ -731,7 +729,7 @@ def main():
                     print(
                         f"    Generated {len(all_buckets)} buckets total ({len(all_buckets) // num_tensors_per_batch} per tensor)"
                     )
-                    print(f"    m2m map: {m2m_map}")
+                    print(f"    routes: {m2m.routes}")
 
                 # Create mesh info string for output directory organization
                 src = "_".join(map(str, source_mesh_shape))

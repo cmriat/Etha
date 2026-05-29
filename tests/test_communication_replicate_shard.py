@@ -22,7 +22,7 @@ from torch.distributed.tensor import DTensor
 from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Partial
 
-from etha.comm import chunk_comm, bucket_comm, get_m2m_map, map_to_chunk_ops, chunk_to_bucket_ops
+from etha.comm import bucket_comm, get_m2m_map, m2m_to_chunks, chunk_to_bucket_ops
 from etha.tensor_bus.agent import _create_partial_groups
 
 logging.basicConfig(level=logging.INFO)
@@ -121,7 +121,7 @@ def _run(
             tgt_local = tgt_dt.to_local()
             src_dt, src_local = None, None
 
-    m2m_map, src_slicers, tgt_slicers, partial_red = get_m2m_map(
+    m2m = get_m2m_map(
         source_mesh=source_mesh,
         source_placements=list(source_placements),
         target_mesh=target_mesh,
@@ -129,6 +129,7 @@ def _run(
         group=dist.group.WORLD,
         device=device,
     )
+    partial_red = m2m.source_partial_reductions
 
     # Source-side Partial sub-groups (collective on WORLD; non-members still call).
     source_ranks_list = list(range(source_ws))
@@ -141,11 +142,9 @@ def _run(
         full_source_group=source_group,
     )
 
-    chunks = map_to_chunk_ops(
-        routes=m2m_map,
+    chunks = m2m_to_chunks(
+        m2m,
         rank=rank,
-        source_num_slicers=src_slicers,
-        target_num_slicers=tgt_slicers,
         source_tensor=src_local,
         target_tensor=tgt_local,
         source_partial_groups=source_partial_groups or None,
@@ -157,7 +156,7 @@ def _run(
     )
     match comm_method:
         case "chunk":
-            chunk_comm(chunks=chunks)
+            bucket_comm(buckets=chunk_to_bucket_ops(chunks=chunks, bucket_size=1))
         case "bucket":
             buckets = chunk_to_bucket_ops(chunks=chunks, bucket_size=256 * 1024 * 1024)
             bucket_comm(buckets=buckets)
@@ -253,7 +252,7 @@ def _run_partial_mixed_dtype(
     if not is_source:
         dist.recv(expected_bf16, src=0)
 
-    m2m_map, src_slicers, tgt_slicers, partial_red = get_m2m_map(
+    m2m = get_m2m_map(
         source_mesh=source_mesh,
         source_placements=list(source_placements),
         target_mesh=target_mesh,
@@ -261,6 +260,7 @@ def _run_partial_mixed_dtype(
         group=dist.group.WORLD,
         device=device,
     )
+    partial_red = m2m.source_partial_reductions
 
     source_ranks_list = list(range(source_ws))
     source_group = dist.new_group(ranks=source_ranks_list)
@@ -272,11 +272,9 @@ def _run_partial_mixed_dtype(
         full_source_group=source_group,
     )
 
-    chunks = map_to_chunk_ops(
-        routes=m2m_map,
+    chunks = m2m_to_chunks(
+        m2m,
         rank=rank,
-        source_num_slicers=src_slicers,
-        target_num_slicers=tgt_slicers,
         source_tensor=src_local if is_source else None,
         target_tensor=tgt_local,
         transfer_dtype=transfer_dtype,
@@ -285,7 +283,7 @@ def _run_partial_mixed_dtype(
 
     match comm_method:
         case "chunk":
-            chunk_comm(chunks=chunks)
+            bucket_comm(buckets=chunk_to_bucket_ops(chunks=chunks, bucket_size=1))
         case "bucket":
             buckets = chunk_to_bucket_ops(chunks=chunks, bucket_size=256 * 1024 * 1024)
             bucket_comm(buckets=buckets)
