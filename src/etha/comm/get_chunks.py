@@ -33,6 +33,9 @@ def m2m_to_chunks(
         return []
     source_num_slicers = m2m.source_num_slicers
     target_num_slicers = m2m.target_num_slicers
+    # Partial transfers must not coalesce; set on both ends (this is M2MMap-level, so
+    # source and target ranks agree, keeping send/recv bucketing symmetric).
+    no_coalesce = bool(m2m.source_partial_reductions)
     source_tensor_shape = source_tensor.shape if source_tensor is not None else None
     target_tensor_shape = target_tensor.shape if target_tensor is not None else None
     source_slicer_tuples = None
@@ -80,6 +83,7 @@ def m2m_to_chunks(
                     tensor=source_tensor,
                     transfer_dtype=transfer_dtype,
                     source_partial_groups=source_partial_groups,
+                    no_coalesce=no_coalesce,
                 )
             )
         for dst in route.dsts:
@@ -107,6 +111,7 @@ def m2m_to_chunks(
                         src_slice=src_slice_tuples,
                         dst_slice=dst_slice_tuples,
                         tensor=target_tensor,
+                        no_coalesce=no_coalesce,
                     )
                 )
             else:
@@ -123,6 +128,7 @@ def m2m_to_chunks(
                         dst_slice=dst_slice_tuples,
                         tensor=target_tensor,
                         transfer_dtype=transfer_dtype,
+                        no_coalesce=no_coalesce,
                     )
                 )
     return chunks
