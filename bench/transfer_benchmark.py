@@ -12,8 +12,6 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import torch.distributed as dist
-from upath import UPath
-from utils import ProfilingSpec, dump_memory_snapshot, maybe_enable_profiling
 from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import Partial, _StridedShard
 
@@ -31,6 +29,9 @@ from etha.comm.utils import enumerate_partial_subgroup_ranks
 RDMA_SEND_BANDWIDTH_GB_S = 50.0
 NVLINK_Single_BANDWIDTH_GB_S = 450.0
 BUCKET_SIZE_BYTES = 256 * 1024 * 1024
+# bucket_size sweep (bytes). 1 = per-chunk (no coalescing) = the "chunk" method.
+# Trimmed to the contenders after M2: 2MB/256MB were never the answer.
+BUCKET_SIZE_SWEEP = [1, 8 * 1024 * 1024, 32 * 1024 * 1024]
 
 
 def calculate_transfer_bytes(
@@ -118,7 +119,6 @@ def benchmark_single_shape(
     num_tensors: int,  # Logical batch size (origin_tensors holds only index 0 to save memory)
     shape: tuple,
     chunks: list,  # All chunks from all tensors (extended)
-    buckets: list,
     current_source_mesh: DeviceMesh,
     current_target_mesh: DeviceMesh,
     source_specs: list,
@@ -130,8 +130,9 @@ def benchmark_single_shape(
     warmup_iter: int,
     profile_iter: int,
     gpus_per_node: int,
-    profiling_config: dict | None = None,
-    mesh_info: str = "",
+    bucket_sizes: list[int],
+    profiling_config: dict | None = None,  # noqa: ARG001
+    mesh_info: str = "",  # noqa: ARG001
     has_partial: bool = False,
 ):
     """Benchmark M2M vs Gather-Broadcast for a batch of tensors.
@@ -149,118 +150,30 @@ def benchmark_single_shape(
     # Calculate total size of all tensors in batch (per-tensor size × num_tensors).
     total_tensor_size_bytes = origin_tensors[0].nelement() * origin_tensors[0].element_size() * num_tensors
 
-    # Check if we need to profile this shape
-    should_profile = profiling_config is not None and shape in profiling_config["profile_shapes"]
-
-    # M2M method = single-entry buckets (no coalescing); built once, reused.
-    m2m_buckets = chunk_to_bucket_ops(chunks=chunks, bucket_size=1)
-
-    # M2M method warmup
-    dist.barrier()
-    for _ in range(warmup_iter):
-        bucket_comm(buckets=m2m_buckets)
-    if device == "cuda":
+    def _time_buckets(buckets) -> float:
+        dist.barrier()
+        for _ in range(warmup_iter):
+            bucket_comm(buckets=buckets)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        dist.barrier()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        for _ in range(profile_iter):
+            bucket_comm(buckets=buckets)
+        end_event.record()
         torch.cuda.synchronize()
-    dist.barrier()
+        return start_event.elapsed_time(end_event) / 1000.0 / profile_iter  # ms -> s
 
-    # M2M method with profiling if enabled
-    if should_profile:
-        m2m_profiling_spec = ProfilingSpec(
-            enable_profiling=True,
-            dump_folder=UPath(profiling_config["dump_folder"]),
-            save_traces_folder=UPath(f"traces/{mesh_info}/shape_{shape[0]}/rank_{rank}/m2m"),
-            profile_freq=profiling_config["profile_freq"],
-            warmup_steps=profiling_config["warmup_steps"],
-            active_steps=profiling_config["active_steps"],
-            enable_memory_snapshot=profiling_config["enable_memory_snapshot"],
-        )
+    # Sweep bucket_size. bucket_size=1 is the per-chunk (no coalescing) method.
+    sweep_time: dict[int, float] = {}
+    for bs in bucket_sizes:
+        sweep_buckets = chunk_to_bucket_ops(chunks=chunks, bucket_size=bs)
+        sweep_time[bs] = _time_buckets(sweep_buckets)
 
-        with maybe_enable_profiling(m2m_profiling_spec, global_step=0) as profiler:
-            if profiler is not None:
-                # Profiled iterations
-                for step in range(m2m_profiling_spec.profile_freq):
-                    if device == "cuda":
-                        torch.cuda.synchronize()
-                    dist.barrier()
-                    profiler.step()
-                    for _ in range(10):
-                        bucket_comm(buckets=m2m_buckets)
-
-                    # Memory snapshot if requested
-                    if m2m_profiling_spec.enable_memory_snapshot and step == m2m_profiling_spec.warmup_steps + 1:
-                        snapshot_dir = f"{m2m_profiling_spec.dump_folder}/memory_snapshots/{mesh_info}/shape_{shape[0]}/rank_{rank}"
-                        dump_memory_snapshot(snapshot_dir, step, rank)
-            else:
-                pass
-
-    # Time measurement with CUDA events
-    if device == "cuda":
-        torch.cuda.synchronize()
-    dist.barrier()
-
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    start_event.record()
-    for _ in range(profile_iter):
-        bucket_comm(buckets=m2m_buckets)
-    end_event.record()
-
-    torch.cuda.synchronize()
-    m2m_time = start_event.elapsed_time(end_event) / 1000.0 / profile_iter  # ms -> s
-
-    dist.barrier()
-    for _ in range(warmup_iter):
-        bucket_comm(buckets=buckets)
-    if device == "cuda":
-        torch.cuda.synchronize()
-    dist.barrier()
-
-    if should_profile:
-        bucket_profiling_spec = ProfilingSpec(
-            enable_profiling=True,
-            dump_folder=UPath(profiling_config["dump_folder"]),
-            save_traces_folder=UPath(f"traces/{mesh_info}/shape_{shape[0]}/rank_{rank}/bucket_comm"),
-            profile_freq=profiling_config["profile_freq"],
-            warmup_steps=profiling_config["warmup_steps"],
-            active_steps=profiling_config["active_steps"],
-            enable_memory_snapshot=profiling_config["enable_memory_snapshot"],
-        )
-
-        with maybe_enable_profiling(bucket_profiling_spec, global_step=0) as profiler:
-            if profiler is not None:
-                for step in range(bucket_profiling_spec.profile_freq):
-                    if device == "cuda":
-                        torch.cuda.synchronize()
-                    dist.barrier()
-                    profiler.step()
-                    for _ in range(10):
-                        bucket_comm(buckets=buckets)
-                    if bucket_profiling_spec.enable_memory_snapshot and step == bucket_profiling_spec.warmup_steps + 1:
-                        snapshot_dir = f"{bucket_profiling_spec.dump_folder}/memory_snapshots/{mesh_info}/shape_{shape[0]}/rank_{rank}"
-                        dump_memory_snapshot(snapshot_dir, step + 2000, rank)
-            else:
-                pass
-
-    # Time measurement with CUDA events
-    if device == "cuda":
-        torch.cuda.synchronize()
-    dist.barrier()
-
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    start_event.record()
-    for _ in range(profile_iter):
-        bucket_comm(buckets=buckets)
-    end_event.record()
-
-    torch.cuda.synchronize()
-    bucket_time = start_event.elapsed_time(end_event) / 1000.0 / profile_iter  # ms -> s
-
-    # Gather-Broadcast method warmup (only test first tensor as reference).
-    # For Partial source: user manually redistributes to Replicate first (inside
-    # the timed loop so the reduce cost is counted), then calls gather_broadcast.
+    # Gather-Broadcast baseline (reference). For Partial source, pre-reduce inside
+    # the timed loop so the reduce cost is counted.
     def _baseline_iter():
         if source_dist_tensors:
             src_dt = source_dist_tensors[0]
@@ -276,94 +189,43 @@ def benchmark_single_shape(
     for _ in range(warmup_iter):
         bc_result = _baseline_iter()
 
-    # Verify correctness for first tensor (M2M modifies target tensors in-place).
+    # Correctness: the sweep wrote target tensors in-place (every bucket_size
+    # produces the same result); compare the first tensor against the baseline.
     if target_local_tensors and target_local_tensors[0] is not None and bc_result is not None:
         if not torch.allclose(target_local_tensors[0], bc_result.to_local()):
-            print(f"[Rank {rank}] M2M result shape: {target_local_tensors[0].shape}")
-            print(f"[Rank {rank}] Baseline result shape: {bc_result.to_local().shape}")
             print(f"[Rank {rank}] Max diff: {(target_local_tensors[0] - bc_result.to_local()).abs().max().item()}")
-            print(f"[Rank {rank}] M2M sample: {target_local_tensors[0]}")
-            print(f"[Rank {rank}] Baseline sample: {bc_result.to_local()}")
             raise ValueError("M2M and Gather-Broadcast results mismatch!")
 
     if device == "cuda":
         torch.cuda.synchronize()
     dist.barrier()
 
-    # Gather-Broadcast method with profiling if enabled
-    if should_profile:
-        # Setup profiling for Gather-Broadcast
-        gb_profiling_spec = ProfilingSpec(
-            enable_profiling=True,
-            dump_folder=UPath(profiling_config["dump_folder"]),
-            save_traces_folder=UPath(f"traces/{mesh_info}/shape_{shape[0]}/rank_{rank}/gather_broadcast_comm"),
-            profile_freq=profiling_config["profile_freq"],
-            warmup_steps=profiling_config["warmup_steps"],
-            active_steps=profiling_config["active_steps"],
-            enable_memory_snapshot=profiling_config["enable_memory_snapshot"],
-        )
-
-        with maybe_enable_profiling(gb_profiling_spec, global_step=0) as profiler:
-            if profiler is not None:
-                # Profiled iterations
-                for step in range(gb_profiling_spec.profile_freq):
-                    profiler.step()
-                    for _ in range(10):
-                        _baseline_iter()
-
-                    # Additional memory snapshot if requested
-                    if gb_profiling_spec.enable_memory_snapshot and step == gb_profiling_spec.warmup_steps + 1:
-                        snapshot_dir = (
-                            f"{gb_profiling_spec.dump_folder}/memory_snapshots/{mesh_info}/shape_{shape[0]}/rank_{rank}"
-                        )
-                        dump_memory_snapshot(snapshot_dir, step + 1000, rank)  # +1000 to distinguish from M2M
-            else:
-                pass
-
-    # Time measurement with CUDA events
-    if device == "cuda":
-        torch.cuda.synchronize()
-    dist.barrier()
-
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
-
     start_event.record()
     for _ in range(profile_iter):
         _baseline_iter()
     end_event.record()
-
     torch.cuda.synchronize()
     baseline_time = start_event.elapsed_time(end_event) / 1000.0 / profile_iter  # ms -> s
 
     if rank == 0:
-        # Calculate ideal bytes that target ranks need to receive (for all tensors in batch)
         ideal_transfer_bytes = calculate_transfer_bytes(current_target_mesh, target_specs, total_tensor_size_bytes)
         ideal_transfer_gb = ideal_transfer_bytes / (1024**3)
-
-        # Calculate ideal bandwidth (hardware topology aware)
         ideal_bw = calculate_ideal_bandwidth(
-            current_source_mesh,
-            current_target_mesh,
-            target_specs,
-            total_tensor_size_bytes,
-            gpus_per_node,
+            current_source_mesh, current_target_mesh, target_specs, total_tensor_size_bytes, gpus_per_node
         )
 
-        # Effective throughput: how fast we complete the redistribution task
-        # M2M: tests all tensors in batch
-        m2m_effective_throughput = ideal_transfer_gb / m2m_time
-        bucket_effective_throughput = ideal_transfer_gb / bucket_time
-
-        # Baseline: only tests 1 tensor, so divide by num_tensors
+        sweep_tput = {bs: ideal_transfer_gb / t for bs, t in sweep_time.items()}
         single_tensor_ideal_transfer_gb = ideal_transfer_gb / num_tensors
         baseline_effective_throughput = single_tensor_ideal_transfer_gb / baseline_time
 
         print(f"    Batch: {num_tensors} tensors x {shape} = {total_tensor_size_bytes / (1024**2):.2f} MB total")
         print(f"    Ideal M2M transfer (target needs): {ideal_transfer_bytes / (1024**2):.2f} MB")
         print(f"    Ideal bandwidth (RDMA+NVLink): {ideal_bw:.2f} GB/s")
-        print(f"    M2M batch effective throughput ({num_tensors} tensors): {m2m_effective_throughput:.2f} GB/s")
-        print(f"    Bucket batch effective throughput ({num_tensors} tensors): {bucket_effective_throughput:.2f} GB/s")
+        for bs in bucket_sizes:
+            label = "chunk" if bs == 1 else f"{bs // (1024 * 1024)}MB"
+            print(f"    bucket_size={label:>6}: {sweep_tput[bs]:.2f} GB/s")
         print(f"    Baseline effective throughput (1 tensor): {baseline_effective_throughput:.2f} GB/s")
 
         return {
@@ -372,8 +234,9 @@ def benchmark_single_shape(
             "tensor_size_mb": total_tensor_size_bytes / (1024**2),
             "ideal_transfer_mb": ideal_transfer_bytes / (1024**2),
             "ideal_bandwidth_gb_s": ideal_bw,
-            "m2m_effective_throughput_gb_s": m2m_effective_throughput,
-            "bucket_effective_throughput_gb_s": bucket_effective_throughput,
+            "sweep_throughput_gb_s": {str(bs): v for bs, v in sweep_tput.items()},
+            "m2m_effective_throughput_gb_s": sweep_tput[bucket_sizes[0]],
+            "bucket_effective_throughput_gb_s": sweep_tput[bucket_sizes[-1]],
             "baseline_effective_throughput_gb_s": baseline_effective_throughput,
         }
 
@@ -715,19 +578,11 @@ def main():
                     )
                     all_chunks.extend(chunks)
 
-                all_buckets = chunk_to_bucket_ops(
-                    chunks=all_chunks,
-                    bucket_size=BUCKET_SIZE_BYTES,
-                )
-
                 ir_gen_time = (time.perf_counter() - start_time) / profile_iter
                 if rank == 0:
                     print(f"    IR generation time: {ir_gen_time:.6f}s")
                     print(
                         f"    Generated {len(all_chunks)} chunks total ({len(all_chunks) // num_tensors_per_batch} per tensor)"
-                    )
-                    print(
-                        f"    Generated {len(all_buckets)} buckets total ({len(all_buckets) // num_tensors_per_batch} per tensor)"
                     )
                     print(f"    routes: {m2m.routes}")
 
@@ -743,7 +598,6 @@ def main():
                     num_tensors_per_batch,
                     shape,
                     all_chunks,
-                    all_buckets,
                     current_source_mesh,
                     current_target_mesh,
                     source_specs,
@@ -755,6 +609,7 @@ def main():
                     warmup_iter,
                     profile_iter,
                     gpus_per_node,
+                    BUCKET_SIZE_SWEEP,
                     profiling_config,
                     mesh_info,
                     has_partial=has_partial,
@@ -764,7 +619,7 @@ def main():
                     current_results.append(result)
 
                 # Clean up tensors after each shape benchmark
-                del origin_tensors, source_dist_tensors, target_local_tensors, all_chunks, all_buckets
+                del origin_tensors, source_dist_tensors, target_local_tensors, all_chunks
                 if device == "cuda":
                     torch.cuda.empty_cache()
 
