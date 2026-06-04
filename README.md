@@ -6,6 +6,8 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/github/actions/workflow/status/cmriat/Etha/docs.yml?branch=main&label=docs)](https://cmriat.github.io/Etha/)
 
+![Etha — M-to-N DTensor redistribution](docs/design/etha_arch.png)
+
 Etha redistributes a tensor described as `(DeviceMesh, Placement)` on one
 PyTorch process group into a different `(DeviceMesh, Placement)` on a second,
 independently-launched process group — the same redistribution `DTensor` does
@@ -14,6 +16,15 @@ in-process, generalized to two unrelated jobs.
 The canonical use case: shipping model weights from a training cluster to an
 inference cluster in a disaggregated RL setup, where the two sides were
 launched separately and run different parallelism configurations.
+
+## The core: the M-to-N communication map
+
+Every source rank sends only the shard slices each target rank actually needs —
+no node ever materializes a full copy. That routing is exactly what
+`get_m2m_map` computes. See the [design walkthrough](docs/design/get-m2m-map.md) for the full
+picture.
+
+![get_m2m_map — tensor redistribution](docs/design/etha_m2m_map.png)
 
 Four properties define the surface:
 

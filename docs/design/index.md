@@ -6,5 +6,6 @@ trade-offs behind a specific subsystem.
 ```{toctree}
 :maxdepth: 1
 
+get-m2m-map
 connection-validation
 ```
