@@ -5,7 +5,7 @@
 > - 21GB 的 MoE 权重怎么跨集群同步？Etha：只搬该搬的那一份，零拷贝零冗余
 > - PyTorch 原生的 M-to-N 张量重分布，Etha 专治 RL 训推参数同步
 
-【配图 1：`etha_arch.png`，作为开篇 banner】
+![Etha：M-to-N DTensor 重分布架构概览](etha_arch.png)
 
 在训推分离（disaggregated RL）逐渐成为大模型后训练主流的今天，一个看似不起眼的环节正悄悄变成显存杀手——训练好的权重，怎么高效同步给推理引擎？
 
@@ -23,7 +23,7 @@
 
 **第二座山：并行策略对不齐。** 训练侧可能是 TP×FSDP×EP 的复杂切分，推理侧（vLLM/SGLang）又是另一套 TP×EP。同一个张量，两边切法完全不同，怎么把训练的分片精确送到推理需要的位置，是个又繁琐又容易错的体力活。
 
-【配图 2（建议新做）：显存对比图——左侧 gather-broadcast"每卡一份完整 weight ×3"红色爆满，右侧 Etha"每卡只持自己分片"绿色清爽】
+![单卡显存对比：gather-broadcast（+2× 最大权重，逼近 OOM）vs Etha（≈0 额外）](mem.png)
 
 ---
 
@@ -46,7 +46,7 @@ Etha 把这件事抽象成一句话：**`any (mesh, placement) → any (mesh, pl
 
 要让"源分片直发目标分片"成立，关键是得先算清楚一张账：**同一个逻辑张量，源这边的哪一块、该发给目标那边的哪个 rank 的哪个位置。** 这张"搬运地图"由 Etha 的核心算法 `get_m2m_map` 计算。
 
-【配图 3：`etha_m2m_map.png`，6 步流程图】
+![get_m2m_map 执行流程](etha_m2m_map.png)
 
 它的思路很巧：
 
