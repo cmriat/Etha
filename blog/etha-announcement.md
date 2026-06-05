@@ -74,15 +74,24 @@ Etha 在工程上采用 Worker + Agent 的分离架构：你的训练/推理代�
 
 ## 五、和现有方案比，Etha 站在哪
 
-| 方案 | 是否物化完整权重 | 显存压力 | 布局适配 |
+业界的权重同步方案，大致分两条路线。
+
+**一是"先拼完整权重再传"。** 先 all-gather 把每个 weight 在卡上恢复成完整张量，再发出去——传统的 gather-broadcast（verl 的 checkpoint engine 各后端 NCCL/NIXL/Mooncake，本质都属这一类）和 abcdabcd987 博客里的 gather-full + RDMA 方案都在此列。它们的共同代价是物化完整权重、受"最大权重"显存天花板限制。abcdabcd987 也坦言这么做"不是最快，但好写"，而且 gather 成完整张量后做投影融合、量化都更方便——本质是拿冗余换实现简单。
+
+**二是"只搬该搬的分片"，也就是零冗余。** 不物化完整权重，源分片直发目标分片。蚂蚁开源的 AWEX 和 Etha 都走这条路——都靠预计算的 P2P 映射、分片直传、推理侧 in-place 更新。
+
+| 方案 | 物化完整权重 | 显存 | 布局适配 |
 |---|---|---|---|
-| gather-broadcast（传统） | 是，每卡都拼 | 高（×2~3 最大权重） | 手动 |
-| verl checkpoint engine（NCCL/NIXL/Mooncake） | 是，都要先 all-gather | 受最大权重限制 | 框架内适配 |
-| **Etha** | **否，分片直传** | **无"最大权重"天花板** | **PyTorch (mesh, placement) 自动** |
+| gather-broadcast（含 verl checkpoint engine） | 是，先 all-gather | 受最大权重限制 | 框架内适配 |
+| abcdabcd987（gather-full + RDMA） | 是，`full_tensor` | 受最大权重限制 | PyTorch DTensor placement |
+| AWEX（蚂蚁，零冗余） | 否，只传分片 | 无最大权重天花板 | 统一权重格式中间层 |
+| **Etha（零冗余）** | **否，分片直传** | **无最大权重天花板** | **PyTorch (mesh, placement) 原生** |
 
-值得一提的是，业界已有同类的零冗余思路（如蚂蚁的 AWEX），但它们通常需要一层"统一权重格式"的中间适配层；而 **Etha 直接复用 PyTorch 的 `DeviceMesh`/`Placement` 原语，不引入额外的格式抽象**——这既是它的简洁之处，也意味着接入成本更低。
+Etha 和最接近的 AWEX 都做到了零冗余，关键区别在适配层：**AWEX 需要先把不同框架、不同并行策略的权重转成一层"统一格式"再传，而 Etha 直接复用 PyTorch 的 `DeviceMesh` / `Placement` 原语，不引入任何中间格式抽象**——接入更轻，也省掉一套格式转换的维护。
 
-性能上，【▲此处插入你们的 benchmark：例如在 N 卡、某模型上，相比 gather-broadcast 基线的显存占用对比 / 单轮同步耗时 / 有效带宽。建议给一张柱状对比图】。
+性能上，下面是 Etha 在多种 mesh 配置下相比 gather-broadcast 基线的等效带宽对比（占位图，最终数据与口径待补充）：
+
+![Etha 等效带宽对比（vs gather-broadcast 基线）](etha-bandwidth.png)
 
 ---
 
