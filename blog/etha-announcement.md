@@ -76,14 +76,14 @@ Etha 在工程上采用 Worker + Agent 的分离架构：你的训练/推理代�
 
 业界的权重同步方案，大致分两条路线。
 
-**一是"先拼完整权重再传"。** 先 all-gather 把每个 weight 在卡上恢复成完整张量，再发出去——传统的 gather-broadcast（verl 的 checkpoint engine 各后端 NCCL/NIXL/Mooncake，本质都属这一类）和 abcdabcd987 博客里的 gather-full + RDMA 方案都在此列。它们的共同代价是物化完整权重、受"最大权重"显存天花板限制。abcdabcd987 也坦言这么做"不是最快，但好写"，而且 gather 成完整张量后做投影融合、量化都更方便——本质是拿冗余换实现简单。
+**一是"先拼完整权重再传"。** 先 all-gather 把每个 weight 在卡上恢复成完整张量，再发出去——传统的 gather-broadcast（verl 的 checkpoint engine 各后端 NCCL/NIXL/Mooncake，本质都属这一类）和 Perplexity 的 fabric-lib（RDMA point-to-point，论文《RDMA Point-to-Point Communication for LLM Systems》，arXiv:2510.27656）都在此列。它们的共同代价是物化完整权重、受"最大权重"显存天花板限制。fabric-lib 的作者也坦言走 gather-full 这条路"不是最快，但好写"，而且 gather 成完整张量后做投影融合、量化都更方便——本质是拿冗余换实现简单。
 
 **二是"只搬该搬的分片"，也就是零冗余。** 不物化完整权重，源分片直发目标分片。蚂蚁开源的 AWEX 和 Etha 都走这条路——都靠预计算的 P2P 映射、分片直传、推理侧 in-place 更新。
 
 | 方案 | 物化完整权重 | 显存 | 布局适配 |
 |---|---|---|---|
 | gather-broadcast（含 verl checkpoint engine） | 是，先 all-gather | 受最大权重限制 | 框架内适配 |
-| abcdabcd987（gather-full + RDMA） | 是，`full_tensor` | 受最大权重限制 | PyTorch DTensor placement |
+| Perplexity fabric-lib（RDMA P2P） | 是，`full_tensor` | 受最大权重限制 | PyTorch DTensor placement |
 | AWEX（蚂蚁，零冗余） | 否，只传分片 | 无最大权重天花板 | 统一权重格式中间层 |
 | **Etha（零冗余）** | **否，分片直传** | **无最大权重天花板** | **PyTorch (mesh, placement) 原生** |
 
