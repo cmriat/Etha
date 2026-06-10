@@ -4,91 +4,22 @@ version = "0.1.0"
 description = "etha"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.10"
+dependencies = ["torch"]
 
 [build-system]
 build-backend = "hatchling.build"
 requires = ["hatchling"]
-
-[tool.hatch.build.targets.sdist]
-exclude = [
-  "/.github",
-]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/etha"]
 
 [tool.ruff]
 line-length = 120
-output-format = "grouped"
-target-version = "py310"
-
-src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = [
-  # isort
-  "I",
-  # bugbear rules
-  "B",
-  # remove unused imports
-  "F401",
-  # bare except statements
-  "E722",
-  # unused arguments
-  "ARG",
-  # print statements
-  "T201",
-  "T203",
-  # misuse of typing.TYPE_CHECKING
-  "TC004",
-  # import rules
-  "TID251",
-  # docstring
-  "D",
-  # pyupgrade - modernize Python code
-  "UP"
-]
-ignore = [
-  # mutable defaults
-  "B006",
-  # On top of the Google convention, disable `D417`
-  "D417",
-  "D101",
-  "D102",
-  "D103",
-  "D105",
-  "D107",
-  "T201"
-]
-unfixable = [
-  # disable auto fix for print statements
-  "T201",
-  "T203",
-]
-
-[tool.ruff.format]
-docstring-code-format = true
+select = ["I", "F", "B", "UP"]
 
 [tool.ruff.lint.isort]
 length-sort = true
 length-sort-straight = true
-combine-as-imports = true
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
-
-[tool.ruff.lint.per-file-ignores]
-"tests/**.py" = ["ARG001"]
-
-[tool.mypy]
-python_version = "3.10"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
-check_untyped_defs = true
-
-[[tool.mypy.overrides]]
-module = ["lmdb", "posix_ipc"]
-ignore_missing_imports = true

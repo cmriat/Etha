@@ -1,8 +1,16 @@
 """Etha."""
 
-from . import comm, tensor_bus
+from .ir import Chunk, Route, M2MMap, Endpoint
+from .planner import get_m2m_map, split_fanout, m2m_to_chunks
+from .execution import chunk_comm
 
 __all__ = [
-    "comm",
-    "tensor_bus",
+    "Chunk",
+    "Route",
+    "M2MMap",
+    "Endpoint",
+    "chunk_comm",
+    "get_m2m_map",
+    "split_fanout",
+    "m2m_to_chunks",
 ]
