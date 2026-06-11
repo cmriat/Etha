@@ -183,29 +183,32 @@ comm 核心不知道、也不关心控制流从哪来,也不绑定具体 transpo
 不是反例,恰恰**坐实**这条边界——它们是 load 侧多出来的仿射,落在边界该在的一侧。Etha 接前段
 (仿射,view + m2m),引擎留后段(非仿射)。
 
-### 落地:Etha bypass weight_loader,直填 HF staging,引擎跑 process
+### 落地:Etha bypass weight_loader,直落为默认,staging 为例外
 
 ```
-trainer 逻辑权重(bf16,带干净 placement)
-   │  Etha:placement m2m reshard(never full),落进 consumer 按 get_layout 注册的仿射 view
-   ▼
-HF-format staging(fuse 好、未 swizzle、未量化 —— 纯 HF 布局,与 backend 无关)
-   │  引擎:process_weights_after_loading —— 非仿射 swizzle + 量化 + 可能的 gate/up swap
-   ▼
-kernel-format param(推理用)
+直落(默认):布局无断裂的配置 —— bf16→bf16,或原生 fp8 直发 + plain kernel
+trainer 逻辑权重 ──m2m──▶ 常驻 kernel param 的仿射 view(process 是 no-op)
+   零 staging、零分组,全模型 chunks 一把进 chunk_comm,流水完整
+
+staging(例外):process 真干活的配置 —— 收 bf16 由引擎量化,或 swizzle kernel
+trainer 逻辑权重 ──m2m──▶ 临时 staging(HF 布局)──process──▶ kernel param
+   裸层循环:for layer: staging=empty(); chunk_comm(layer_chunks); process(layer)
 ```
 
-- **Etha 直接 recv 进 consumer 注册的 HF staging 仿射 view → 根本不调 weight_loader**(它的
+- **Etha recv 进 consumer 注册的仿射 view → 根本不调 weight_loader**(它的
   narrow + fuse + 轴级归一化正是 view + m2m 替掉的);
 - **staging 是纯 HF 布局**(gate 永远前半,静态)——backend 特有的 swap([gate;up]↔[up;gate])
-  发生在 `process_weights_after_loading` 内部从 HF→kernel 时,**Etha 看不见、不感知 backend**。
-  这是 staging 比"直填常驻 kernel param"干净的地方:后者被迫预探测 backend swap;
-- **保留 "register 一次"**:staging 是 init 固定、逐层复用的 buffer(2~3× 一层,见显存账),
-  recv 进它,地址不变(NCCL 下 recv ptr 本是 per-call;NIXL register-once 也只注册这一块)。
+  发生在 `process_weights_after_loading` 内部从 HF→kernel 时,**Etha 看不见、不感知 backend**;
+  staging 还隔离了 process 的 `replace_parameter`(kernel param 地址每轮变,staging 不受影响);
+- **staging 档的执行就是裸层循环**:每层临时 `torch.empty`(caching allocator 复用),同流顺序
+  提交,process 不与传输重叠——代价 ~1ms/层 × 层数 ≈ +10% 同步时间,先付着;K 槽 + cuda event
+  的重叠流水是存档优化,bench 实测疼了再捡。staging 大小由 plan 导出(本 rank 该层 shard 字节,
+  百 MB 级,**不是全局层大小**);IPC/NIXL 要求的固定地址 buffer 是 transport 的私事(它的 init
+  持有并注册),不进核心概念;
 - **`process_weights_after_loading` 是 per-rank 本地的**:扫过全部 96 个实现,无一 `all_gather` /
   `all_reduce` / `full_tensor`(collective 只在 `forward()` 和 MLA 前向;quant 里的 `tp_size` 只用于
-  `create_weights` 的 block 对齐校验,不 gather)。所以 **Etha 送 local shard 进 staging、process 就地
-  跑 → 端到端 never-full**;对比标准 `load_weights` 设计成收**完整 HF tensor** 再 narrow(verl 才被迫
+  `create_weights` 的 block 对齐校验,不 gather)。所以 **Etha 送 local shard、process 就地跑 →
+  端到端 never-full**;对比标准 `load_weights` 设计成收**完整 HF tensor** 再 narrow(verl 才被迫
   `all_gather` 成 full)。唯一要点:online per-tensor 量化的 scale 按本地 shard `.max()` 算(per-rank),
   是 vLLM 本来的行为,Etha 不引入新的训推不一致。
 
@@ -304,6 +307,28 @@ vLLM 的 placement 映射(mesh `(R, dp, tp)`):
   非 EP MoE 的 dp 错误折进 flatten TP(权重物理上被错切)——装着该版本就得按错切的
   现状声明才能传对。根治是引擎自己暴露 `get_sharding`(声明与实现同源);在那之前,
   这张表要随 vLLM 版本核对。
+
+进程与依赖的分界一句话:**元数据可以跨进程搬,计算跟着数据走**。`get_sharding`/
+`get_layout`/process 触发跑在 vLLM 自己的进程里(经 collective_rpc),产出 KB 级纯数据
+经 driver 给 trainer——trainer 进程永远只依赖 torch;而量化这类对 GB 级权重的计算
+没法这么拆,想用引擎的代码就得把依赖带进 trainer(故发端量化仅 colocate 免费)。
+
+### trainer PP:per-param mesh 的常态,零特判
+
+trainer 开 PP 时不同权重的 source mesh 不同(stage s 只持有自己层区间的权重)——
+这就是 per-param plan 的本义,planner/execution 零改动。装配也自动:PP 不出现在
+DTensor 里,`param.device_mesh` 就是该 stage 的 dp/tp mesh(全局 rank 子集),逐参数
+读即得。两个配套点:
+
+- **tied embedding**:首尾 stage 各持一份同名权重 → driver 对同名多源去重任选其一;
+- **`route_idx` 全局重编**:`m2m_to_chunks` 的 route_idx 是 per-param 的,多权重 chunks
+  拼给一次 `chunk_comm` 前由 driver 按全局清单序重编为连续递增(几行 helper)——
+  全局清单序全 rank 一致(按 name 排)即保证 FIFO 配对;
+- **多 source 的并发与排序**:跨 stage 的 peer-pair 不相交,FIFO 安全性自动成立。
+  按 name 排序意味着各 stage 依次发——**推理卡数 ≤ stage 卡数(常态)时收端入口
+  受限,串行即带宽下界,无损**;仅当 trainer 出口 < inference 入口(小训练 × 大
+  replica 群)时,把清单 sort key 换成 `hash(name)` 让各 stage 的边混进每个窗口,
+  恢复 trainer 出口聚合——plan 时由两侧卡数判断,一行排序的事。
 
 ## control plane:single-controller,绝不常驻自协调
 

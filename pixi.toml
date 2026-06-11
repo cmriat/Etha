@@ -27,7 +27,7 @@ submit = { cmd = "kjobctl create slurm --first-node-ip -- --chdir $PIXI_PROJECT_
 
 [environments]
 dev = { features = ["dev"], solve-group = "default" }
-gpu = { features = ["dev", "gpu"], solve-group = "gpu" }
+gpu = { features = ["gpu"], solve-group = "gpu" }
 
 [package]
 name = "etha"
