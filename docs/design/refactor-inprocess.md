@@ -255,6 +255,56 @@ get_layout("q_proj") -> [ViewSpec(fused="qkv_proj", offset=0, sub_shape=..., per
 CUDA device 复用为两个 rank——会 hang**。所以同卡 chunk 必须走 IPC。planner 按物理
 放置给每个 chunk 打标,`chunk_comm` 逐 chunk 分派(IPC / 跨卡 transport)。
 
+## Driver 装配:从部署拓扑到 (mesh, placements)
+
+plan 的输入是两端的 sharding 声明;声明从哪来,是 driver 的三件装配活:
+
+1. **rank 记账**:cross-world 编号——trainer 占 `0..T-1`,各推理 replica 依次占后续
+   区段(`create_cross_group` 的输入,与 mesh tensor 同一编号体系);
+2. **mesh 拼装**:一个统一 mesh,维序 = 物理 rank 序(行优先,tp 最内):
+   `arange(R*dp*tp).view(R, dp, tp)`,R 是框架层 replica 维;
+3. **placement 拼装**:per 权重类查下表,所有层共用同一个 mesh。
+
+两端的纪律相反:
+
+- **trainer(DTensor-native)**:placement 必须从 **`param.placements` 读**,不许手填。
+  FSDP2 叠在 EP/TP 之上的真实布局是 `_StridedShard`(物理上内层先切、FSDP 后切),
+  手填标准 `Shard` 表与实际布局不符 → 静默错数据。Etha 原生支持规范形态的
+  `_StridedShard`(FSDP2 总是规范填法)。
+- **推理(vLLM,非 DTensor)**:layer 对象只有 TP/EP 的命令式知识(`tp_rank`/`output_dim`
+  藏在 weight_loader 里);**Replicate 维(replica×dp)只存在于部署拓扑中**,引擎对象上
+  查不到——必须由 driver 拼。
+
+三层 "DP" 角色各不同,这是手填 placement 最易错处:
+
+| 层 | 独立性 | 对 MoE 权重 |
+|---|---|---|
+| 多 replica(框架层,如 verl `num_replicas`) | 真独立(各自调度) | `Replicate` |
+| vLLM 原生 `data_parallel_size` | **lockstep**(EP 的 all-to-all 横跨 DP,空 batch 也要 dummy 陪跑) | EP on 时是**切分维** |
+| TP | 组内协同算同一 batch | 切分维 |
+
+vLLM 的 placement 映射(mesh `(R, dp, tp)`):
+
+| 权重 | placements |
+|---|---|
+| Column 类(qkv/gate_up/embed) | `(Replicate, Replicate, Shard(0))` |
+| Row 类(o_proj/down) | `(Replicate, Replicate, Shard(1))` |
+| MoE w13/w2,**EP on** | `(Replicate, Shard(0), Shard(0))` —— dp、tp 嵌套切 expert 维;`ep_rank` 即 (dp,tp) 的行优先展平,嵌套切分 ≡ 一维 EP |
+| MoE w13 / w2,EP off | `(Replicate, Replicate, Shard(1))` / `(R, R, Shard(2))` |
+| norm / router | 全 `Replicate` |
+
+- **EP 是"借格子",不是新 mesh 维**:`enable_expert_parallel` 时 expert 整只归属(vLLM
+  源码:"In EP, each device owns a set of experts fully. There is no tensor
+  parallel"),EP 吞掉 dp×tp 全部格子,MoE 内 TP 强制为 1——vLLM 主线没有 EP×ETP
+  (Megatron trainer 侧存在,`(Replicate, Shard(0), Shard(1))` 即可表达)。
+- **PP 不进 placement**:它切的是权重集合(stage 内每层完整)——per-param 的 target
+  mesh 只填持有该权重的 rank,与"只同步两端都有的"是同一机制。
+- **CP**:PCP 对权重 = Replicate;DCP 复用 TP 组的 GPU,权重照 TP 切,无新维。
+- ⚠️ **placement 描述的是引擎的物理现状,而现状随版本(含 bug)漂移**:vLLM #36222 曾把
+  非 EP MoE 的 dp 错误折进 flatten TP(权重物理上被错切)——装着该版本就得按错切的
+  现状声明才能传对。根治是引擎自己暴露 `get_sharding`(声明与实现同源);在那之前,
+  这张表要随 vLLM 版本核对。
+
 ## control plane:single-controller,绝不常驻自协调
 
 driver 是唯一同时横跨 trainer world 和 inference world 的实体。所有跨 world 的
