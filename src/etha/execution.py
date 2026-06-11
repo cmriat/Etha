@@ -1,15 +1,16 @@
 """Run a chunk plan: a windowed pipeline of P2P ops over one communicator.
 
-Chunks arrive in canonical route order on every rank. Ops are batched into
-windows of ``window`` routes: a receive lands in its route's window, a relay's
-forward in the next one (it needs the data first), a source's send in its own
-(the data is local). The same route's send and recv thus share a window number
-on both peers — pairing needs no runtime handshake, and the per-rank windows
-drift freely, which is what pipelines the chain.
+P2P pairing is FIFO per peer pair (no tags on NCCL), so both ends must post
+every message in the same global order. That order is (window, route):
 
-The only true dependency in the system is a relay's send on its own receive,
-so only relay receives are awaited at their window; everything else is awaited
-once at the end. A plan with no relays therefore runs fully asynchronously.
+    chain [src, d1, d2]:   src --edge 0--> d1 --edge 1--> d2
+    edge i of a route lives in window  route_idx // window + i
+
+Both ends of an edge derive the same window from ``Chunk.hop`` (the sender's
+chain position), and within a window every rank appends ops in route order.
+A relay receives in one window and forwards in the next, which is exactly its
+data dependency; the wait at each window boundary enforces it. Ranks drift
+through windows independently — that drift is what pipelines the chain.
 """
 
 from collections import defaultdict
@@ -25,33 +26,19 @@ def chunk_comm(chunks: list[Chunk], group: dist.ProcessGroup | None = None, wind
         chunk.prepare()
 
     sends: dict[int, list[Chunk]] = defaultdict(list)
-    leaf_recvs: dict[int, list[Chunk]] = defaultdict(list)
-    relay_recvs: dict[int, list[Chunk]] = defaultdict(list)
+    recvs: dict[int, list[Chunk]] = defaultdict(list)
     for chunk in chunks:
-        win = chunk.route_idx // window
+        base = chunk.route_idx // window
         if chunk.recv_from is not None:
-            if chunk.send_to is not None:
-                relay_recvs[win].append(chunk)
-                sends[win + 1].append(chunk)
-            else:
-                leaf_recvs[win].append(chunk)
-        elif chunk.send_to is not None:
-            sends[win].append(chunk)
+            recvs[base + chunk.hop - 1].append(chunk)
+        if chunk.send_to is not None:
+            sends[base + chunk.hop].append(chunk)
 
-    pending: list[dist.Work] = []
-    for win in sorted(sends.keys() | leaf_recvs.keys() | relay_recvs.keys()):
+    for win in sorted(sends.keys() | recvs.keys()):
         ops = [dist.P2POp(dist.isend, c.buffer, c.send_to, group=group) for c in sends[win]]
-        ops += [dist.P2POp(dist.irecv, c.buffer, c.recv_from, group=group) for c in leaf_recvs[win]]
-        ops += [dist.P2POp(dist.irecv, c.buffer, c.recv_from, group=group) for c in relay_recvs[win]]
-        if not ops:
-            continue
-        works = dist.batch_isend_irecv(ops)
-        boundary = len(works) - len(relay_recvs[win])
-        pending += works[:boundary]
-        for work in works[boundary:]:
+        ops += [dist.P2POp(dist.irecv, c.buffer, c.recv_from, group=group) for c in recvs[win]]
+        for work in dist.batch_isend_irecv(ops):
             work.wait()
-    for work in pending:
-        work.wait()
 
     for chunk in chunks:
         chunk.finalize()

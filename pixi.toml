@@ -6,10 +6,6 @@ version = "0.1.0"
 preview = ["pixi-build"]
 
 [dependencies]
-python = ">=3.10"
-pytorch = "*"
-
-[feature.runtime.dependencies]
 etha = { path = "." }
 
 [feature.dev.dependencies]
@@ -30,8 +26,8 @@ cuda = "12.9"
 submit = { cmd = "kjobctl create slurm --first-node-ip -- --chdir $PIXI_PROJECT_ROOT --output $PIXI_PROJECT_ROOT/jobs-%j-%N.out --error $PIXI_PROJECT_ROOT/jobs-%j-%N.err {{ script }}", args = ["script"] }
 
 [environments]
-dev = { features = ["runtime", "dev"], solve-group = "default" }
-gpu = { features = ["runtime", "dev", "gpu"], solve-group = "gpu" }
+dev = { features = ["dev"], solve-group = "default" }
+gpu = { features = ["dev", "gpu"], solve-group = "gpu" }
 
 [package]
 name = "etha"

@@ -23,32 +23,37 @@ from collections import defaultdict
 
 import torch
 from torch.distributed.tensor import Shard, Placement, Replicate
+from torch.distributed.tensor._utils import _compute_local_shape_and_global_offset
+from torch.distributed.tensor.placement_types import _StridedShard
+
+_SHARD_TYPES = (Shard, _StridedShard)
 
 from .ir import Cell, Chunk, Route, M2MMap, Endpoint
 from .utils import cell_slice
 
 
 def _tensor_ndim(placements: tuple[Placement, ...]) -> int:
-    return max((p.dim for p in placements if isinstance(p, Shard)), default=0) + 1
+    return max((p.dim for p in placements if isinstance(p, _SHARD_TYPES)), default=0) + 1
 
 
 def _shard_counts(mesh_shape: tuple[int, ...], placements: tuple[Placement, ...], tensor_ndim: int) -> list[int]:
     counts = [1] * tensor_ndim
     for i, placement in enumerate(placements):
-        if isinstance(placement, Shard):
+        if isinstance(placement, _SHARD_TYPES):
             counts[placement.dim] *= mesh_shape[i]
     return counts
 
 
 def _endpoints(mesh: torch.Tensor, placements: tuple[Placement, ...], middle_shape: tuple[int, ...]):
-    """Yield (gid, Endpoint) for every middle cell each rank holds, closed-form."""
+    """Yield (gid, Endpoint) for every middle cell each rank holds.
+
+    Each rank's box is computed by torch's own sharding geometry
+    (``_compute_local_shape_and_global_offset``, the FSDP2/DCP code path) so
+    every placement torch can produce — including ``_StridedShard`` — is
+    handled by the source of truth, not a reimplementation.
+    """
     for coord in itertools.product(*map(range, mesh.shape)):
-        start = [0] * len(middle_shape)
-        span = list(middle_shape)
-        for i, placement in enumerate(placements):
-            if isinstance(placement, Shard):
-                span[placement.dim] //= mesh.shape[i]
-                start[placement.dim] += coord[i] * span[placement.dim]
+        span, start = _compute_local_shape_and_global_offset(middle_shape, tuple(mesh.shape), coord, placements)
         rank = int(mesh[coord])
         for cell in itertools.product(*(range(s) for s in span)):
             gid = 0
@@ -64,7 +69,7 @@ def get_m2m_map(
     target_placements: tuple[Placement, ...],
 ) -> M2MMap:
     for placement in (*source_placements, *target_placements):
-        if not (type(placement) is Shard or isinstance(placement, Replicate)):
+        if not isinstance(placement, (*_SHARD_TYPES, Replicate)):
             raise NotImplementedError(f"unsupported placement {placement!r}")
 
     tensor_ndim = max(_tensor_ndim(source_placements), _tensor_ndim(target_placements))
@@ -152,6 +157,7 @@ def m2m_to_chunks(
                 chunks.append(
                     Chunk(
                         route_idx=route_idx,
+                        hop=position,
                         recv_from=chain[position - 1],
                         send_to=chain[position + 1] if position + 1 < len(chain) else None,
                         dst_tensor=target_tensor,

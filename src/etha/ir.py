@@ -45,6 +45,7 @@ class Chunk:
     """
 
     route_idx: int
+    hop: int = 0
     recv_from: int | None = None
     send_to: int | None = None
     src_tensor: torch.Tensor | None = None

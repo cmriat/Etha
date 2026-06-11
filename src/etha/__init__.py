@@ -2,6 +2,7 @@
 
 from .ir import Chunk, Route, M2MMap, Endpoint
 from .planner import get_m2m_map, split_fanout, m2m_to_chunks
+from .bootstrap import create_cross_group
 from .execution import chunk_comm
 
 __all__ = [
@@ -13,4 +14,5 @@ __all__ = [
     "get_m2m_map",
     "split_fanout",
     "m2m_to_chunks",
+    "create_cross_group",
 ]
