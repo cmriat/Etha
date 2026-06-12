@@ -35,6 +35,7 @@ pyzmq = "*"
 uvicorn = "*"
 
 [feature.vllm.dependencies]
+httpx = "*"
 vllm = { version = "*", build = "cuda*" }
 
 [feature.megatron.dependencies]
