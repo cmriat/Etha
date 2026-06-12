@@ -47,12 +47,13 @@ class _Api:
 class EthaWorkerExtension:
     """混入 vLLM Worker(self.model_runner.model / self.rank 可用)。"""
 
-    def etha_export(self, base_rank, dp):
+    def etha_export(self, base_rank):
         from vllm.distributed import get_tensor_model_parallel_world_size
         from vllm.model_executor.utils import set_weight_attrs
 
         model = self.model_runner.model
         tp = get_tensor_model_parallel_world_size()
+        dp = self.vllm_config.parallel_config.data_parallel_size
         self._etha_base = base_rank
         mesh = base_rank + torch.arange(dp * tp).reshape(1, dp, tp)
         packed = getattr(model, "packed_modules_mapping", {})

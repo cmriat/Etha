@@ -90,7 +90,7 @@ async def main():
         print("[before]", repr(await generate(client, model, "The capital of France is")), flush=True)
 
         t_decl = (await trainer(client, "etha_export"))[0]
-        v_decl = dec((await vllm(client, "etha_export", T, 1))[0])
+        v_decl = dec((await vllm(client, "etha_export", T))[0])
 
         world = T + tp
         await asyncio.gather(
