@@ -27,12 +27,14 @@ strided 支持 / 随机对拍 fuzz。torch-only,CPU 测试 macOS 可跑。
 解锁:同卡跨进程交付;torch-native colocate = 组内 m2m + IPC 落点(verl 的
 shard-to-shard 替代 all_gather full tensor)。
 
-**M2 第一条端到端:torch-native → vLLM(disaggregated)**
-设计已在 examples/megatron_vllm 伪代码定型(Protocol 三方法 + 清单权威 +
-统一 loader 路线 + build_chunks),待真实化:worker RPC 胶水、
-`is_sharded_weight` 上游 PR(embedding / MoE-EP-off 对齐 Linear 语义)。
-集群 GPU 验证:对齐 671B ~1s 基线;容错实测(kill 一个 replica →
-abort 旧 cross PG → 重建 → 下轮 sync 正常)。
+**M2 第一条端到端:torch-native → vLLM(disaggregated)✅ bf16 已通**
+真实跑通(8×H20Z 单机):FSDP2 Qwen3-0.6B(4 卡)→ etha m2m → cross NCCL →
+vLLM tp=4 shard 直落 → load_weights → dummy 乱码变正常生成。trainer 做成
+vLLM 形状的 server(HTTP 入口 + zmq 扇出);跨边界元数据一律 pickle 信封。
+上游 PR 范围修正:`is_sharded_weight` 只有 v1 weight_loader 检查,**v2
+(parameter.py 的 load_*,bf16/主流量化都走它)没有旁路**——PR 要补 v2 +
+embedding + MoE-EP-off;example 暂用"绑回 v1 loader"过渡。
+余项:量化档(layerwise reload)、多 replica、671B 基线、容错实测。
 
 **M3 bench**
 chain vs fanout A/B(`split_fanout` 开关)、窗口扫参、与旧 etha 对比。
