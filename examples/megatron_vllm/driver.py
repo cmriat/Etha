@@ -11,7 +11,7 @@ from rpc import CollectiveClient
 from vllm import LLM, SamplingParams
 from trainer_server import RPC_PORT_BASE
 
-CROSS_PORT = 29701
+CROSS_PORT = 52701
 
 
 def main():

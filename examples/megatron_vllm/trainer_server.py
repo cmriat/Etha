@@ -16,7 +16,7 @@ from torch.distributed.fsdp import fully_shard
 
 from etha import chunk_comm, create_cross_group
 
-RPC_PORT_BASE = 9100
+RPC_PORT_BASE = 52100
 
 
 class TrainerWorker:
