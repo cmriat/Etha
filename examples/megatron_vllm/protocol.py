@@ -37,6 +37,8 @@ from collections.abc import Iterable
 import torch
 from torch.distributed.tensor import Placement
 
+from etha import get_m2m_map, m2m_to_chunks
+
 
 class EngineWeightProtocol(Protocol):
     def get_sharding(self, hf_name: str) -> tuple[torch.Tensor, tuple[Placement, ...]]: ...
@@ -44,3 +46,24 @@ class EngineWeightProtocol(Protocol):
     def local_view(self, hf_name: str) -> torch.Tensor: ...
 
     def process_after_load(self, hf_names: Iterable[str]) -> None: ...
+
+
+def build_chunks(api, manifest, peer_shardings, my_rank, sending):
+    """每端本地、init 一次:清单序遍历,m2m 纯函数,route_idx 全局重编。
+
+    offset 按全局 route 数推进(不是本 rank chunk 数)——全 rank 推同一数列,
+    两端窗口归属一致,FIFO 配对成立。
+    """
+    chunks, offset = [], 0
+    for name in manifest:
+        mine = api.get_sharding(name)
+        src, dst = (mine, peer_shardings[name]) if sending else (peer_shardings[name], mine)
+        m2m = get_m2m_map(*src, *dst)
+        view = api.local_view(name)
+        for c in m2m_to_chunks(
+            m2m, my_rank, source_tensor=view if sending else None, target_tensor=None if sending else view
+        ):
+            c.route_idx += offset
+            chunks.append(c)
+        offset += len(m2m.routes)
+    return chunks
