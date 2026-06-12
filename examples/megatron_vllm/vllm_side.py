@@ -66,6 +66,9 @@ class EthaWorkerExtension:
         return self._etha_shardings
 
     def etha_init(self, host, port, world, manifest, peer):
+        # collective_rpc 的 msgpack 把 tensor/tuple 还原成嵌套 list,重建声明形态
+        peer = {n: (torch.as_tensor(m), tuple(p)) for n, (m, p) in peer.items()}
+        manifest = {n: (tuple(shape), dtype) for n, (shape, dtype) in manifest.items()}
         rank = self._etha_base + self.rank
         self._etha_buffers = {
             name: torch.empty(local_shape(shape, *self._etha_shardings[name], rank), dtype=dtype, device="cuda")
