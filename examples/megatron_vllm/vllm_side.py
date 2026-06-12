@@ -67,6 +67,11 @@ class EthaWorkerExtension:
                 stem, leaf = module_name.rsplit(".", 1)
                 for sub in packed.get(leaf, [leaf]):
                     shardings[f"{stem}.{sub}.{param_name}"] = (mesh, placements)
+        # layerwise reload 按 record 快照重建 param(__dict__ 拷回)——启动时的旧快照
+        # 会盖掉上面打的标,重新 record 让快照带上它们。
+        from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
+
+        record_metadata_for_reloading(model)
         return base64.b64encode(pickle.dumps(shardings)).decode()
 
 
