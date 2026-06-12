@@ -28,9 +28,6 @@ class TrainerWorker:
         self.api = FsdpWeightProtocol(model, base_rank=0)
         self.rank = dist.get_rank()
 
-    def manifest(self):
-        return {n: (tuple(p.shape), p.dtype) for n, p in self.api._params.items()}
-
     def etha_export(self):
         return {n: self.api.get_sharding(n) for n in self.api._params}
 

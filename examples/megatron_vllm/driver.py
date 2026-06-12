@@ -13,6 +13,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
+import torch
+from huggingface_hub import get_safetensors_metadata
 
 from rpc import HTTP_PORT
 
@@ -77,11 +79,15 @@ def main():
     T = int(os.environ.get("TRAINER_WORLD", "4"))
     tp = int(os.environ.get("VLLM_TP", "4"))
 
+    # 权威清单:HF checkpoint index(第三方),不从任何一端拿;dtype 按 safetensors 命名
+    dtypes = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}
+    meta = get_safetensors_metadata(model)
+    manifest = {name: (tuple(info.shape), dtypes[info.dtype]) for name, info in meta.tensors.items()}
+
     wait_ready(f"{VLLM_URL}/health")
     wait_ready(f"{TRAINER_URL}/ping", b"")
     print("[before]", repr(generate(model, "The capital of France is")), flush=True)
 
-    manifest = post(f"{TRAINER_URL}/manifest")[0]
     t_decl = post(f"{TRAINER_URL}/etha_export")[0]
     v_decl = dec(vllm_rpc("etha_export", T, 1)[0])
 
