@@ -46,9 +46,11 @@ def _http_frontend(world):
         reqs.append(sock)
     app = FastAPI()
 
-    @app.post("/rpc")
-    async def rpc(request: Request):
-        payload = await request.body()
+    @app.post("/{method}")
+    async def call(method: str, request: Request):
+        body = await request.body()
+        args, kwargs = pickle.loads(body) if body else ((), {})
+        payload = pickle.dumps((method, args, kwargs))
         for sock in reqs:
             sock.send(payload)
         outs = [pickle.loads(sock.recv()) for sock in reqs]

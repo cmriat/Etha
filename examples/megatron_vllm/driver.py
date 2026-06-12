@@ -31,7 +31,8 @@ def dec(s):
 
 
 def trainer_rpc(method, *args):
-    r = requests.post(f"{TRAINER_URL}/rpc", data=pickle.dumps((method, args, {})), timeout=3600)
+    body = pickle.dumps((args, {})) if args else b""
+    r = requests.post(f"{TRAINER_URL}/{method}", data=body, timeout=3600)
     outs = []
     for status, val in pickle.loads(r.content):
         if status == "err":
@@ -78,7 +79,7 @@ def main():
     tp = int(os.environ.get("VLLM_TP", "4"))
 
     wait_ready(f"{VLLM_URL}/health")
-    wait_ready(f"{TRAINER_URL}/rpc", pickle.dumps(("ping", (), {})))
+    wait_ready(f"{TRAINER_URL}/ping", b"")
     print("[before]", repr(generate(model, "The capital of France is")), flush=True)
 
     manifest = trainer_rpc("manifest")[0]
