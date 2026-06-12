@@ -42,3 +42,11 @@ pixi run -e megatron torchrun ... trainer_side.py     # 训练侧(已有作业�
 pixi run -e vllm ... vllm_side.py                     # 推理侧(已有 server 内嵌)
 python driver.py                                      # 编排
 ```
+
+## 工程取向备忘
+
+- trainer 端点现为通用路由 + 二进制 pickle body(KB 级元数据,最省);生产化时随
+  WeightTransferEngine 集成一起升级为显式 JSON schema(明文字段 + base64 信封字段,
+  与 vLLM 端点风格对齐,可 curl/OpenAPI);
+- 跨边界元数据一律信封:二进制边界 pickle bytes,JSON 边界 base64(pickle)——
+  生态同款(OpenAI 多模态图像即 base64-in-JSON)。
