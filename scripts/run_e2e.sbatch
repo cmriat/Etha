@@ -9,6 +9,7 @@ set -ex
 export ETHA_MODEL=${ETHA_MODEL:-Qwen/Qwen3-0.6B}
 export PYTHONPATH=$PWD/examples/megatron_vllm
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export VLLM_ALLOW_INSECURE_SERIALIZATION=1
 
 export TRITON_CACHE_DIR=/tmp/triton-cache
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor-cache
