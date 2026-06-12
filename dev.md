@@ -36,10 +36,13 @@ vLLM 形状的 server(HTTP 入口 + zmq 扇出);driver 纯 HTTP 编排,不占 GP
 上游 PR 范围修正:`is_sharded_weight` 只有 v1 weight_loader 检查,**v2
 (parameter.py 的 load_*,bf16/主流量化都走它)没有旁路**——PR 要补 v2 +
 embedding + MoE-EP-off;example 暂用"绑回 v1 loader"过渡。
-余项:vLLM 侧改造成官方 WeightTransferEngine 插件(weight_transfer_config 配置
-即用,删 worker_extension;gpu_worker.py 已有 init_weight_transfer_engine 入口,
-这也是上游 PR 的主体形态)、量化档(layerwise reload)、多 replica、671B 基线、
-容错实测。
+✅ 已 engine 化:EthaWeightTransferEngine(官方插件位,纯传输零 model 依赖,
+EthaInitInfo 即 init_info schema);extension 薄至 etha_export(= 未来 get_sharding);
+官方 update_weights 自动包 layerwise(quant 管线免费,bf16 已实跑全管线)。
+上游 PR 新增论据:backend Literal 封闭与 factory 注册制矛盾;trainer_send_weights
+的 full-tensor 流假设不适配 shard-direct;layerwise record 快照会盖掉后打的
+param attrs(需要打标后 re-record)。
+余项:量化档实测、多 replica、671B 基线、容错实测。
 
 **M3 bench**
 chain vs fanout A/B(`split_fanout` 开关)、窗口扫参、与旧 etha 对比。
