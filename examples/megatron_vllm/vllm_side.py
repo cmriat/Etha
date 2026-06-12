@@ -7,6 +7,8 @@
 bf16 直落(process no-op);quant 档把同一个喂法包进 layerwise reload,此处未接。
 """
 
+import pickle
+
 import torch
 from protocol import build_chunks
 from torch.distributed.tensor import Shard, Replicate
@@ -63,12 +65,10 @@ class EthaWorkerExtension:
                 stem, leaf = module_name.rsplit(".", 1)
                 for sub in packed.get(leaf, [leaf]):
                     self._etha_shardings[f"{stem}.{sub}.{param_name}"] = (mesh, placements)
-        return self._etha_shardings
+        return pickle.dumps(self._etha_shardings)  # 信封:绕过 collective_rpc 的 msgpack 编码
 
     def etha_init(self, host, port, world, manifest, peer):
-        # collective_rpc 的 msgpack 把 tensor/tuple 还原成嵌套 list,重建声明形态
-        peer = {n: (torch.as_tensor(m), tuple(p)) for n, (m, p) in peer.items()}
-        manifest = {n: (tuple(shape), dtype) for n, (shape, dtype) in manifest.items()}
+        manifest, peer = pickle.loads(manifest), pickle.loads(peer)  # 信封拆封
         rank = self._etha_base + self.rank
         self._etha_buffers = {
             name: torch.empty(local_shape(shape, *self._etha_shardings[name], rank), dtype=dtype, device="cuda")

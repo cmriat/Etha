@@ -6,8 +6,7 @@
 """
 
 import os
-
-import torch
+import pickle
 
 from rpc import CollectiveClient
 from vllm import LLM, SamplingParams
@@ -35,13 +34,11 @@ def main():
     trainer = CollectiveClient()
     manifest = trainer.collective_rpc("manifest")[0]
     t_decl = trainer.collective_rpc("etha_export")[0]
-    v_decl = llm.collective_rpc("etha_export", args=(T, 1))[0]
-    # vLLM 的 msgpack 把 tensor/tuple 还原成嵌套 list,转回声明形态再转发
-    v_decl = {n: (torch.as_tensor(mesh), tuple(pl)) for n, (mesh, pl) in v_decl.items()}
+    v_decl = pickle.loads(llm.collective_rpc("etha_export", args=(T, 1))[0])
 
     world = T + tp
     wait = trainer.collective_rpc_async("etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl)
-    llm.collective_rpc("etha_init", args=("127.0.0.1", CROSS_PORT, world, manifest, t_decl))
+    llm.collective_rpc("etha_init", args=("127.0.0.1", CROSS_PORT, world, pickle.dumps(manifest), pickle.dumps(t_decl)))
     wait()
 
     wait = trainer.collective_rpc_async("etha_transfer")
