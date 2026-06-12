@@ -53,11 +53,6 @@ fsdp = { features = ["fsdp"] }
 vllm = { features = ["vllm"] }
 megatron = { features = ["megatron"] }
 
-["fsdp"] }
-vllm = { features = ["vllm"] }
-megatron = { features = ["megatron"] }
-dev = { features = ["dev", "fsdp", "vllm", "megatron"]}
-
 [tasks]
 submit = { cmd = "kjobctl create slurm --first-node-ip -- --chdir $PIXI_PROJECT_ROOT --output $PIXI_PROJECT_ROOT/jobs-%j-%N.log {{ script }}", args = ["script"] }
 
