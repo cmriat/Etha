@@ -30,9 +30,9 @@ def dec(s):
     return pickle.loads(base64.b64decode(s))
 
 
-def trainer_rpc(method, *args):
+def post(url, *args):
     body = pickle.dumps((args, {})) if args else b""
-    r = requests.post(f"{TRAINER_URL}/{method}", data=body, timeout=3600)
+    r = requests.post(url, data=body, timeout=3600)
     outs = []
     for status, val in pickle.loads(r.content):
         if status == "err":
@@ -41,9 +41,8 @@ def trainer_rpc(method, *args):
     return outs
 
 
-def trainer_rpc_async(method, *args):
-    fut = _pool.submit(trainer_rpc, method, *args)
-    return fut.result
+def post_async(url, *args):
+    return _pool.submit(post, url, *args).result
 
 
 def wait_ready(url, payload=None):
@@ -82,16 +81,16 @@ def main():
     wait_ready(f"{TRAINER_URL}/ping", b"")
     print("[before]", repr(generate(model, "The capital of France is")), flush=True)
 
-    manifest = trainer_rpc("manifest")[0]
-    t_decl = trainer_rpc("etha_export")[0]
+    manifest = post(f"{TRAINER_URL}/manifest")[0]
+    t_decl = post(f"{TRAINER_URL}/etha_export")[0]
     v_decl = dec(vllm_rpc("etha_export", T, 1)[0])
 
     world = T + tp
-    wait = trainer_rpc_async("etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl)
+    wait = post_async(f"{TRAINER_URL}/etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl)
     vllm_rpc("etha_init", "127.0.0.1", CROSS_PORT, world, enc(manifest), enc(t_decl))
     wait()
 
-    wait = trainer_rpc_async("etha_transfer")
+    wait = post_async(f"{TRAINER_URL}/etha_transfer")
     vllm_rpc("etha_transfer")
     wait()
     print("[after]", repr(generate(model, "The capital of France is")), flush=True)
