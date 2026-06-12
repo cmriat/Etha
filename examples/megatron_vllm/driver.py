@@ -19,8 +19,8 @@ from transformers import AutoConfig
 
 from rpc import HTTP_PORT
 
-CROSS_PORT = 52701
-VLLM_URL = "http://127.0.0.1:52300"
+CROSS_PORT = HTTP_PORT + 200
+VLLM_URL = f"http://127.0.0.1:{os.environ.get('ETHA_VLLM_PORT', 52300)}"
 TRAINER_URL = f"http://127.0.0.1:{HTTP_PORT}"
 
 

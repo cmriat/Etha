@@ -6,6 +6,8 @@
 #SBATCH --cpus-per-task=64
 
 set -ex
+export ETHA_HTTP_PORT=$((40000 + RANDOM % 10000))
+export ETHA_VLLM_PORT=$((30000 + RANDOM % 10000))
 export ETHA_MODEL=${ETHA_MODEL:-Qwen/Qwen3-0.6B}
 export PYTHONPATH=$PWD/examples/megatron_vllm
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -21,7 +23,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 pixi run -e fsdp torchrun --standalone --nproc_per_
 
 CUDA_VISIBLE_DEVICES=4,5,6,7 pixi run -e vllm vllm serve $ETHA_MODEL \
   --load-format dummy --tensor-parallel-size 4 --enforce-eager \
-  --gpu-memory-utilization 0.6 --port 52300 \
+  --gpu-memory-utilization 0.6 --port $ETHA_VLLM_PORT \
   --worker-extension-cls vllm_side.EthaWorkerExtension \
   --weight-transfer-config '{"backend": "nccl"}' &
 

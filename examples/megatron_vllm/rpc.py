@@ -7,11 +7,12 @@ rank0 起 FastAPI 前端线程;各 rank(含 rank0)在主线程跑 zmq REP loop �
 pickle bytes(tensor 按值,不走 fd 共享)。
 """
 
+import os
 import pickle
 import threading
 
-HTTP_PORT = 52100
-ZMQ_PORT_BASE = 52200
+HTTP_PORT = int(os.environ.get("ETHA_HTTP_PORT", 52100))
+ZMQ_PORT_BASE = HTTP_PORT + 100
 
 
 def serve(obj, rank, world):
