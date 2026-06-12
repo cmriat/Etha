@@ -24,13 +24,13 @@ preview = ["pixi-build"]
 cuda = "12.9"
 
 [dependencies]
+cuda = "12.9.*"
 etha = { path = "." }
 pytorch = { version = "*", build = "cuda*" }
 transformers = "*"
 
 [feature.vllm.dependencies]
 vllm = { version = "*", build = "cuda*" }
-cuda-cudart-dev = "*"
 
 [feature.megatron.dependencies]
 # megatron-core = "*"  # placeholder until the integration lands

@@ -5,6 +5,7 @@ collective 调用(create_cross_group / chunk_comm)必须全 rank 并发进入。
 标准库 multiprocessing.connection,pickle 自动。
 """
 
+import pickle
 import time
 from multiprocessing.connection import Client, Listener
 
@@ -16,13 +17,14 @@ def serve(obj, port):
         with listener.accept() as conn:
             while True:
                 try:
-                    method, args, kwargs = conn.recv()
+                    method, args, kwargs = pickle.loads(conn.recv_bytes())
                 except EOFError:
                     return
                 try:
-                    conn.send(("ok", getattr(obj, method)(*args, **kwargs)))
+                    out = ("ok", getattr(obj, method)(*args, **kwargs))
                 except Exception as e:
-                    conn.send(("err", f"{type(e).__name__}: {e}"))
+                    out = ("err", f"{type(e).__name__}: {e}")
+                conn.send_bytes(pickle.dumps(out))
 
 
 class CollectiveClient:
@@ -37,13 +39,14 @@ class CollectiveClient:
                     time.sleep(2)
 
     def send_all(self, method, *args, **kwargs):
+        payload = pickle.dumps((method, args, kwargs))
         for c in self.conns:
-            c.send((method, args, kwargs))
+            c.send_bytes(payload)
 
     def recv_all(self):
         outs = []
         for c in self.conns:
-            status, val = c.recv()
+            status, val = pickle.loads(c.recv_bytes())
             if status == "err":
                 raise RuntimeError(val)
             outs.append(val)
