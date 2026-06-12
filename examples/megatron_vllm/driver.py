@@ -9,7 +9,6 @@ import os
 
 from rpc import CollectiveClient
 from vllm import LLM, SamplingParams
-from trainer_server import RPC_PORT_BASE
 
 CROSS_PORT = 52701
 
@@ -31,7 +30,7 @@ def main():
     prompt = "The capital of France is"
     print("[before]", repr(llm.generate([prompt], sp)[0].outputs[0].text), flush=True)
 
-    trainer = CollectiveClient([("127.0.0.1", RPC_PORT_BASE + i) for i in range(T)])
+    trainer = CollectiveClient()
     manifest = trainer.collective_rpc("manifest")[0]
     t_decl = trainer.collective_rpc("etha_export")[0]
     v_decl = llm.collective_rpc("etha_export", args=(T, 1))[0]

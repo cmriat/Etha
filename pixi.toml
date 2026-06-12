@@ -27,6 +27,7 @@ cuda = "12.9"
 cuda = "12.9.*"
 etha = { path = "." }
 fastapi = "*"
+pyzmq = "*"
 uvicorn = "*"
 pytorch = { version = "*", build = "cuda*" }
 transformers = "*"

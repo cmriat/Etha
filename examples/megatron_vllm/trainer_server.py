@@ -16,8 +16,6 @@ from torch.distributed.fsdp import fully_shard
 
 from etha import chunk_comm, create_cross_group
 
-RPC_PORT_BASE = 52100
-
 
 class TrainerWorker:
     def __init__(self):
@@ -49,7 +47,7 @@ def main():
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     worker = TrainerWorker()
     print(f"[trainer {worker.rank}] ready", flush=True)
-    serve(worker, RPC_PORT_BASE + worker.rank)
+    serve(worker, worker.rank, dist.get_world_size())
 
 
 if __name__ == "__main__":
