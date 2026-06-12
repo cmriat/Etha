@@ -47,7 +47,13 @@ pytest-timeout = "*"
 pre-commit = "*"
 
 [environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
 fsdp = { features = ["fsdp"] }
+vllm = { features = ["vllm"] }
+megatron = { features = ["megatron"] }
+
+["fsdp"] }
 vllm = { features = ["vllm"] }
 megatron = { features = ["megatron"] }
 dev = { features = ["dev", "fsdp", "vllm", "megatron"]}
