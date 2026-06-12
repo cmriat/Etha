@@ -82,7 +82,11 @@ def main():
     # 权威清单:HF checkpoint index(第三方),不从任何一端拿;dtype 按 safetensors 命名
     dtypes = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}
     meta = get_safetensors_metadata(model)
-    manifest = {name: (tuple(info.shape), dtypes[info.dtype]) for name, info in meta.tensors.items()}
+    manifest = {
+        name: (tuple(info.shape), dtypes[info.dtype])
+        for fm in meta.files_metadata.values()
+        for name, info in fm.tensors.items()
+    }
 
     wait_ready(f"{VLLM_URL}/health")
     wait_ready(f"{TRAINER_URL}/ping", b"")
