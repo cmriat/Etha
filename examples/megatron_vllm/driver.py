@@ -7,6 +7,8 @@
 
 import os
 
+import torch
+
 from rpc import CollectiveClient
 from vllm import LLM, SamplingParams
 
@@ -34,7 +36,8 @@ def main():
     manifest = trainer.collective_rpc("manifest")[0]
     t_decl = trainer.collective_rpc("etha_export")[0]
     v_decl = llm.collective_rpc("etha_export", args=(T, 1))[0]
-    v_decl = {n: (mesh.clone(), pl) for n, (mesh, pl) in v_decl.items()}  # msgpack 零拷贝 tensor 不可 pickle
+    # vLLM 的 msgpack 把 tensor/tuple 还原成嵌套 list,转回声明形态再转发
+    v_decl = {n: (torch.as_tensor(mesh), tuple(pl)) for n, (mesh, pl) in v_decl.items()}
 
     world = T + tp
     wait = trainer.collective_rpc_async("etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl)
