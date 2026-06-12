@@ -133,4 +133,7 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
         raise NotImplementedError("trainer side runs its own server, see trainer_server.py")
 
 
-WeightTransferEngineFactory.register_engine("etha", EthaWeightTransferEngine)
+# WeightTransferConfig.backend 是封闭 Literal["nccl","ipc"](pydantic 校验拒绝
+# 第三方名)——与 factory 的注册制矛盾,上游 PR 应放开为注册名。example 过渡:
+# 配置报 "nccl" 过校验,registry 槽位覆写成 etha(extension import 早于 create_engine)。
+WeightTransferEngineFactory._registry["nccl"] = lambda: EthaWeightTransferEngine
