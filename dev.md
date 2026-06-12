@@ -9,12 +9,12 @@ never-full 的 placement m2m。详见 docs/design/refactor-inprocess.md。
 
 ## 引擎矩阵:每个引擎欠什么
 
-| 引擎 | name(↔HF 名) | parallel(placement) | 仿射(布局 view) | 非仿射 |
+| 引擎 | name(↔HF 清单) | parallel(placement) | 仿射 | 非仿射 |
 |---|---|---|---|---|
-| torch-native(源) | 框架命名 ↔ HF,薄 converter | **免费**:读 `param.placements`(含 `_StridedShard`) | 通常无(贴 HF 布局) | 无(发送侧不存在) |
-| Megatron(源) | `linear_qkv` 等 ↔ HF,converter(verl 有现成可参考) | **缺**:命令式分布 → placement converter 待写 | interleaved qkv 等归一化 | 无 |
-| vLLM(收) | `WeightsMapper` + `packed_modules_mapping`(现成) | 短期 driver 手表装配(见设计文档映射表);长期上游 `get_sharding` | `get_layout`(fuse view 注册),短期手表 | `process_weights_after_loading`(现成,需可单独触发) |
-| SGLang(收) | 待调研对应物 | 同上,待调研 | 待调研 | 待调研 |
+| torch-native(源) | 贴 HF,近零 | **免费**:读 `param.placements`(含 `_StridedShard`)——fsdp_side.py 三行 | `to_local()` | 无(发送侧不存在) |
+| Megatron(源) | 名字表 + PP 全局层号(trainer_side.py) | placement 白名单 converter(trainer_side.py 雏形,M4 完善) | qkv 去交错等 = 发送 view | 无 |
+| vLLM(收) | `packed_modules_mapping` 等引擎自带 | placement rule 表(vllm_side.py);长期上游 `get_sharding` | **统一 loader 路线**:`is_sharded_weight` 跳切分,摆放由 `load_weights` 真跑;quant 包 layerwise reload | loader 管线内自动 |
+| SGLang(收) | 待调研对应物 | 待调研 | 待调研(loader 结构类似则同路线) | 待调研 |
 
 ## 里程碑
 
@@ -28,10 +28,9 @@ strided 支持 / 随机对拍 fuzz。torch-only,CPU 测试 macOS 可跑。
 shard-to-shard 替代 all_gather full tensor)。
 
 **M2 第一条端到端:torch-native → vLLM(disaggregated)**
-driver 装配层:rank 记账 / 统一 mesh / placement 表(设计文档 driver 节落代码);
-name join(HF 名主键,同名多源去重)+ `route_idx` 全局重编 helper;consumer 侧
-view 注册——**直落为默认**(bf16→bf16 / fp8→fp8,process no-op,零 staging),
-process 真干活的配置走裸层循环 staging。trainer PP 自动覆盖(per-param mesh)。
+设计已在 examples/megatron_vllm 伪代码定型(Protocol 三方法 + 清单权威 +
+统一 loader 路线 + build_chunks),待真实化:worker RPC 胶水、
+`is_sharded_weight` 上游 PR(embedding / MoE-EP-off 对齐 Linear 语义)。
 集群 GPU 验证:对齐 671B ~1s 基线;容错实测(kill 一个 replica →
 abort 旧 cross PG → 重建 → 下轮 sync 正常)。
 

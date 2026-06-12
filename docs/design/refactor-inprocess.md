@@ -30,58 +30,47 @@ name / parallel / 仿射 view 三样元数据(下文),Etha 就能 never-full 地
 
 ## 范式:任意两个引擎间的 weight sync
 
-前提:**每个引擎(训练 or 推理,Megatron / FSDP / vLLM / SGLang / 自研)各自实现同一套四类
-抽象**——把"自己的权重表示"映射到四个 universal 中间表示(name→HF 名、parallel→DTensor
-placement、仿射→HF 逻辑布局;非仿射无 universal,留各自):
+前提:**每个引擎(训练 or 推理,Megatron / FSDP / vLLM / SGLang / 自研)各自实现同一份
+三方法 Protocol**(examples/megatron_vllm/protocol.py 是可运行形态),① name 隐含在 key 里:
 
 ```python
 class EngineWeightProtocol(Protocol):
-    # ① name:HF 标准名 ↔ 本引擎名(融合分解 + rename;没列的默认 identity)
-    name_map: NameMapper          # vLLM = WeightsMapper + packed_modules_mapping;Megatron = weight_converter
-    # ② parallel:每个逻辑权重的分布 —— 只声明 (各维 size, placements)(多轴 EP/TP)
-    #    真 DeviceMesh 由 driver 用 arange(base_rank,…).view(shape) 本地重建,不跨 world 传
-    def get_sharding(self, hf_name) -> tuple[MeshShape, Placements]: ...
-    # ③ 仿射 layout:逻辑权重落在本引擎 fused param 的哪一段(轴级 view)
-    #    主体是 fuse —— q→qkv[0:nq]、gate→w13[0:h],就是个 offset(每个引擎都融合 qkv/gate_up/MoE w13);
-    #    少数模型再带一个轴 permute(Conv1D .t() / QKV 去交错 / rotary),permute=None 即纯 fuse
-    def get_layout(self, hf_name) -> list[ViewSpec]: ...
-    # ④ 非仿射:收到逻辑权重后引擎内部 swizzle/quant → kernel-format(仅 receiver 用;
-    #          训练侧没有——训练不 swizzle)
-    def process_after_load(self, module) -> None: ...
+    # ② parallel:该逻辑权重的 (mesh_tensor, placements) 声明,可序列化(KB 级),
+    #    跨进程交给对端算 plan;rank 用 cross-world 编号
+    def get_sharding(self, hf_name) -> tuple[MeshTensor, Placements]: ...
+    # ③ 仿射:该逻辑权重在本进程的 tensor view,本地消费不跨进程。
+    #    源端 = 发送的 shard(发送前的轴级变换编码在 view 里,prepare 的 contiguous 物化即执行);
+    #    收端 = 接收 buffer(HF 逻辑布局的本 rank shard)
+    def local_view(self, hf_name) -> torch.Tensor: ...
+    # ④ 非仿射 + 收端摆放:发端为空;收端把 buffer 喂引擎自己的 load_weights(见统一 loader 路线)
+    def process_after_load(self, hf_names) -> None: ...
 ```
 
-有了这套,任意 `src → dst` 同步就是**纯粹在四类抽象上的操作**,Etha 不认识任何具体引擎:
+**① name 的 universal 不只是"HF 名"这个命名空间,而是 HF checkpoint index 这份具体的、
+有序的第三方清单**:两端遍历同一份——顺序免协商(清单序即 canonical 序);单边独有的
+权重(trainer 的 value head、vLLM 的 kv/weight scale)不在清单上,天然不传;清单上的
+名字两端必须都有,**查不到 = 映射 bug,raise 而非 skip**(交集会静默吞掉不匹配)。
+部署子集差异(未加载的 MTP 头)由 driver 裁剪清单一次解决;tied embedding 清单上只一份。
+
+任意 `src → dst` 同步就是纯粹在这套抽象上的操作,Etha 不认识任何具体引擎:
 
 ```python
-def weight_sync(src: EngineWeightProtocol, dst: EngineWeightProtocol, transport):
-    # ===== INIT(一次性,plan 缓存复用)=====
-    # ① name:两端各自归一到 HF 名,按 HF 名 join(只配两端都有的 → ⑤ 存在性自动排除)
-    pairs = join_by_hf_name(src.name_map, dst.name_map)         # 每引擎一份映射,N+M 不是 N×M
+# INIT(一次,每端本地,纯函数)—— examples 的 build_chunks
+for hf_name in manifest:                                  # 清单序,全 rank 一致
+    m2m = get_m2m_map(*src_decl[hf_name], *dst_decl[hf_name])   # ② placement m2m,never full
+    chunks += m2m_to_chunks(m2m, my_rank, ...api.local_view(hf_name)...)   # ③ 两端各自的 view
+    # route_idx 按全局 route 数重编 → 跨权重连续流水,FIFO 配对两端一致
 
-    plan = []
-    for hf_name in pairs:
-        # ② parallel:两端 placement → m2m reshard(纯 placement,shard→shard,never full)
-        chunks = m2m_plan(src.get_sharding(hf_name), dst.get_sharding(hf_name))
-        # ③ 仿射:落点绑到 dst staging 上的轴级 view(fuse/transpose 由 ViewSpec 编码,Etha 不感知)
-        bind_dst(chunks, dst.staging, dst.get_layout(hf_name))
-        plan += chunks
-    cache(plan)                                                 # placement/layout 不变 → plan 复用
-
-    # ===== 每轮 sync =====
-    run(plan, transport)                                        # src 读自己的 shard → dst staging 的仿射 view,never full
-    dst.process_after_load(dst.modules)                         # ④ 非仿射:swizzle/quant → kernel(per-rank 本地)
+# 每轮 sync
+chunk_comm(chunks, group)                                 # 传输:HF 布局的 shard 流
+dst.process_after_load(manifest)                          # 收端:喂 loader 摆放 + ④ process
 ```
 
-整套设计的根就在这段:**四类各有一个 universal 中间表示,两端各转一跳**——
-① name → **HF 标准名**(join 主键);② parallel → **DTensor placement**(m2m never-full 的输入);
-③ 仿射 → **HF 逻辑布局**(`ViewSpec`,dst 落点);④ 非仿射 → **无 universal,留各自引擎**
-(`process_after_load`)。
-
-所以 **N 个 trainer × M 个 inference 不需要 N×M 套两两适配,只要每个引擎实现一次这四类(N+M)**;
-Etha 作为中间只在 universal 表示上算 m2m + 落 view,**零引擎特定逻辑、零硬编码、never full**。
-FSDP-native trainer "免费",是因为它的表示恰好已是这几个 universal 形式;换 Megatron 就得补
-①②③ 的 converter(④ 训练侧天然没有)。下文 `## 理想的 in-process 用法` 是这套范式在 in-process
-disaggregated 下的具体落地(由 driver 经 `collective_rpc` 编排)。
+所以 **N 个 trainer × M 个 inference 不需要 N×M 套两两适配,只要每个引擎实现一次(N+M)**;
+Etha 作为中间只做 placement m2m,**零引擎特定逻辑、零硬编码、never full**。
+torch-native trainer "免费"(fsdp_side.py 三行:DTensor 自带声明),Megatron 要补
+converter(trainer_side.py:mesh 装配 + placement 白名单 + 名字表 + 去交错 view,
+④ 训练侧天然没有)。
 
 ## 架构理念
 
@@ -183,63 +172,51 @@ comm 核心不知道、也不关心控制流从哪来,也不绑定具体 transpo
 不是反例,恰恰**坐实**这条边界——它们是 load 侧多出来的仿射,落在边界该在的一侧。Etha 接前段
 (仿射,view + m2m),引擎留后段(非仿射)。
 
-### 落地:Etha bypass weight_loader,直落为默认,staging 为例外
+### 落地:统一 loader 路线——Etha 只管并行,摆放交还引擎
 
 ```
-直落(默认):布局无断裂的配置 —— bf16→bf16,或原生 fp8 直发 + plain kernel
-trainer 逻辑权重 ──m2m──▶ 常驻 kernel param 的仿射 view(process 是 no-op)
-   零 staging、零分组,全模型 chunks 一把进 chunk_comm,流水完整
-
-staging(例外):process 真干活的配置 —— 收 bf16 由引擎量化,或 swizzle kernel
-trainer 逻辑权重 ──m2m──▶ 临时 staging(HF 布局)──process──▶ kernel param
-   裸层循环:for layer: staging=empty(); chunk_comm(layer_chunks); process(layer)
+trainer 逻辑权重 ──m2m──▶ 收端 buffer(HF 逻辑布局的本 rank shard)
+                              │ model.load_weights(shard 流)——L2 跳过切分,
+                              │ fuse/permute/数学用真数据真跑,与下一组通信 overlap
+                              ▼
+直落档(bf16 等,process no-op):loader 直接 copy_ 进常驻 kernel param
+quant 档:同一个喂法包进 layerwise reload(逐层物化 → 摆放 → process →
+          copy 回原 kernel storage —— 地址不变,CUDA graph 安全,~1 层临时显存)
 ```
 
-- **Etha recv 进 consumer 注册的仿射 view → 根本不调 weight_loader**(它的
-  narrow + fuse + 轴级归一化正是 view + m2m 替掉的);
-- **staging 是纯 HF 布局**(gate 永远前半,静态)——backend 特有的 swap([gate;up]↔[up;gate])
-  发生在 `process_weights_after_loading` 内部从 HF→kernel 时,**Etha 看不见、不感知 backend**;
-  staging 还隔离了 process 的 `replace_parameter`(kernel param 地址每轮变,staging 不受影响);
-- **staging 档的执行就是裸层循环**:每层临时 `torch.empty`(caching allocator 复用),同流顺序
-  提交,process 不与传输重叠——代价 ~1ms/层 × 层数 ≈ +10% 同步时间,先付着;K 槽 + cuda event
-  的重叠流水是存档优化,bench 实测疼了再捡。staging 大小由 plan 导出(本 rank 该层 shard 字节,
-  百 MB 级,**不是全局层大小**);IPC/NIXL 要求的固定地址 buffer 是 transport 的私事(它的 init
-  持有并注册),不进核心概念;
+收端的摆放知识(fuse 段、GQA 不均匀切分、quant 的 param 几何、轴 permute)**不提取、
+不复刻、不声明——直接让引擎自己的 loader 用真数据跑一遍**。曾评估过的两条提取路线
+(标记 dummy probe、PR #43375 式 op-chain baking)都要维护"提取机制 vs loader 演化"
+的一致性;统一 loader 路线把这个面消灭了,代价是一次 D2D copy(buffer→param,
+overlap 后墙钟近零)和每轮的 host 控制流(~10ms)。
+
+立得住的根基是 **L2(真实执行切分/摆放的 weight_loader)是有限封闭集**,与模型数无关:
+
+| L2 loader | shard 输入(跳过自身切分) |
+|---|---|
+| Linear 四家(Column/Merged/QKV/Row) | ✓ 现成:param 属性 `is_sharded_weight`(bnb/fairseq2 先例) |
+| FusedMoE,EP 维 | ✓ 天然:per-expert 名喂本地 expert,`expert_map` 自己消化 |
+| FusedMoE,EP-off 的 flatten-TP narrow | ✗ 缺口 |
+| VocabParallelEmbedding | ✗ 缺口 |
+| `default_weight_loader`(norm 等) | ✓ 无切分 |
+
+两处缺口 = 对齐 Linear 语义的小上游 PR;落地前这两类权重 fallback 全 Replicate 声明
+(m2m 自动把 shard 拼成 full 送达,`broadcast_shard0_to_replicate` 既有路径,量小可忍)。
+打标规则:**`is_sharded_weight=True` iff 该权重声明含 Shard**——声明与 loader 行为
+的一致性内生(收 full 的权重 loader 照常自己 narrow)。
+
 - **`process_weights_after_loading` 是 per-rank 本地的**:扫过全部 96 个实现,无一 `all_gather` /
-  `all_reduce` / `full_tensor`(collective 只在 `forward()` 和 MLA 前向;quant 里的 `tp_size` 只用于
-  `create_weights` 的 block 对齐校验,不 gather)。所以 **Etha 送 local shard、process 就地跑 →
-  端到端 never-full**;对比标准 `load_weights` 设计成收**完整 HF tensor** 再 narrow(verl 才被迫
-  `all_gather` 成 full)。唯一要点:online per-tensor 量化的 scale 按本地 shard `.max()` 算(per-rank),
-  是 vLLM 本来的行为,Etha 不引入新的训推不一致。
+  `all_reduce` / `full_tensor`(collective 只在 `forward()` 和 MLA 前向)。所以 **Etha 送
+  local shard、loader/process 就地跑 → 端到端 never-full**;对比标准路径收**完整 HF tensor**
+  再 narrow(verl 才被迫 `all_gather` 成 full)。online per-tensor 量化的 scale 按本地 shard
+  `.max()` 算,是 vLLM 本来的行为,不引入新的训推不一致;
+- **backend swap、`replace_parameter`、CUDA graph 地址**全部被 loader/layerwise 管线
+  自然隔离——Etha 的落点只是 HF 布局的 buffer,引擎内部怎么腾挪与它无关;
+- buffer 由 `etha.utils.local_shape`(planner 同款几何)按声明预分配;IPC/NIXL 要求的
+  固定地址是 transport 的私事,不进核心概念。
 
-### 引擎只需暴露三样声明式元数据
-
-```python
-packed_modules_mapping                                       # name:qkv ← q/k/v(现成)
-get_sharding("q_proj") -> (mesh_dim_sizes, placements)       # parallel:只声明 shape+placements(多轴 EP/TP)
-   # q_proj -> ((tp,), [Shard(0)]);  w13 -> ((ep,tp), [Shard(0),Shard(1)])
-get_layout("q_proj") -> [ViewSpec(fused="qkv_proj", offset=0, sub_shape=..., permute=None)]
-   # 轴级仿射 view(offset + reshape + permute);fuse/pad 是 permute=None 的特例,
-   # Conv1D/QKV去交错/rotary 是带 permute 的轴转置 —— 一个 spec 统一覆盖
-```
-
-- 三样都是**声明式元数据**(KB 级、init 可查、与显存无关),不是真 tensor;
-- `get_sharding` 跨 world 给 trainer 算 m2m,但**只传 `(各维 size, placements)`,不传 DeviceMesh**
-  (DeviceMesh 含 PG,跨 world 传不了):真 mesh 由 driver 本地 `arange(base_rank, …).view(shape)`
-  重建(`get_m2m_map` 的 `distribute_tensor` + `.mesh` 要真 mesh);`base_rank` 按 world 布局赋
-  (trainer 占 `0..T-1`、推理占 `T..`)。**前提:引擎 global rank 按 mesh 维序行优先排**(vLLM
-  `(dp,tp)`、trainer `(dp_replicate,dp_shard[,ep])`,helper 即编码此约定)——非行优先的引擎才需真传 rank 张量;
-- `get_layout` 推理侧本地把接收 buffer 注册成 HF staging 的轴级 view(execution 时
-  `staging.narrow(...).view(sub_shape).permute(perm)` 现切);返回 list 兼容罕见多段;
-- offset/permute 是 **HF 布局的静态量**(不含 backend swap,swap 在 process 内);
-- 落点始终是已有的 HF staging,**不另开一份 buffer**:**fuse/pad 是连续 view → recv 直达 staging
-  (零额外 copy)**;**transpose/permute 是非连续 view → wire 要连续,`prepare` 开一个 per-chunk
-  连续临时块、recv 进去,`finalize` 里 `staging_view.copy_(tmp)` 把转置 scatter 进 staging**。
-  复用 Etha 现成 prepare/finalize;转置那次 copy 折进 staging 写入(on-GPU memory-bound,便宜),
-  只多一个 wire 临时块,不是多一份 staging。
-
-→ 这三样替代了现状 `_convert_vllm_state_dict` 那张硬编码表(单模型 / 手抄融合 / 版本脆),
-也比对 weight_loader 做 trace 简单:**仿射 offset 声明即可,非仿射本就在 process 里、引擎干**。
+> ⚠️ `get_m2m_map` 内部的 middle 指纹只是算 plan 的一次性小开销,**不是每轮 full 真权重**
+> ——真权重走 chunk,never full。
 
 > ⚠️ `get_m2m_map` 内部的 `full_tensor` 只作用在 LCM 大小的 middle 指纹张量(算 plan 的
 > 一次性小开销),**不是每轮 full 真权重**——真权重走 chunk,never full。两个"full"别混。
