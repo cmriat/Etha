@@ -32,7 +32,8 @@ driver 装配层:rank 记账 / 统一 mesh / placement 表(设计文档 driver �
 name join(HF 名主键,同名多源去重)+ `route_idx` 全局重编 helper;consumer 侧
 view 注册——**直落为默认**(bf16→bf16 / fp8→fp8,process no-op,零 staging),
 process 真干活的配置走裸层循环 staging。trainer PP 自动覆盖(per-param mesh)。
-集群 GPU 验证,对齐 671B ~1s 基线。
+集群 GPU 验证:对齐 671B ~1s 基线;容错实测(kill 一个 replica →
+abort 旧 cross PG → 重建 → 下轮 sync 正常)。
 
 **M3 bench**
 chain vs fanout A/B(`split_fanout` 开关)、窗口扫参、与旧 etha 对比。

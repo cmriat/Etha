@@ -35,7 +35,7 @@ name / parallel / 仿射 view 三样元数据(下文),Etha 就能 never-full 地
 placement、仿射→HF 逻辑布局;非仿射无 universal,留各自):
 
 ```python
-class EngineWeightAPI(Protocol):
+class EngineWeightProtocol(Protocol):
     # ① name:HF 标准名 ↔ 本引擎名(融合分解 + rename;没列的默认 identity)
     name_map: NameMapper          # vLLM = WeightsMapper + packed_modules_mapping;Megatron = weight_converter
     # ② parallel:每个逻辑权重的分布 —— 只声明 (各维 size, placements)(多轴 EP/TP)
@@ -53,7 +53,7 @@ class EngineWeightAPI(Protocol):
 有了这套,任意 `src → dst` 同步就是**纯粹在四类抽象上的操作**,Etha 不认识任何具体引擎:
 
 ```python
-def weight_sync(src: EngineWeightAPI, dst: EngineWeightAPI, transport):
+def weight_sync(src: EngineWeightProtocol, dst: EngineWeightProtocol, transport):
     # ===== INIT(一次性,plan 缓存复用)=====
     # ① name:两端各自归一到 HF 名,按 HF 名 join(只配两端都有的 → ⑤ 存在性自动排除)
     pairs = join_by_hf_name(src.name_map, dst.name_map)         # 每引擎一份映射,N+M 不是 N×M
@@ -348,7 +348,29 @@ metadata——IPC handle、plan、ncclUniqueId——都经过 driver。worker �
 control plane 完全外包——Etha 只是一个库,由 driver / `collective_rpc` 下发
 `etha_init` / `etha_transfer`。
 
-## 与 vLLM 解耦:`CommBootstrap` 接口
+### 容错:故障域与两层恢复
+
+故障域天然隔离:cross PG 是 etha 自己的 communicator,replica 挂掉只废这一个——
+trainer 的 world、各 replica 内部的 TP/DP comm 互相独立,不传染。恢复分两层:
+
+- **常态(几乎全部:故障落在 sync 间隙)**:权重同步是短而确定性的操作,故障
+  几乎总在推理阶段(rollout 的动态负载)发生。driver 本来就有 RPC 健康视角
+  (actor 监控 / RPC 失败即信号),**每轮 sync 前检查成员**——变了就 abort 旧
+  cross PG + 重建 + plan 重算(纯函数,几十 ms,零协调)。要点:**重建路径统一
+  用 abort(`ncclCommAbort`,任何状态强拆不等待)而非 destroy**——destroy 会
+  等 pending op,死 rank 留下残局时会卡;abort 对空闲 comm 同样合法,一个入口
+  覆盖两种情形。NCCL comm 销毁是本地操作,不需要死 rank 配合(abort-then-rebuild
+  的实际行为列入集群验证清单)。TCPStore master 在 trainer rank0,推理侧故障
+  不波及;临时组模式(每轮建组用完销毁)把这层做成默认行为,+~1s init 无感;
+- **兜底(罕见:sync 窗口内挂)**:对端 P2P 卡死,且 **vLLM EngineCore 是单线程
+  busy loop——driver 的 abort 指令作为 utility 排在队列里永远进不来**,主动
+  abort 结构性不可达。唯一兜底是 torch 自带的 NCCL watchdog(独立线程,超时
+  自动 `ncclCommAbort`,卡住的 wait 抛异常上传)。因此 **`create_cross_group`
+  的 `timeout_s` 是容错参数而非优化**:按 sync 预期时长的 ~10× 设(30–60s)。
+
+connection-based transport(NIXL)在容错维度的三条优势,与弹性/重叠并列为其
+触发条件:成员天然弹性(per-peer 连接,死谁断谁)、轮询式 API 无全局冻结、
+故障半径 per-pair。
 
 (本节针对 **NCCL transport** 的 bootstrap——交换 ncclUniqueId 建 communicator。
 NIXL / Mooncake 等 connection-based transport 有自己的连接建立,通常更简单,无需
