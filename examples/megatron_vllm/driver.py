@@ -35,13 +35,15 @@ def dec(s):
 async def trainer(client, method, *args):
     body = pickle.dumps((args, {})) if args else b""
     r = await client.post(f"{TRAINER_URL}/{method}", content=body)
-    r.raise_for_status()
+    if r.status_code != 200:
+        raise RuntimeError(r.text)
     return pickle.loads(r.content)
 
 
 async def vllm(client, method, *args):
     r = await client.post(f"{VLLM_URL}/collective_rpc", json={"method": method, "args": list(args)})
-    r.raise_for_status()
+    if r.status_code != 200:
+        raise RuntimeError(r.text)
     return r.json()["results"] if r.content else None
 
 
