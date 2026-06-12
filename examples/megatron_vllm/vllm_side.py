@@ -7,6 +7,7 @@
 bf16 直落(process no-op);quant 档把同一个喂法包进 layerwise reload,此处未接。
 """
 
+import base64
 import pickle
 
 import torch
@@ -69,10 +70,12 @@ class EthaWorkerExtension:
                 stem, leaf = module_name.rsplit(".", 1)
                 for sub in packed.get(leaf, [leaf]):
                     self._etha_shardings[f"{stem}.{sub}.{param_name}"] = (mesh, placements)
-        return pickle.dumps(self._etha_shardings)  # 信封:绕过 collective_rpc 的 msgpack 编码
+        # 信封:base64(pickle),JSON/msgpack 双安全,server 模式 /collective_rpc 只传 str
+        return base64.b64encode(pickle.dumps(self._etha_shardings)).decode()
 
     def etha_init(self, host, port, world, manifest, peer):
-        manifest, peer = pickle.loads(manifest), pickle.loads(peer)  # 信封拆封
+        manifest = pickle.loads(base64.b64decode(manifest))  # 信封拆封
+        peer = pickle.loads(base64.b64decode(peer))
         rank = self._etha_base + self.rank
         self._etha_buffers = {
             name: torch.empty(local_shape(shape, *self._etha_shardings[name], rank), dtype=dtype, device="cuda")

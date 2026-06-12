@@ -1,17 +1,45 @@
-"""driver:唯一同时看到两边的进程(single-controller)。
+"""driver:纯编排进程,不占 GPU,两边都是已在跑的 server。
 
-起 vLLM(load_format="dummy",乱码权重)+ 连 trainer 的 collective RPC,
-编排 init(声明互换、各端本地 build_chunks)与 sync(chunk_comm)。
-验证:sync 前 generate 乱码,sync 后正常文本 = 权重传对。
+vLLM 走真 server 模式(vllm serve + VLLM_SERVER_DEV_MODE 的 /collective_rpc
+端点);trainer 是 vLLM 形状的自建 server(HTTP 入口 + zmq 扇出)。跨边界
+元数据一律 base64(pickle) 信封——/collective_rpc 的约定就是只传字符串,
+方法自己负责反序列化。验证:dummy 乱码 → sync → 正常文本。
 """
 
+import base64
 import os
 import pickle
+import time
+
+import requests
 
 from rpc import CollectiveClient
-from vllm import LLM, SamplingParams
 
 CROSS_PORT = 52701
+VLLM_URL = "http://127.0.0.1:52300"
+
+
+def enc(obj):
+    return base64.b64encode(pickle.dumps(obj)).decode()
+
+
+def dec(s):
+    return pickle.loads(base64.b64decode(s))
+
+
+def vllm_rpc(method, *args):
+    r = requests.post(f"{VLLM_URL}/collective_rpc", json={"method": method, "args": list(args)}, timeout=3600)
+    r.raise_for_status()
+    return r.json()["results"] if r.content else None
+
+
+def generate(model, prompt):
+    r = requests.post(
+        f"{VLLM_URL}/v1/completions",
+        json={"model": model, "prompt": prompt, "temperature": 0, "max_tokens": 24},
+        timeout=600,
+    )
+    return r.json()["choices"][0]["text"]
 
 
 def main():
@@ -19,32 +47,28 @@ def main():
     T = int(os.environ.get("TRAINER_WORLD", "4"))
     tp = int(os.environ.get("VLLM_TP", "4"))
 
-    llm = LLM(
-        model=model,
-        load_format="dummy",
-        tensor_parallel_size=tp,
-        enforce_eager=True,
-        gpu_memory_utilization=0.6,
-        worker_extension_cls="vllm_side.EthaWorkerExtension",
-    )
-    sp = SamplingParams(temperature=0, max_tokens=24)
-    prompt = "The capital of France is"
-    print("[before]", repr(llm.generate([prompt], sp)[0].outputs[0].text), flush=True)
+    while True:
+        try:
+            if requests.get(f"{VLLM_URL}/health", timeout=5).status_code == 200:
+                break
+        except requests.exceptions.ConnectionError:
+            time.sleep(5)
+    print("[before]", repr(generate(model, "The capital of France is")), flush=True)
 
     trainer = CollectiveClient()
     manifest = trainer.collective_rpc("manifest")[0]
     t_decl = trainer.collective_rpc("etha_export")[0]
-    v_decl = pickle.loads(llm.collective_rpc("etha_export", args=(T, 1))[0])
+    v_decl = dec(vllm_rpc("etha_export", T, 1)[0])
 
     world = T + tp
     wait = trainer.collective_rpc_async("etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl)
-    llm.collective_rpc("etha_init", args=("127.0.0.1", CROSS_PORT, world, pickle.dumps(manifest), pickle.dumps(t_decl)))
+    vllm_rpc("etha_init", "127.0.0.1", CROSS_PORT, world, enc(manifest), enc(t_decl))
     wait()
 
     wait = trainer.collective_rpc_async("etha_transfer")
-    llm.collective_rpc("etha_transfer")
+    vllm_rpc("etha_transfer")
     wait()
-    print("[after]", repr(llm.generate([prompt], sp)[0].outputs[0].text), flush=True)
+    print("[after]", repr(generate(model, "The capital of France is")), flush=True)
 
 
 if __name__ == "__main__":
