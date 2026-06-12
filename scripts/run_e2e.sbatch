@@ -10,12 +10,9 @@ export ETHA_MODEL=${ETHA_MODEL:-Qwen/Qwen3-0.6B}
 export PYTHONPATH=$PWD/examples/megatron_vllm
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
-ldconfig -p | grep libcuda || true
-libcuda=$(find /usr /run -name 'libcuda.so.1' 2>/dev/null | head -1)
-echo "libcuda at: $libcuda"
-export TRITON_LIBCUDA_PATH=$(dirname "$libcuda")
-echo 'int main(){return 0;}' > /tmp/t.c
-/usr/bin/gcc /tmp/t.c -l:libcuda.so.1 -L"$TRITON_LIBCUDA_PATH" -o /tmp/t && echo LINK-OK || echo LINK-FAIL
+export TRITON_CACHE_DIR=/tmp/triton-cache
+export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor-cache
+export VLLM_CACHE_ROOT=/tmp/vllm-cache
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 pixi run torchrun --standalone --nproc_per_node=4 \
   examples/megatron_vllm/trainer_server.py &
