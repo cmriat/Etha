@@ -14,7 +14,7 @@ export TRITON_CACHE_DIR=/tmp/triton-cache
 export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor-cache
 export VLLM_CACHE_ROOT=/tmp/vllm-cache
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 pixi run torchrun --standalone --nproc_per_node=4 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 pixi run -e fsdp torchrun --standalone --nproc_per_node=4 \
   examples/megatron_vllm/trainer_server.py &
 trainer_pid=$!
 

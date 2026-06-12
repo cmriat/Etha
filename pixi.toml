@@ -26,11 +26,13 @@ cuda = "12.9"
 [dependencies]
 cuda = "12.9.*"
 etha = { path = "." }
+pytorch = { version = "*", build = "cuda*" }
+transformers = "*"
+
+[feature.fsdp.dependencies]
 fastapi = "*"
 pyzmq = "*"
 uvicorn = "*"
-pytorch = { version = "*", build = "cuda*" }
-transformers = "*"
 
 [feature.vllm.dependencies]
 vllm = { version = "*", build = "cuda*" }
@@ -45,6 +47,7 @@ pre-commit = "*"
 
 [environments]
 dev = { features = ["dev"], solve-group = "default" }
+fsdp = { features = ["fsdp"] }
 vllm = { features = ["vllm"] }
 megatron = { features = ["megatron"] }
 
