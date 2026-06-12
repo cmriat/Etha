@@ -15,7 +15,7 @@ import pickle
 from dataclasses import dataclass
 
 import torch
-from protocol import build_chunks
+from protocol import EthaInitInfo, build_chunks
 from torch.distributed.tensor import Replicate, Shard
 
 from etha import chunk_comm, create_cross_group
@@ -79,21 +79,9 @@ class EthaWorkerExtension:
 
 from vllm.distributed.weight_transfer.base import (  # noqa: E402
     WeightTransferEngine,
-    WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
 from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory  # noqa: E402
-
-
-@dataclass
-class EthaInitInfo(WeightTransferInitInfo):
-    host: str
-    port: int
-    world: int
-    base_rank: int
-    manifest: str  # base64(pickle):{hf_name: (shape, dtype)},HF index 权威清单
-    self_decl: str  # base64(pickle):本端声明(etha_export 产出,driver 回灌)
-    peer_decl: str  # base64(pickle):对端声明
 
 
 @dataclass
@@ -117,18 +105,22 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
     update_info_cls = EthaUpdateInfo
 
     def init_transfer_engine(self, init_info):
-        manifest, shardings, peer = dec(init_info.manifest), dec(init_info.self_decl), dec(init_info.peer_decl)
-        rank = init_info.base_rank + self.parallel_config.rank
-        self._buffers = {
-            name: torch.empty(local_shape(shape, *shardings[name], rank), dtype=dtype, device="cuda")
-            for name, (shape, dtype) in manifest.items()
-        }
-        self._group = create_cross_group(init_info.host, init_info.port, rank, init_info.world)
-        self._chunks = build_chunks(_Api(shardings, self._buffers), list(manifest), peer, rank, sending=False)
+        self._manifest = dec(init_info.manifest)
+        self._shardings = dec(init_info.self_decl)
+        self._peer = dec(init_info.peer_decl)
+        self._rank = init_info.base_rank + self.parallel_config.rank
+        self._group = create_cross_group(init_info.host, init_info.port, self._rank, init_info.world)
 
     def receive_weights(self, update_info, load_weights):
-        chunk_comm(self._chunks, group=self._group)
-        load_weights(list(self._buffers.items()))
+        # buffer 生命周期 = 本次调用:轮间零常驻(全模型 shard 量级,不能常驻);
+        # 轮内瞬时峰值在 sync 暂停窗口,真挤再分组滚动(设计文档存档)。
+        buffers = {
+            name: torch.empty(local_shape(shape, *self._shardings[name], self._rank), dtype=dtype, device="cuda")
+            for name, (shape, dtype) in self._manifest.items()
+        }
+        chunks = build_chunks(_Api(self._shardings, buffers), list(self._manifest), self._peer, self._rank, sending=False)
+        chunk_comm(chunks, group=self._group)
+        load_weights(list(buffers.items()))
 
     def shutdown(self):
         pass

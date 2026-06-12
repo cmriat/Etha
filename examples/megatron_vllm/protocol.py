@@ -31,13 +31,16 @@ driver 的通用流程(不含任何引擎知识):
   每轮:  chunk_comm(chunks, group) → 收端 api.process_after_load(清单)
 """
 
-from typing import Protocol
+import base64
+import pickle
 from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Protocol
 
 import torch
 from torch.distributed.tensor import Placement
 
-from etha import get_m2m_map, m2m_to_chunks
+from etha import chunk_comm, create_cross_group, get_m2m_map, m2m_to_chunks
 
 
 class EngineWeightProtocol(Protocol):
@@ -67,3 +70,44 @@ def build_chunks(api, manifest, peer_shardings, my_rank, sending):
             chunks.append(c)
         offset += len(m2m.routes)
     return chunks
+
+
+@dataclass
+class EthaInitInfo:
+    """两端共享的 init_info schema(收发对称,self/peer 声明互换)。
+
+    vLLM 侧作 engine 的 init_info_cls 使用——不继承其基类(parse_init_info
+    运行时只是 cls(**dict),duck 兼容),trainer 环境因此零 vllm 依赖。
+    """
+
+    host: str
+    port: int
+    world: int
+    base_rank: int
+    manifest: str  # base64(pickle):{hf_name: (shape, dtype)},HF index 权威清单
+    self_decl: str  # base64(pickle):本端声明(etha_export 产出,driver 回灌)
+    peer_decl: str  # base64(pickle):对端声明
+
+
+def _dec(s):
+    return pickle.loads(base64.b64decode(s))
+
+
+class EthaTrainerEngine:
+    """发送端,与 vLLM WeightTransferEngine 同构(init/update/shutdown)。"""
+
+    init_info_cls = EthaInitInfo
+
+    def __init__(self, api, rank):
+        self.api, self.rank = api, rank
+
+    def init_transfer_engine(self, init_info):
+        manifest, peer = _dec(init_info.manifest), _dec(init_info.peer_decl)
+        self._group = create_cross_group(init_info.host, init_info.port, self.rank, init_info.world)
+        self._chunks = build_chunks(self.api, list(manifest), peer, self.rank, sending=True)
+
+    def update_weights(self, update_info=None):
+        chunk_comm(self._chunks, group=self._group)
+
+    def shutdown(self):
+        pass

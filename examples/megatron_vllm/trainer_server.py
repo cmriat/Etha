@@ -30,14 +30,15 @@ class TrainerWorker:
 
     def etha_export(self, base_rank):
         self.api.base_rank = base_rank          # cross-world 记账是 driver 的决策,显式注入
-        return {n: self.api.get_sharding(n) for n in self.api._params}
+        decl = {n: self.api.get_sharding(n) for n in self.api._params}
+        return base64.b64encode(pickle.dumps(decl)).decode()
 
-    def etha_init(self, host, port, world, names, peer):
-        self.group = create_cross_group(host, port, self.rank, world)
-        self.chunks = build_chunks(self.api, names, peer, self.rank, sending=True)
+    def init_weight_transfer_engine(self, init_info):
+        self.engine = EthaTrainerEngine(self.api, self.rank)
+        self.engine.init_transfer_engine(self.engine.init_info_cls(**init_info))
 
-    def etha_transfer(self):
-        chunk_comm(self.chunks, group=self.group)
+    def update_weights(self, update_info):
+        self.engine.update_weights(update_info)
 
 
 def main():
