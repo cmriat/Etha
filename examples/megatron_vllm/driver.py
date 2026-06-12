@@ -35,12 +35,8 @@ def dec(s):
 async def trainer(client, method, *args):
     body = pickle.dumps((args, {})) if args else b""
     r = await client.post(f"{TRAINER_URL}/{method}", content=body)
-    outs = []
-    for status, val in pickle.loads(r.content):
-        if status == "err":
-            raise RuntimeError(val)
-        outs.append(val)
-    return outs
+    r.raise_for_status()
+    return pickle.loads(r.content)
 
 
 async def vllm(client, method, *args):

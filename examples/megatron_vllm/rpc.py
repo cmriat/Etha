@@ -36,7 +36,7 @@ def serve(obj, rank, world):
 def _http_frontend(world):
     import uvicorn
     import zmq
-    from fastapi import FastAPI, Request, Response
+    from fastapi import FastAPI, HTTPException, Request, Response
 
     ctx = zmq.Context()
     reqs = []
@@ -54,6 +54,9 @@ def _http_frontend(world):
         for sock in reqs:
             sock.send(payload)
         outs = [pickle.loads(sock.recv()) for sock in reqs]
-        return Response(pickle.dumps(outs), media_type="application/octet-stream")
+        for rank, (status, val) in enumerate(outs):
+            if status == "err":
+                raise HTTPException(status_code=500, detail=f"rank {rank}: {val}")
+        return Response(pickle.dumps([val for _, val in outs]), media_type="application/octet-stream")
 
     uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT, log_level="warning")
