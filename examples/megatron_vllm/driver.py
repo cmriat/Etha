@@ -10,13 +10,16 @@ import base64
 import os
 import pickle
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
-from rpc import CollectiveClient
+from rpc import HTTP_PORT
 
 CROSS_PORT = 52701
 VLLM_URL = "http://127.0.0.1:52300"
+TRAINER_URL = f"http://127.0.0.1:{HTTP_PORT}"
+_pool = ThreadPoolExecutor(2)
 
 
 def enc(obj):
@@ -25,6 +28,33 @@ def enc(obj):
 
 def dec(s):
     return pickle.loads(base64.b64decode(s))
+
+
+def trainer_rpc(method, *args):
+    r = requests.post(f"{TRAINER_URL}/rpc", data=pickle.dumps((method, args, {})), timeout=3600)
+    outs = []
+    for status, val in pickle.loads(r.content):
+        if status == "err":
+            raise RuntimeError(val)
+        outs.append(val)
+    return outs
+
+
+def trainer_rpc_async(method, *args):
+    fut = _pool.submit(trainer_rpc, method, *args)
+    return fut.result
+
+
+def wait_ready(url, payload=None):
+    while True:
+        try:
+            if payload is not None:
+                requests.post(url, data=payload, timeout=5)
+            elif requests.get(url, timeout=5).status_code != 200:
+                raise requests.exceptions.ConnectionError
+            return
+        except requests.exceptions.ConnectionError:
+            time.sleep(5)
 
 
 def vllm_rpc(method, *args):
@@ -47,25 +77,20 @@ def main():
     T = int(os.environ.get("TRAINER_WORLD", "4"))
     tp = int(os.environ.get("VLLM_TP", "4"))
 
-    while True:
-        try:
-            if requests.get(f"{VLLM_URL}/health", timeout=5).status_code == 200:
-                break
-        except requests.exceptions.ConnectionError:
-            time.sleep(5)
+    wait_ready(f"{VLLM_URL}/health")
+    wait_ready(f"{TRAINER_URL}/rpc", pickle.dumps(("ping", (), {})))
     print("[before]", repr(generate(model, "The capital of France is")), flush=True)
 
-    trainer = CollectiveClient()
-    manifest = trainer.collective_rpc("manifest")[0]
-    t_decl = trainer.collective_rpc("etha_export")[0]
+    manifest = trainer_rpc("manifest")[0]
+    t_decl = trainer_rpc("etha_export")[0]
     v_decl = dec(vllm_rpc("etha_export", T, 1)[0])
 
     world = T + tp
-    wait = trainer.collective_rpc_async("etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl)
+    wait = trainer_rpc_async("etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl)
     vllm_rpc("etha_init", "127.0.0.1", CROSS_PORT, world, enc(manifest), enc(t_decl))
     wait()
 
-    wait = trainer.collective_rpc_async("etha_transfer")
+    wait = trainer_rpc_async("etha_transfer")
     vllm_rpc("etha_transfer")
     wait()
     print("[after]", repr(generate(model, "The capital of France is")), flush=True)

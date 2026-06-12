@@ -9,8 +9,6 @@ pickle bytes(tensor 按值,不走 fd 共享)。
 
 import pickle
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
 
 HTTP_PORT = 52100
 ZMQ_PORT_BASE = 52200
@@ -57,38 +55,3 @@ def _http_frontend(world):
         return Response(pickle.dumps(outs), media_type="application/octet-stream")
 
     uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT, log_level="warning")
-
-
-class CollectiveClient:
-    """driver 侧:单 HTTP 入口,异步形态供两端并发进 collective。"""
-
-    def __init__(self, host="127.0.0.1", port=HTTP_PORT, retry=180):
-        import requests
-
-        self.requests = requests
-        self.url = f"http://{host}:{port}/rpc"
-        self.pool = ThreadPoolExecutor(1)
-        ping = pickle.dumps(("ping", (), {}))
-        for _ in range(retry):
-            try:
-                self.requests.post(self.url, data=ping, timeout=5)
-                break
-            except self.requests.exceptions.ConnectionError:
-                time.sleep(2)
-
-    def collective_rpc_async(self, method, *args, **kwargs):
-        payload = pickle.dumps((method, args, kwargs))
-        fut = self.pool.submit(self.requests.post, self.url, data=payload, timeout=3600)
-
-        def wait():
-            outs = []
-            for status, val in pickle.loads(fut.result().content):
-                if status == "err":
-                    raise RuntimeError(val)
-                outs.append(val)
-            return outs
-
-        return wait
-
-    def collective_rpc(self, method, *args, **kwargs):
-        return self.collective_rpc_async(method, *args, **kwargs)()
