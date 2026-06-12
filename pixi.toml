@@ -30,6 +30,7 @@ transformers = "*"
 
 [feature.vllm.dependencies]
 vllm = { version = "*", build = "cuda*" }
+cuda-cudart-dev = "*"
 
 [feature.megatron.dependencies]
 # megatron-core = "*"  # placeholder until the integration lands
