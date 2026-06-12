@@ -199,3 +199,41 @@ def test_reshard_wire_dtype(tmp_path):
         nprocs=WORLD,
         join=True,
     )
+
+
+def _run_streaming(rank, store, port):
+    """Deferred dst allocation + per-weight completion hand-off."""
+    dist.init_process_group("gloo", rank=rank, world_size=WORLD, init_method=f"file://{store}")
+    group = create_cross_group("127.0.0.1", port, rank, WORLD, backend="gloo")
+    src_ranks, src_shape, src_pl, tgt_ranks, tgt_shape, tgt_pl = CASES["broadcast_shard0_to_replicate"]
+    ref = torch.arange(12 * 8 * 4, dtype=torch.float32).reshape(12, 8, 4)
+    src_mt = torch.tensor(src_ranks).reshape(src_shape)
+    tgt_mt = torch.tensor(tgt_ranks).reshape(tgt_shape)
+    m2m = get_m2m_map(src_mt, src_pl, tgt_mt, tgt_pl)
+    src_mesh, tgt_mesh = DeviceMesh("cpu", src_mt), DeviceMesh("cpu", tgt_mt)
+
+    source = _local(ref, src_mesh, src_pl).clone() if rank in src_ranks else None
+    expected = _local(ref, tgt_mesh, tgt_pl) if rank in tgt_ranks else None
+    if rank in src_ranks:
+        chunks = m2m_to_chunks(m2m, rank, source_tensor=source)
+    else:
+        chunks = m2m_to_chunks(m2m, rank, target_shape=tuple(expected.shape), transfer_dtype=torch.float32)
+    for c in chunks:
+        c.weight = "w0"
+
+    received = {}
+    chunk_comm(
+        chunks,
+        group=group,
+        target_alloc=lambda n: torch.zeros(tuple(expected.shape)),
+        on_complete=lambda n, buf: received.__setitem__(n, buf),
+    )
+    if expected is not None and rank not in src_ranks:
+        torch.testing.assert_close(received["w0"], expected)
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+@pytest.mark.timeout(120)
+def test_reshard_streaming(tmp_path):
+    mp.spawn(_run_streaming, args=(tmp_path / "store", _free_port()), nprocs=WORLD, join=True)

@@ -118,8 +118,11 @@ def m2m_to_chunks(
     rank: int,
     source_tensor: torch.Tensor | None = None,
     target_tensor: torch.Tensor | None = None,
+    target_shape: tuple[int, ...] | None = None,
     transfer_dtype: torch.dtype | None = None,
 ) -> list[Chunk]:
+    if target_tensor is not None:
+        target_shape = target_tensor.shape
     chunks: list[Chunk] = []
     for route_idx, route in enumerate(m2m.routes):
         src_rank = route.src.rank
@@ -145,7 +148,7 @@ def m2m_to_chunks(
                             src_tensor=source_tensor,
                             src_slice=src_slice,
                             dst_tensor=target_tensor,
-                            dst_slice=cell_slice(target_tensor.shape, m2m.target_num_slicers, dst.cell),
+                            dst_slice=cell_slice(target_shape, m2m.target_num_slicers, dst.cell),
                             transfer_dtype=transfer_dtype,
                         )
                     )
@@ -161,7 +164,7 @@ def m2m_to_chunks(
                         recv_from=chain[position - 1],
                         send_to=chain[position + 1] if position + 1 < len(chain) else None,
                         dst_tensor=target_tensor,
-                        dst_slice=cell_slice(target_tensor.shape, m2m.target_num_slicers, dst.cell),
+                        dst_slice=cell_slice(target_shape, m2m.target_num_slicers, dst.cell),
                         transfer_dtype=transfer_dtype,
                     )
                 )

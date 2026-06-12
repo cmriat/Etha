@@ -45,6 +45,7 @@ class Chunk:
     """
 
     route_idx: int
+    weight: str | None = None
     hop: int = 0
     recv_from: int | None = None
     send_to: int | None = None
@@ -58,7 +59,8 @@ class Chunk:
     def __post_init__(self) -> None:
         if self.transfer_dtype is None:
             tensor = self.src_tensor if self.src_tensor is not None else self.dst_tensor
-            self.transfer_dtype = tensor.dtype
+            if tensor is not None:
+                self.transfer_dtype = tensor.dtype
 
     def prepare(self) -> None:
         """Stage the wire buffer.

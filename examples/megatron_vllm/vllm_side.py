@@ -90,14 +90,11 @@ class EthaUpdateInfo(WeightTransferUpdateInfo):
 
 
 class _Api:
-    def __init__(self, shardings, buffers):
-        self._shardings, self._buffers = shardings, buffers
+    def __init__(self, shardings):
+        self._shardings = shardings
 
     def get_sharding(self, name):
         return self._shardings[name]
-
-    def local_view(self, name):
-        return self._buffers[name]
 
 
 class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo]):
@@ -112,15 +109,21 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
         self._group = create_cross_group(init_info.host, init_info.port, self._rank, init_info.world)
 
     def receive_weights(self, update_info, load_weights):
-        # buffer 生命周期 = 本次调用:轮间零常驻(全模型 shard 量级,不能常驻);
-        # 轮内瞬时峰值在 sync 暂停窗口,真挤再分组滚动(设计文档存档)。
-        buffers = {
-            name: torch.empty(local_shape(shape, *self._shardings[name], self._rank), dtype=dtype, device="cuda")
+        # 全流式:dst buffer 在执行流中按需分配(target_alloc),某权重的 chunks
+        # 收齐即喂 loader 并释放(on_complete)——峰值 = 在飞窗口,与模型大小无关。
+        targets = {
+            name: (local_shape(shape, *self._shardings[name], self._rank), dtype)
             for name, (shape, dtype) in self._manifest.items()
         }
-        chunks = build_chunks(_Api(self._shardings, buffers), list(self._manifest), self._peer, self._rank, sending=False)
-        chunk_comm(chunks, group=self._group)
-        load_weights(list(buffers.items()))
+        chunks = build_chunks(
+            _Api(self._shardings), list(self._manifest), self._peer, self._rank, sending=False, targets=targets
+        )
+        chunk_comm(
+            chunks,
+            group=self._group,
+            target_alloc=lambda n: torch.empty(targets[n][0], dtype=targets[n][1], device="cuda"),
+            on_complete=lambda n, buf: load_weights([(n, buf)]),
+        )
 
     def shutdown(self):
         pass
