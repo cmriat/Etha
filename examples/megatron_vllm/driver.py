@@ -37,13 +37,13 @@ def main():
     v_decl = llm.collective_rpc("etha_export", args=(T, 1))[0]
 
     world = T + tp
-    trainer.send_all("etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl)
+    wait = trainer.collective_rpc_async("etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl)
     llm.collective_rpc("etha_init", args=("127.0.0.1", CROSS_PORT, world, manifest, t_decl))
-    trainer.recv_all()
+    wait()
 
-    trainer.send_all("etha_transfer")
+    wait = trainer.collective_rpc_async("etha_transfer")
     llm.collective_rpc("etha_transfer")
-    trainer.recv_all()
+    wait()
     print("[after]", repr(llm.generate([prompt], sp)[0].outputs[0].text), flush=True)
 
 

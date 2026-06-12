@@ -26,6 +26,8 @@ cuda = "12.9"
 [dependencies]
 cuda = "12.9.*"
 etha = { path = "." }
+fastapi = "*"
+uvicorn = "*"
 pytorch = { version = "*", build = "cuda*" }
 transformers = "*"
 
