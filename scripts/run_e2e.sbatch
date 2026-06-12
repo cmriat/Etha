@@ -15,6 +15,3 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 pixi run torchrun --standalone --nproc_per_node=4 \
 trainer_pid=$!
 
 CUDA_VISIBLE_DEVICES=4,5,6,7 pixi run -e vllm python examples/megatron_vllm/driver.py
-
-kill $trainer_pid 2>/dev/null
-wait
