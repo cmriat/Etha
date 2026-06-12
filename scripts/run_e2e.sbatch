@@ -22,6 +22,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 pixi run -e fsdp torchrun --standalone --nproc_per_
 CUDA_VISIBLE_DEVICES=4,5,6,7 pixi run -e vllm vllm serve $ETHA_MODEL \
   --load-format dummy --tensor-parallel-size 4 --enforce-eager \
   --gpu-memory-utilization 0.6 --port 52300 \
-  --worker-extension-cls vllm_side.EthaWorkerExtension &
+  --worker-extension-cls vllm_side.EthaWorkerExtension \
+  --weight-transfer-config '{"backend": "etha"}' &
 
 pixi run -e vllm python examples/megatron_vllm/driver.py

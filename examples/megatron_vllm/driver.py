@@ -90,16 +90,26 @@ async def main():
         print("[before]", repr(await generate(client, model, "The capital of France is")), flush=True)
 
         t_decl = (await trainer(client, "etha_export", 0))[0]
-        v_decl = dec((await vllm(client, "etha_export", T))[0])
+        v_decl_b64 = (await vllm(client, "etha_export", T))[0]
 
-        world = T + tp
+        # init 走 worker 官方入口;EthaInitInfo 即 init_info 的 schema,
+        # engine 零 model 依赖,自声明由 driver 回灌
+        init_info = {
+            "host": "127.0.0.1",
+            "port": CROSS_PORT,
+            "world": T + tp,
+            "base_rank": T,
+            "manifest": enc(manifest),
+            "self_decl": v_decl_b64,
+            "peer_decl": enc(t_decl),
+        }
         await asyncio.gather(
-            trainer(client, "etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl),
-            vllm(client, "etha_init", "127.0.0.1", CROSS_PORT, world, enc(manifest), enc(t_decl)),
+            trainer(client, "etha_init", "127.0.0.1", CROSS_PORT, T + tp, list(manifest), dec(v_decl_b64)),
+            vllm(client, "init_weight_transfer_engine", init_info),
         )
         await asyncio.gather(
             trainer(client, "etha_transfer"),
-            vllm(client, "etha_transfer"),
+            vllm(client, "update_weights", {}),
         )
         print("[after]", repr(await generate(client, model, "The capital of France is")), flush=True)
 
