@@ -16,7 +16,7 @@ pytorch = "*"
 [workspace]
 channels = ["conda-forge"]
 name = "etha"
-platforms = ["linux-64", "osx-arm64"]
+platforms = ["linux-64"]
 version = "0.1.0"
 preview = ["pixi-build"]
 
@@ -25,19 +25,11 @@ cuda = "12.9"
 
 [dependencies]
 etha = { path = "." }
-transformers = "*"
-
-[target.linux-64.dependencies]
 pytorch = { version = "*", build = "cuda*" }
-
-[feature.vllm]
-platforms = ["linux-64"]
+transformers = "*"
 
 [feature.vllm.dependencies]
 vllm = { version = "*", build = "cuda*" }
-
-[feature.megatron]
-platforms = ["linux-64"]
 
 [feature.megatron.dependencies]
 # megatron-core = "*"  # placeholder until the integration lands
@@ -57,4 +49,3 @@ submit = { cmd = "kjobctl create slurm --first-node-ip -- --chdir $PIXI_PROJECT_
 
 [feature.dev.tasks]
 test = "pytest tests"
-
