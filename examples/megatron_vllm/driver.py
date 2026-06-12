@@ -81,12 +81,16 @@ def main():
 
     # 权威清单:HF checkpoint index(第三方),不从任何一端拿;dtype 按 safetensors 命名
     dtypes = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}
+    from transformers import AutoConfig
+
     meta = get_safetensors_metadata(model)
     manifest = {
         name: (tuple(info.shape), dtypes[info.dtype])
         for fm in meta.files_metadata.values()
         for name, info in fm.tensors.items()
     }
+    if getattr(AutoConfig.from_pretrained(model), "tie_word_embeddings", False):
+        manifest.pop("lm_head.weight", None)   # tied:checkpoint 的冗余副本,运行时两端都不持有
 
     wait_ready(f"{VLLM_URL}/health")
     wait_ready(f"{TRAINER_URL}/ping", b"")
