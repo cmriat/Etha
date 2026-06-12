@@ -27,10 +27,12 @@ strided 支持 / 随机对拍 fuzz。torch-only,CPU 测试 macOS 可跑。
 解锁:同卡跨进程交付;torch-native colocate = 组内 m2m + IPC 落点(verl 的
 shard-to-shard 替代 all_gather full tensor)。
 
-**M2 第一条端到端:torch-native → vLLM(disaggregated)✅ bf16 已通**
+**M2 第一条端到端:torch-native → vLLM(disaggregated)✅ bf16 已通(真 server 模式)**
 真实跑通(8×H20Z 单机):FSDP2 Qwen3-0.6B(4 卡)→ etha m2m → cross NCCL →
-vLLM tp=4 shard 直落 → load_weights → dummy 乱码变正常生成。trainer 做成
-vLLM 形状的 server(HTTP 入口 + zmq 扇出);跨边界元数据一律 pickle 信封。
+vLLM tp=4 shard 直落 → load_weights → dummy 乱码变正常生成。vLLM 走
+`vllm serve` + 官方 /collective_rpc 端点(VLLM_SERVER_DEV_MODE);trainer 做成
+vLLM 形状的 server(HTTP 入口 + zmq 扇出);driver 纯 HTTP 编排,不占 GPU、
+不 import 引擎;跨边界元数据一律 base64(pickle) 信封(文本边界)。
 上游 PR 范围修正:`is_sharded_weight` 只有 v1 weight_loader 检查,**v2
 (parameter.py 的 load_*,bf16/主流量化都走它)没有旁路**——PR 要补 v2 +
 embedding + MoE-EP-off;example 暂用"绑回 v1 loader"过渡。
