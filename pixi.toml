@@ -27,6 +27,9 @@ cuda = "12.9"
 etha = { path = "." }
 transformers = "*"
 
+[target.linux-64.dependencies]
+pytorch = { version = "*", build = "cuda*" }
+
 [feature.vllm]
 platforms = ["linux-64"]
 
