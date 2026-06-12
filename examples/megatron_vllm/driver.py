@@ -43,8 +43,10 @@ def post(url, *args):
     return outs
 
 
-def post_async(url, *args):
-    return _pool.submit(post, url, *args).result
+def concurrently(*calls):
+    """两边的 collective(cross group 会合 / chunk_comm)必须同时在飞,全部等齐。"""
+    futs = [_pool.submit(fn, *args) for fn, *args in calls]
+    return [f.result() for f in futs]
 
 
 def wait_ready(url, payload=None):
@@ -100,13 +102,14 @@ def main():
     v_decl = dec(vllm_rpc("etha_export", T, 1)[0])
 
     world = T + tp
-    wait = post_async(f"{TRAINER_URL}/etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl)
-    vllm_rpc("etha_init", "127.0.0.1", CROSS_PORT, world, enc(manifest), enc(t_decl))
-    wait()
-
-    wait = post_async(f"{TRAINER_URL}/etha_transfer")
-    vllm_rpc("etha_transfer")
-    wait()
+    concurrently(
+        (post, f"{TRAINER_URL}/etha_init", "127.0.0.1", CROSS_PORT, world, list(manifest), v_decl),
+        (vllm_rpc, "etha_init", "127.0.0.1", CROSS_PORT, world, enc(manifest), enc(t_decl)),
+    )
+    concurrently(
+        (post, f"{TRAINER_URL}/etha_transfer"),
+        (vllm_rpc, "etha_transfer"),
+    )
     print("[after]", repr(generate(model, "The capital of France is")), flush=True)
 
 
