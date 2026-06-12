@@ -25,10 +25,11 @@ class TrainerWorker:
         for layer in model.model.layers:
             fully_shard(layer)
         fully_shard(model)
-        self.api = FsdpWeightProtocol(model, base_rank=0)
+        self.api = FsdpWeightProtocol(model)
         self.rank = dist.get_rank()
 
-    def etha_export(self):
+    def etha_export(self, base_rank):
+        self.api.base_rank = base_rank          # cross-world 记账是 driver 的决策,显式注入
         return {n: self.api.get_sharding(n) for n in self.api._params}
 
     def etha_init(self, host, port, world, names, peer):
