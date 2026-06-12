@@ -64,7 +64,8 @@ class EthaWorkerExtension:
                     # is_sharded_weight 只有 v1 weight_loader 检查;bf16 走 v2
                     # (UnquantizedLinearMethod ∈ V2_SUPPORTED,parameter.py 无此旁路)
                     # —— 把 param 的 loader 绑回 v1,上游 PR 应补 v2。
-                    set_weight_attrs(param, {"is_sharded_weight": True, "weight_loader": module.weight_loader})
+                    set_weight_attrs(param, {"is_sharded_weight": True})
+                    param.weight_loader = module.weight_loader  # 直接覆盖(set_weight_attrs 拒绝重设)
                 stem, leaf = module_name.rsplit(".", 1)
                 for sub in packed.get(leaf, [leaf]):
                     self._etha_shardings[f"{stem}.{sub}.{param_name}"] = (mesh, placements)
