@@ -69,9 +69,10 @@ class EthaWorkerExtension:
                     # (parameter.py 的 load_* 无此旁路)——绑回 v1,上游 PR 应补 v2。
                     set_weight_attrs(param, {"is_sharded_weight": True})
                     param.weight_loader = module.weight_loader
-                stem, leaf = module_name.rsplit(".", 1)
+                stem, _, leaf = module_name.rpartition(".")  # 顶层模块(lm_head)无 ".",stem=""
                 for sub in packed.get(leaf, [leaf]):
-                    shardings[f"{stem}.{sub}.{param_name}"] = (mesh, placements, param.dtype)
+                    full = f"{stem}.{sub}.{param_name}" if stem else f"{sub}.{param_name}"
+                    shardings[full] = (mesh, placements, param.dtype)
         # layerwise reload 按 record 快照重建 param(__dict__ 拷回)——启动时的旧快照
         # 会盖掉上面打的标,重新 record 让快照带上它们。
         from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
