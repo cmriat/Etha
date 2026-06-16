@@ -105,11 +105,14 @@ async def main():
             vllm(client, "init_weight_transfer_engine",
                  {**common, "base_rank": T, "self_decl": v_decl_b64, "peer_decl": t_decl_b64}),
         )
-        await asyncio.gather(
-            trainer(client, "update_weights", {}),
-            vllm(client, "update_weights", {}),
-        )
-        print("[after]", repr(await generate(client, model, "The capital of France is")), flush=True)
+        # 多轮 sync:RL 每步都同步,验证 plan 缓存复用 + layerwise 重入 + re-record 跨轮持久
+        for r in range(2):
+            await asyncio.gather(
+                trainer(client, "update_weights", {}),
+                vllm(client, "update_weights", {}),
+            )
+            out = await generate(client, model, "The capital of France is")
+            print(f"[after round {r}]", repr(out), flush=True)
 
 
 if __name__ == "__main__":
