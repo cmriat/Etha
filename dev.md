@@ -57,6 +57,18 @@ embedding——它现在走 Replicate fallback(整块 0.31GB/rank)正因 VocabPa
 v2+embedding+MoE-EP-off 是性能项(砍峰值),不只是正确性项。
 (注:in-flight 计数器假设 on_complete 即释放;layerwise 对容器模块有 delayed
 现象——结构性 numel 重复计数,no-op fallback,不影响正确性但会让真实 GPU 占用偏高。)
+✅ **MoE 已通**(Qwen3-30B-A3B,EP on,8×H20Z):FSDP2 → expert 维融合 reshard →
+feed-slice → vLLM EP,dummy 乱码变连贯文本。关键设计:
+- **manifest = transformers reference**(meta-init named_parameters):第三方、框架无关
+  的 canonical 架构(融合 MoE 名 experts.gate_up_proj、分开 q/k/v);只取 shape;
+- **dtype 从源声明拿**(get_sharding 返回 (mesh, placements, dtype)),量化/混合精度
+  buffer 才对;
+- **MoE = expert 维(dim0)融合 reshard**:transformers 5.x 和 vLLM expert 张量布局
+  完全相同 → (R, S(0), S(0));收端把本地融合 buffer **feed-slice 成 per-expert** 喂
+  native loader(global expert id = ep_rank*local+i);
+- 踩坑:untied lm_head 是顶层无点模块(30B tie_word_embeddings=False 才暴露,rpartition)。
+版本调查结论:**native vLLM 模型仍是 per-expert 加载**(fused_moe_make_expert_params_mapping),
+只有 Transformers backend(非主流)支持直接喂融合 experts.gate_up_proj——故 feed-slice。
 余项:量化档实测、多 replica、671B 基线、容错实测。
 
 **M3 bench**
