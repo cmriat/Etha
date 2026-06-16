@@ -77,7 +77,14 @@ first_k_dense_replace(layer0 dense)全被现有规则 + transformers reference m
 **框架通用性验证**:同一份代码三种架构全通(Qwen3 dense / Qwen3 MoE / DeepSeek MLA+MoE),
 无 per-model 硬编码——这是相对 Aaron 硬编码 placement 表的核心优势。
 671B(DeepSeek-V3,同架构)现在只剩「多节点 + 规模」两个维度,代码已证明。
-余项:671B 多节点、多 replica、量化档实测、容错实测。
+✅ **跨节点(多节点)已通**(2 节点 V2-Lite,8 trainer@node0 + 8 inference@node1,16 ranks 跨节点):
+cross-group 跨节点 rendezvous(host=SLURM_JOB_FIRST_NODE_IP,rank0 当 TCPStore master)、
+driver 跨节点寻址(node1 经头节点 IP 连 node0 trainer)、跨节点 NCCL 传输全成立。
+kjobctl 多节点机制:JOB_COMPLETION_INDEX(节点 index)+ SLURM_JOB_FIRST_NODE_IP(头节点)+
+固定端口(SLURM_JOB_ID 跨节点不一致不能派生)。run_e2e_multinode.sbatch。
+余项(通往 128→32 671B):trainer 多节点 torchrun(>8 rank)、inference 多节点 vLLM
+(ray / external_launcher)、671B 加载(tracer-init 测机制 / sharded loading 出真权重)、
+节点预算(128→32 ≈ 20 节点)。多 replica、量化档、容错实测。
 
 **M3 bench**
 chain vs fanout A/B(`split_fanout` 开关)、窗口扫参、与旧 etha 对比。
