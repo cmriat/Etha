@@ -120,17 +120,25 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
             _Api(self._shardings), list(self._manifest), self._peer, self._rank, sending=False, targets=targets
         )
         full = sum(math.prod(shape) * dtype.itemsize for shape, dtype in targets.values()) / 1e9
-        torch.cuda.reset_peak_memory_stats()
-        before = torch.cuda.memory_allocated() / 1e9
-        chunk_comm(
-            chunks,
-            group=self._group,
-            target_alloc=lambda n: torch.empty(targets[n][0], dtype=targets[n][1], device="cuda"),
-            on_complete=lambda n, buf: load_weights([(n, buf)]),
-        )
-        peak = (torch.cuda.max_memory_allocated() / 1e9) - before
+
+        # 隔离接收 buffer 高水位(流式真正控制的量)——总显存被模型 re-materialize 污染,
+        # 不能用。计数器在 alloc 加、on_complete 减,峰值即同时在飞的接收 buffer。
+        live = [0.0]
+        peak = [0.0]
+
+        def alloc(n):
+            buf = torch.empty(targets[n][0], dtype=targets[n][1], device="cuda")
+            live[0] += buf.nbytes / 1e9
+            peak[0] = max(peak[0], live[0])
+            return buf
+
+        def complete(n, buf):
+            load_weights([(n, buf)])
+            live[0] -= buf.nbytes / 1e9
+
+        chunk_comm(chunks, group=self._group, target_alloc=alloc, on_complete=complete)
         if self.parallel_config.rank == 0:
-            print(f"[etha recv] streaming peak {peak:.3f} GB vs full-shard {full:.3f} GB", flush=True)
+            print(f"[etha recv] in-flight buffer peak {peak[0]:.3f} GB vs full-shard {full:.3f} GB", flush=True)
 
     def shutdown(self):
         pass
