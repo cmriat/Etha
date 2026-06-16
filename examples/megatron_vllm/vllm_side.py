@@ -129,7 +129,7 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
             on_complete=lambda n, buf: load_weights([(n, buf)]),
         )
         peak = (torch.cuda.max_memory_allocated() / 1e9) - before
-        if self._rank == 0:
+        if self.parallel_config.rank == 0:
             print(f"[etha recv] streaming peak {peak:.3f} GB vs full-shard {full:.3f} GB", flush=True)
 
     def shutdown(self):
