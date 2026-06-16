@@ -60,7 +60,7 @@ v2+embedding+MoE-EP-off 是性能项(砍峰值),不只是正确性项。
 余项:量化档实测、多 replica、671B 基线、容错实测。
 
 **M3 bench**
-chain vs fanout A/B(`split_fanout` 开关)、窗口扫参、与旧 etha 对比。
+chain 链式广播带宽、窗口扫参、与旧 etha 对比(fanout 已删:chain 在权重同步的带宽域恒优)。
 
 **M4 Megatron 源**
 Megatron-sharding → placement converter + name/仿射归一化(EP×ETP 用
