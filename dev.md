@@ -48,6 +48,15 @@ duck-typed parse),trainer worker 用与 vLLM 同名的 RPC(init_weight_transfer_
 ✅ 流式内存:chunk_comm 的 target_alloc/on_complete 把 dst buffer 分配/释放纳入
 窗口执行流(Chunk.weight 归属,m2m_to_chunks 接 target_shape 延迟落点)——峰值 =
 在飞窗口的相邻权重 local shard + 最大单权重(硬下界),与层数无关;window 是旋钮。
+实测(0.6B/tp4):in-flight buffer peak 0.316GB vs full-shard 0.531GB(降 40%),
+残留 ≈ embedding 一块。
+上游 PR 强论据(峰值显存):**峰值 floor = 最大单权重 local shard,而最大单权重恰是
+embedding——它现在走 Replicate fallback(整块 0.31GB/rank)正因 VocabParallelEmbedding
+的 loader 缺 is_sharded_weight 旁路**。补这个旁路不只是"对齐 Linear",还把 embedding
+按 tp 切(0.31→0.078GB),峰值 floor 直接掉到下一个权重。所以 is_sharded_weight 补
+v2+embedding+MoE-EP-off 是性能项(砍峰值),不只是正确性项。
+(注:in-flight 计数器假设 on_complete 即释放;layerwise 对容器模块有 delayed
+现象——结构性 numel 重复计数,no-op fallback,不影响正确性但会让真实 GPU 占用偏高。)
 余项:量化档实测、多 replica、671B 基线、容错实测。
 
 **M3 bench**
