@@ -50,9 +50,25 @@ def main():
     tmesh = torch.arange(T).reshape(T)  # trainer:1D dp 网格,Shard(0) 近似 FSDP
     vmesh = T + torch.arange(dp * tp).reshape(1, dp, tp)  # vLLM (1, dp, tp)
 
+    from collections import Counter
+
     n_w = n_route = 0
     total_bytes = 0.0
     errors, pad_flags, repl = [], [], 0
+    repl_kinds = Counter()
+    repl_bytes = Counter()
+
+    def kind_of(name):
+        for k in ("embed_tokens", "lm_head", "kv_a_proj", "q_a_proj", "kv_a_layernorm", "q_a_layernorm",
+                  "input_layernorm", "post_attention_layernorm", "q_norm", "k_norm", "mlp.gate.",
+                  "e_score_correction_bias", "shared_head"):
+            if k in name:
+                return k
+        if name.endswith(".norm.weight") or name == "model.norm.weight":
+            return "model.norm"
+        if name.endswith(".bias"):
+            return "bias"
+        return f"OTHER:{name}"
     for name, p in model.named_parameters():
         if tied and name == "lm_head.weight":
             continue
@@ -60,6 +76,9 @@ def main():
         vpl = vllm_placement(name, dp, tp)
         if all(isinstance(x, Replicate) for x in vpl):
             repl += 1
+            k = kind_of(name)
+            repl_kinds[k] += 1
+            repl_bytes[k] += p.numel() * 2 / 1e9
         try:
             m2m = get_m2m_map(tmesh, (S(0),), vmesh, vpl)
             n_route += len(m2m.routes)
@@ -88,6 +107,9 @@ def main():
     print(f"non-divisible-by-trainer (FSDP-pad territory): {len(pad_flags)}")
     for f in pad_flags[:10]:
         print("  ", f)
+    print("\n=== replicate-fallback 明细(类型: 个数, 总GB/rank) ===")
+    for k, c in sorted(repl_kinds.items(), key=lambda x: -repl_bytes[x[0]]):
+        print(f"  {k:32s} x{c:<5d} {repl_bytes[k]:.2f} GB")
 
 
 if __name__ == "__main__":
