@@ -3,7 +3,6 @@
 #SBATCH --gpus-per-task=nvidia.com/gpu:8
 #SBATCH --nodes=2
 #SBATCH --ntasks=2
-#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 
 set -x
