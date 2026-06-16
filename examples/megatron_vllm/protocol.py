@@ -91,7 +91,7 @@ class EthaInitInfo:
     port: int
     world: int
     base_rank: int
-    manifest: str  # base64(pickle):{hf_name: (shape, dtype)},HF index 权威清单
+    manifest: str  # base64(pickle):{hf_name: global_shape},transformers reference 几何
     self_decl: str  # base64(pickle):本端声明(etha_export 产出,driver 回灌)
     peer_decl: str  # base64(pickle):对端声明
 
@@ -111,7 +111,7 @@ class EthaTrainerEngine:
     def init_transfer_engine(self, init_info):
         manifest, peer = _dec(init_info.manifest), _dec(init_info.peer_decl)
         self._group = create_cross_group(init_info.host, init_info.port, self.rank, init_info.world)
-        self._chunks = build_chunks(self.api, list(manifest), peer, self.rank, sending=True)
+        self._chunks = build_chunks(self.api, manifest, peer, self.rank, sending=True)
 
     def update_weights(self, update_info=None):
         chunk_comm(self._chunks, group=self._group)
