@@ -19,8 +19,9 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from rpc import HTTP_PORT
 
 CROSS_PORT = HTTP_PORT + 200
-VLLM_URL = f"http://127.0.0.1:{os.environ.get('ETHA_VLLM_PORT', 52300)}"
-TRAINER_URL = f"http://127.0.0.1:{HTTP_PORT}"
+CROSS_HOST = os.environ.get("ETHA_CROSS_HOST", "127.0.0.1")  # 多节点:头节点 IP(cross-group rendezvous)
+VLLM_URL = f"http://127.0.0.1:{os.environ.get('ETHA_VLLM_PORT', 52300)}"  # driver 与 vLLM 同节点
+TRAINER_URL = f"http://{os.environ.get('ETHA_TRAINER_HOST', '127.0.0.1')}:{HTTP_PORT}"  # 多节点:trainer 在头节点
 
 
 def enc(obj):
@@ -98,7 +99,7 @@ async def main():
         v_decl_b64 = (await vllm(client, "etha_export", T))[0]
 
         # 两端完全同形:EthaInitInfo 即 init_info schema,self/peer 声明互换
-        common = {"host": "127.0.0.1", "port": CROSS_PORT, "world": T + tp, "manifest": enc(manifest)}
+        common = {"host": CROSS_HOST, "port": CROSS_PORT, "world": T + tp, "manifest": enc(manifest)}
         await asyncio.gather(
             trainer(client, "init_weight_transfer_engine",
                     {**common, "base_rank": 0, "self_decl": t_decl_b64, "peer_decl": v_decl_b64}),
