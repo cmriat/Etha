@@ -42,9 +42,9 @@ def main():
     args = ap.parse_args()
     T, tp, dp = args.trainer, args.tp, args.ep
 
-    cfg = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+    cfg = AutoConfig.from_pretrained(args.model)
     with torch.device("meta"):
-        model = AutoModelForCausalLM.from_config(cfg, dtype=torch.bfloat16, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_config(cfg, dtype=torch.bfloat16)
     tied = getattr(cfg, "tie_word_embeddings", False)
 
     tmesh = torch.arange(T).reshape(T)  # trainer:1D dp 网格,Shard(0) 近似 FSDP
