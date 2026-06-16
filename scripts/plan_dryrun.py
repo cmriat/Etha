@@ -25,12 +25,16 @@ def vllm_placement(name, dp, tp):
     """名字规则近似 vllm_side 的模块规则(mesh = (1, dp, tp))。"""
     if "experts.gate_up_proj" in name or "experts.down_proj" in name:
         return (R, S(0), S(0))  # MoE:expert 维(EP 借 dp×tp)
-    base = name.rsplit(".", 1)[-2] if "." in name else name
     if any(k in name for k in ("q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "q_b_proj", "kv_b_proj")):
         return (R, R, S(0))  # column
     if any(k in name for k in ("o_proj", "down_proj")):
         return (R, R, S(1))  # row
-    return (R, R, R)  # embed/lm_head/norm/gate/router/kv_a/q_a/bias → replicate
+    return (R, R, R)  # norm/gate/router/kv_a/q_a/bias(天生 replicate)+ embed/lm_head(真 fallback)
+
+
+# 真 fallback = vLLM 本会 TP 切但 etha 缺 is_sharded 旁路而被迫复制(只 embed/lm_head);
+# 其余 replicate 是 vLLM 设计上就复制的(norm/gate/MLA kv_a/q_a/bias),不是浪费。
+TRUE_FALLBACK = ("embed_tokens", "lm_head")
 
 
 def main():
@@ -107,9 +111,14 @@ def main():
     print(f"non-divisible-by-trainer (FSDP-pad territory): {len(pad_flags)}")
     for f in pad_flags[:10]:
         print("  ", f)
-    print("\n=== replicate-fallback 明细(类型: 个数, 总GB/rank) ===")
+    fb_gb = sum(repl_bytes[k] for k in repl_kinds if any(t in k for t in TRUE_FALLBACK))
+    waste = fb_gb * (dp * tp - 1)
+    print("\n=== replicate 明细(类型: 个数, 总GB/rank;★=真fallback该TP切)===")
     for k, c in sorted(repl_kinds.items(), key=lambda x: -repl_bytes[x[0]]):
-        print(f"  {k:32s} x{c:<5d} {repl_bytes[k]:.2f} GB")
+        star = " ★" if any(t in k for t in TRUE_FALLBACK) else ""
+        print(f"  {k:32s} x{c:<5d} {repl_bytes[k]:.2f} GB{star}")
+    print(f"\n真 fallback(embed+lm_head)= {fb_gb:.2f} GB → 被广播 ×{dp * tp} 而非 TP 切,"
+          f"浪费 ≈ {waste:.0f} GB(is_sharded PR 传输收益);其余 replicate 是必要广播。")
 
 
 if __name__ == "__main__":
