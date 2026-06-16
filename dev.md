@@ -61,6 +61,11 @@ v2+embedding+MoE-EP-off 是性能项(砍峰值),不只是正确性项。
 
 **M3 bench**
 chain vs fanout A/B(`split_fanout` 开关)、窗口扫参、与旧 etha 对比。
+**fanout 不是死代码,是有真实优势域的策略**:全双工下 chain 中继的额外 send 被
+RX/TX 独立隐藏,两者都 ≈ 收端 bound(R+D);fanout 唯一劣势是 source TX 串行 K·D,
+仅当 `K·D > R+D` 即 **K > 1 + R/D** 时 chain 才赢。RL 是收端 bound(R 大、单块
+replicated 权重 D 小),crossover K 偏大(~≥4),**小 K 时 fanout 反而更优**(等价
+bound + 广播负担甩给闲的 trainer 侧 + 无 pipeline-fill)。bench 实测这个 crossover。
 
 **M4 Megatron 源**
 Megatron-sharding → placement converter + name/仿射归一化(EP×ETP 用
