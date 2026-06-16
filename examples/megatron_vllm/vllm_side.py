@@ -48,6 +48,7 @@ def _placement_rule(module):
 class EthaWorkerExtension:
     def etha_export(self, base_rank):
         from vllm.distributed import get_tensor_model_parallel_world_size
+        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.utils import set_weight_attrs
 
         model = self.model_runner.model
@@ -57,6 +58,9 @@ class EthaWorkerExtension:
         packed = getattr(model, "packed_modules_mapping", {})
         shardings = {}
         for module_name, module in model.named_modules():
+            if isinstance(module, FusedMoE):
+                shardings.update(self._moe_shardings(module_name, module, mesh))
+                continue
             rule = _placement_rule(module)
             for param_name, param in module.named_parameters(recurse=False):
                 placements = (rule or {}).get(param_name, (R, R, R))
@@ -67,13 +71,27 @@ class EthaWorkerExtension:
                     param.weight_loader = module.weight_loader
                 stem, leaf = module_name.rsplit(".", 1)
                 for sub in packed.get(leaf, [leaf]):
-                    shardings[f"{stem}.{sub}.{param_name}"] = (mesh, placements)
+                    shardings[f"{stem}.{sub}.{param_name}"] = (mesh, placements, param.dtype)
         # layerwise reload 按 record 快照重建 param(__dict__ 拷回)——启动时的旧快照
         # 会盖掉上面打的标,重新 record 让快照带上它们。
         from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
 
         record_metadata_for_reloading(model)
         return base64.b64encode(pickle.dumps(shardings)).decode()
+
+    def _moe_shardings(self, module_name, module, mesh):
+        """融合 expert 权重:expert 维(dim0)reshard,名字用 transformers 融合名。
+
+        transformers 5.x 和 vLLM 的 expert 张量布局完全相同(experts.gate_up_proj
+        ↔ w13_weight,内层一致),所以就是 dim0 reshard。EP 借 dp×tp 格子切 expert 维
+        → (R, S(0), S(0))。名字 experts.gate_up_proj/down_proj 与 manifest(transformers
+        reference)一致;喂时 receive_weights 再切 per-expert 给 native loader。
+        """
+        assert module.expert_placement_strategy == "linear" and not module.enable_eplb
+        return {
+            f"{module_name}.gate_up_proj": (mesh, (R, S(0), S(0)), module.w13_weight.dtype),
+            f"{module_name}.down_proj": (mesh, (R, S(0), S(0)), module.w2_weight.dtype),
+        }
 
 
 # ── 传输引擎(零 model 依赖,官方插件位)────────────────────────────────────
@@ -112,17 +130,13 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
     def receive_weights(self, update_info, load_weights):
         # 全流式:dst buffer 在执行流中按需分配(target_alloc),某权重的 chunks
         # 收齐即喂 loader 并释放(on_complete)——峰值 = 在飞窗口,与模型大小无关。
+        # buffer 几何从 manifest 全局 shape + 本端 placement;dtype 从源(peer)声明。
         targets = {
-            name: (local_shape(shape, *self._shardings[name], self._rank), dtype)
-            for name, (shape, dtype) in self._manifest.items()
+            name: (local_shape(shape, *self._shardings[name][:2], self._rank), self._peer[name][2])
+            for name, shape in self._manifest.items()
         }
-        chunks = build_chunks(
-            _Api(self._shardings), list(self._manifest), self._peer, self._rank, sending=False, targets=targets
-        )
-        full = sum(math.prod(shape) * dtype.itemsize for shape, dtype in targets.values()) / 1e9
+        chunks = build_chunks(_Api(self._shardings), self._manifest, self._peer, self._rank, sending=False)
 
-        # 隔离接收 buffer 高水位(流式真正控制的量)——总显存被模型 re-materialize 污染,
-        # 不能用。计数器在 alloc 加、on_complete 减,峰值即同时在飞的接收 buffer。
         live = [0.0]
         peak = [0.0]
 
@@ -133,12 +147,33 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
             return buf
 
         def complete(n, buf):
-            load_weights([(n, buf)])
+            self._feed(n, buf, load_weights)
             live[0] -= buf.nbytes / 1e9
 
         chunk_comm(chunks, group=self._group, target_alloc=alloc, on_complete=complete)
         if self.parallel_config.rank == 0:
+            full = sum(math.prod(s) * d.itemsize for s, d in targets.values()) / 1e9
             print(f"[etha recv] in-flight buffer peak {peak[0]:.3f} GB vs full-shard {full:.3f} GB", flush=True)
+
+    def _feed(self, name, buf, load_weights):
+        """MoE 融合 buffer 喂时切 per-expert(贴合 native 的 per-expert loader);
+        dense 直接喂。buf 是本 rank 的本地 expert 融合块,全局 expert id 由
+        ep_rank(EP 借 dp×tp 格子 → == parallel_config.rank)× local 推出。"""
+        if name.endswith(".experts.gate_up_proj"):
+            stem = name[: -len(".gate_up_proj")]
+            inter, local = buf.shape[1] // 2, buf.shape[0]
+            for i in range(local):
+                g = self.parallel_config.rank * local + i
+                load_weights([(f"{stem}.{g}.gate_proj.weight", buf[i, :inter])])
+                load_weights([(f"{stem}.{g}.up_proj.weight", buf[i, inter:])])
+        elif name.endswith(".experts.down_proj"):
+            stem = name[: -len(".down_proj")]
+            local = buf.shape[0]
+            for i in range(local):
+                g = self.parallel_config.rank * local + i
+                load_weights([(f"{stem}.{g}.down_proj.weight", buf[i])])
+        else:
+            load_weights([(name, buf)])
 
     def shutdown(self):
         pass

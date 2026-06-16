@@ -14,8 +14,7 @@ import pickle
 
 import httpx
 import torch
-from huggingface_hub import get_safetensors_metadata
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoModelForCausalLM
 
 from rpc import HTTP_PORT
 
@@ -65,16 +64,20 @@ async def wait_ready(request):
 
 
 def build_manifest(model):
-    """权威清单:HF checkpoint index(第三方),不从任何一端拿。"""
-    dtypes = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}
-    meta = get_safetensors_metadata(model)
-    manifest = {
-        name: (tuple(info.shape), dtypes[info.dtype])
-        for fm in meta.files_metadata.values()
-        for name, info in fm.tensors.items()
-    }
-    if getattr(AutoConfig.from_pretrained(model), "tie_word_embeddings", False):
-        manifest.pop("lm_head.weight", None)  # tied:checkpoint 的冗余副本,运行时两端都不持有
+    """权威清单 = transformers 的模型定义(meta-init,零分配,秒级)。
+
+    第三方、框架无关:transformers 定义 canonical 架构(MoE 融合名
+    experts.gate_up_proj、dense 分开的 q/k/v),两端都往它映射(transformers
+    trainer identity、Megatron converter、vLLM w13→gate_up_proj)。比 safetensors
+    强在它是运行时逻辑权重(融合),不是可能 per-expert 的存储格式;比从 trainer
+    拿强在不绑具体训练框架。
+    """
+    cfg = AutoConfig.from_pretrained(model)
+    with torch.device("meta"):
+        ref = AutoModelForCausalLM.from_config(cfg, dtype=torch.bfloat16)
+    manifest = {n: tuple(p.shape) for n, p in ref.named_parameters()}  # 只要几何;dtype 从源拿
+    if getattr(cfg, "tie_word_embeddings", False):
+        manifest.pop("lm_head.weight", None)  # tied:运行时两端都不持有独立副本
     return manifest
 
 

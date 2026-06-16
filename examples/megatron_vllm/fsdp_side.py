@@ -16,7 +16,7 @@ class FsdpWeightProtocol:
 
     def get_sharding(self, hf_name):
         p = self._params[hf_name]
-        return self.base_rank + p.device_mesh.mesh, p.placements
+        return self.base_rank + p.device_mesh.mesh, p.placements, p.dtype
 
     def local_view(self, hf_name):
         return self._params[hf_name].to_local()

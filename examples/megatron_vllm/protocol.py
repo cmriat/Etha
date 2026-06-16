@@ -44,31 +44,33 @@ from etha import chunk_comm, create_cross_group, get_m2m_map, m2m_to_chunks
 
 
 class EngineWeightProtocol(Protocol):
-    def get_sharding(self, hf_name: str) -> tuple[torch.Tensor, tuple[Placement, ...]]: ...
+    # 声明带 dtype:接收 buffer 的元素类型从源端拿(= 源 param 实际 dtype / wire
+    # dtype),不从 manifest 的 reference dtype 拿(量化/混合精度下 reference 不对)。
+    def get_sharding(self, hf_name: str) -> tuple[torch.Tensor, tuple[Placement, ...], torch.dtype]: ...
 
     def local_view(self, hf_name: str) -> torch.Tensor: ...
 
     def process_after_load(self, hf_names: Iterable[str]) -> None: ...
 
 
-def build_chunks(api, manifest, peer_shardings, my_rank, sending, targets=None):
+def build_chunks(api, manifest, peer_shardings, my_rank, sending):
     """每端本地:清单序遍历,m2m 纯函数,route_idx 全局重编。
 
+    manifest = {name: global_shape}(reference 几何);dtype 从源声明拿。
     offset 按全局 route 数推进(不是本 rank chunk 数)——全 rank 推同一数列,
     两端窗口归属一致,FIFO 配对成立。
     发送侧落点是 param view(api.local_view);接收侧 buffer 延迟到执行流分配
-    (targets 给 {name: (local_shape, dtype)},chunk_comm 的 target_alloc 按需建)。
+    (target_shape 从 manifest,transfer_dtype 从源声明)。
     """
     chunks, offset = [], 0
-    for name in manifest:
+    for name, shape in manifest.items():
         mine = api.get_sharding(name)
         src, dst = (mine, peer_shardings[name]) if sending else (peer_shardings[name], mine)
-        m2m = get_m2m_map(*src, *dst)
+        m2m = get_m2m_map(src[0], src[1], dst[0], dst[1])
         if sending:
             new = m2m_to_chunks(m2m, my_rank, source_tensor=api.local_view(name))
         else:
-            shape, dtype = targets[name]
-            new = m2m_to_chunks(m2m, my_rank, target_shape=shape, transfer_dtype=dtype)
+            new = m2m_to_chunks(m2m, my_rank, target_shape=shape, transfer_dtype=src[2])
         for c in new:
             c.weight = name
             c.route_idx += offset
