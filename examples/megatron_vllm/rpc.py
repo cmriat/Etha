@@ -15,13 +15,15 @@ HTTP_PORT = int(os.environ.get("ETHA_HTTP_PORT", 52100))
 ZMQ_PORT_BASE = HTTP_PORT + 100
 
 
-def serve(obj, rank, world):
+def serve(obj, rank, world, rank_ips=None):
+    # rank_ips[r] = rank r 所在节点的 IP(多节点;None=单节点全 127.0.0.1)。
     import zmq
 
     rep = zmq.Context().socket(zmq.REP)
     rep.bind(f"tcp://*:{ZMQ_PORT_BASE + rank}")
     if rank == 0:
-        threading.Thread(target=_http_frontend, args=(world,), daemon=True).start()
+        ips = rank_ips or ["127.0.0.1"] * world
+        threading.Thread(target=_http_frontend, args=(world, ips), daemon=True).start()
     while True:
         method, args, kwargs = pickle.loads(rep.recv())
         if method == "ping":
@@ -34,7 +36,7 @@ def serve(obj, rank, world):
         rep.send(pickle.dumps(out))
 
 
-def _http_frontend(world):
+def _http_frontend(world, rank_ips):
     import uvicorn
     import zmq
     from fastapi import FastAPI, HTTPException, Request, Response
@@ -43,7 +45,7 @@ def _http_frontend(world):
     reqs = []
     for r in range(world):
         sock = ctx.socket(zmq.REQ)
-        sock.connect(f"tcp://127.0.0.1:{ZMQ_PORT_BASE + r}")
+        sock.connect(f"tcp://{rank_ips[r]}:{ZMQ_PORT_BASE + r}")  # 跨节点走真实 IP
         reqs.append(sock)
     app = FastAPI()
 
