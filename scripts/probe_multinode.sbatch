@@ -6,8 +6,9 @@
 #SBATCH --cpus-per-task=32
 
 set +e
-echo "=== hostname=$(hostname) ip=$(hostname -i) ==="
-echo "=== env (rendezvous candidates) ==="
-env | grep -iE 'MASTER|FIRST|NODE|INDEX|HEAD|RANK|ADDR|WORLD|JOB|SLURM|POD|HOST' | sort
-echo "=== resolve index-0 peer (guess DNS) ==="
-getent hosts ${HOSTNAME%-*}-0 2>/dev/null || echo "no -0 dns"
+echo "=== idx=${JOB_COMPLETION_INDEX} host=$(hostname) ip=$(hostname -i) ==="
+echo "NODELIST=${SLURM_JOB_NODELIST}"
+# 解析 NODELIST 每个 DNS 名,看跨节点能不能寻址(Ray/torchrun 多节点需要)
+echo "${SLURM_JOB_NODELIST}" | tr ',' '\n' | while read n; do
+  echo "resolve [$n] -> $(getent hosts "$n" | awk '{print $1}' || echo FAIL)"
+done
