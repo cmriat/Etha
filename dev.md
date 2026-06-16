@@ -42,6 +42,12 @@ EthaInitInfo 即 init_info schema);extension 薄至 etha_export(= 未来 get_sha
 上游 PR 新增论据:backend Literal 封闭与 factory 注册制矛盾;trainer_send_weights
 的 full-tensor 流假设不适配 shard-direct;layerwise record 快照会盖掉后打的
 param attrs(需要打标后 re-record)。
+✅ 两端对称:EthaInitInfo/EthaTrainerEngine 共享于 protocol.py(零 vllm 依赖,
+duck-typed parse),trainer worker 用与 vLLM 同名的 RPC(init_weight_transfer_engine
+/update_weights),driver 对两端发同形调用(仅 base_rank 与 self/peer 声明互换)。
+✅ 流式内存:chunk_comm 的 target_alloc/on_complete 把 dst buffer 分配/释放纳入
+窗口执行流(Chunk.weight 归属,m2m_to_chunks 接 target_shape 延迟落点)——峰值 =
+在飞窗口的相邻权重 local shard + 最大单权重(硬下界),与层数无关;window 是旋钮。
 余项:量化档实测、多 replica、671B 基线、容错实测。
 
 **M3 bench**

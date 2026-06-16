@@ -118,12 +118,18 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
         chunks = build_chunks(
             _Api(self._shardings), list(self._manifest), self._peer, self._rank, sending=False, targets=targets
         )
+        full = sum(s[0].numel() * s[1].itemsize for s in targets.values()) / 1e9
+        torch.cuda.reset_peak_memory_stats()
+        before = torch.cuda.memory_allocated() / 1e9
         chunk_comm(
             chunks,
             group=self._group,
             target_alloc=lambda n: torch.empty(targets[n][0], dtype=targets[n][1], device="cuda"),
             on_complete=lambda n, buf: load_weights([(n, buf)]),
         )
+        peak = (torch.cuda.max_memory_allocated() / 1e9) - before
+        if self._rank == 0:
+            print(f"[etha recv] streaming peak {peak:.3f} GB vs full-shard {full:.3f} GB", flush=True)
 
     def shutdown(self):
         pass
