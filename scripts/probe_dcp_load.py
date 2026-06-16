@@ -23,9 +23,9 @@ model_dir = snapshot_download(model, local_files_only=True)
 if rank == 0:
     print(f"model_dir={model_dir}", flush=True)
 
-cfg = AutoConfig.from_pretrained(model, trust_remote_code=True)
+cfg = AutoConfig.from_pretrained(model)
 with torch.device("meta"):
-    m = AutoModelForCausalLM.from_config(cfg, dtype=torch.bfloat16, trust_remote_code=True)
+    m = AutoModelForCausalLM.from_config(cfg, dtype=torch.bfloat16)
 for layer in m.model.layers:
     fully_shard(layer)
 fully_shard(m)
@@ -36,17 +36,18 @@ if rank == 0:
     moe = [k for k in sd if "experts" in k][:4]
     print(f"state_dict has {len(sd)} keys; MoE-ish keys: {moe}", flush=True)
 
+# 标记前置值,load 后看哪些 key 真被改写(= 真加载了),尤其 MoE 融合 key
+before = {k: v.to_local().clone() for k, v in sd.items() if hasattr(v, "to_local")}
 try:
     dcp.load(sd, storage_reader=HuggingFaceStorageReader(model_dir))
-    # 抽查:几个权重非零(加载成功),MoE 融合权重也查
-    bad = [k for k, v in sd.items() if v.to_local().abs().sum().item() == 0] if hasattr(next(iter(sd.values())), "to_local") else []
     if rank == 0:
-        sample = next(k for k in sd if "experts.gate_up_proj" in k or "mlp" in k)
-        v = sd[sample]
-        loc = v.to_local() if hasattr(v, "to_local") else v
-        print(f"DCP LOAD OK; sample {sample} nonzero={loc.abs().sum().item() > 0}; all-zero keys: {len(bad)}", flush=True)
+        changed = sum(1 for k, v in sd.items() if hasattr(v, "to_local") and not torch.equal(v.to_local(), before[k]))
+        moe = [k for k in sd if "experts.gate_up_proj" in k][:2]
+        moe_loaded = [(k, not torch.equal(sd[k].to_local(), before[k])) for k in moe]
+        print(f"DCP LOAD OK; {changed}/{len(before)} keys changed (=loaded); MoE sample loaded: {moe_loaded}", flush=True)
 except Exception as e:
     if rank == 0:
+        import traceback; traceback.print_exc()
         print(f"DCP LOAD FAILED: {type(e).__name__}: {e}", flush=True)
 
 dist.barrier()
