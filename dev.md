@@ -82,6 +82,13 @@ cross-group 跨节点 rendezvous(host=SLURM_JOB_FIRST_NODE_IP,rank0 当 TCPStore
 driver 跨节点寻址(node1 经头节点 IP 连 node0 trainer)、跨节点 NCCL 传输全成立。
 kjobctl 多节点机制:JOB_COMPLETION_INDEX(节点 index)+ SLURM_JOB_FIRST_NODE_IP(头节点)+
 固定端口(SLURM_JOB_ID 跨节点不一致不能派生)。run_e2e_multinode.sbatch。
+✅ **671B 计划离线 dry-run**(纯几何,mac/CPU 零 GPU):DeepSeek-V3 909 权重、
+trainer128→vllm(dp4 tp8)、model 1342GB、受端总收 1601GB(1.2×)。
+**结构完全成立:0 unsupported placement、0 divisibility 问题**——get_m2m_map 处理全部
+671B 权重,128 整除干净。**真 fallback 只 embed_tokens+lm_head**(是 is_sharded 缺口、
+本该 TP 切,671B 浪费 ~115GB);其余 425 个 replicate(q_a/kv_a/gate/norm)是 vLLM
+设计上的必要广播,不是浪费。修正前文"embedding floor/is_sharded 砍峰值":准确说是
+embed+lm_head 这两个,量级 115GB,不是笼统的"所有 replicate"。
 余项(通往 128→32 671B):trainer 多节点 torchrun(>8 rank)、inference 多节点 vLLM
 (ray / external_launcher)、671B 加载(tracer-init 测机制 / sharded loading 出真权重)、
 节点预算(128→32 ≈ 20 节点)。多 replica、量化档、容错实测。
