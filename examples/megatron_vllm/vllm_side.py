@@ -11,6 +11,7 @@ engine 所需的自声明由 driver 从 export 结果回灌进 init_info,字段�
 """
 
 import base64
+import math
 import pickle
 from dataclasses import dataclass
 
@@ -118,7 +119,7 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
         chunks = build_chunks(
             _Api(self._shardings), list(self._manifest), self._peer, self._rank, sending=False, targets=targets
         )
-        full = sum(s[0].numel() * s[1].itemsize for s in targets.values()) / 1e9
+        full = sum(math.prod(shape) * dtype.itemsize for shape, dtype in targets.values()) / 1e9
         torch.cuda.reset_peak_memory_stats()
         before = torch.cuda.memory_allocated() / 1e9
         chunk_comm(

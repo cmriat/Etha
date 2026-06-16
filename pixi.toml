@@ -48,10 +48,10 @@ pre-commit = "*"
 
 [environments]
 default = { solve-group = "default" }
-dev = { features = ["dev"], solve-group = "default" }
 fsdp = { features = ["fsdp"] }
 vllm = { features = ["vllm"] }
 megatron = { features = ["megatron"] }
+dev = { features = ["dev", "vllm", "fsdp"], solve-group = "default" }
 
 [tasks]
 submit = { cmd = "kjobctl create slurm --first-node-ip -- --chdir $PIXI_PROJECT_ROOT --output $PIXI_PROJECT_ROOT/jobs-%j-%N.log {{ script }}", args = ["script"] }
