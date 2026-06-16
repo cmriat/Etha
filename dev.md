@@ -69,7 +69,8 @@ feed-slice → vLLM EP,dummy 乱码变连贯文本。关键设计:
 - 踩坑:untied lm_head 是顶层无点模块(30B tie_word_embeddings=False 才暴露,rpartition)。
 版本调查结论:**native vLLM 模型仍是 per-expert 加载**(fused_moe_make_expert_params_mapping),
 只有 Transformers backend(非主流)支持直接喂融合 experts.gate_up_proj——故 feed-slice。
-余项:量化档实测、多 replica、671B 基线、容错实测。
+✅ 多轮 sync 验证:RL 每步同步,round 0/1 都正常——plan 缓存复用、layerwise 重入、re-record 跨轮持久。
+余项:量化档实测、多 replica、671B 基线(踏脚石 DeepSeek-V2-Lite:MLA + shared experts)、容错实测。
 
 **M3 bench**
 chain vs fanout A/B(`split_fanout` 开关)、窗口扫参、与旧 etha 对比。
