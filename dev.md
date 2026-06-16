@@ -89,7 +89,15 @@ trainer128→vllm(dp4 tp8)、model 1342GB、受端总收 1601GB(1.2×)。
 本该 TP 切,671B 浪费 ~115GB);其余 425 个 replicate(q_a/kv_a/gate/norm)是 vLLM
 设计上的必要广播,不是浪费。修正前文"embedding floor/is_sharded 砍峰值":准确说是
 embed+lm_head 这两个,量级 115GB,不是笼统的"所有 replicate"。
-余项(通往 128→32 671B):trainer 多节点 torchrun(>8 rank)、inference 多节点 vLLM
+✅ **多节点双边全通**(4 节点 V2-Lite,16 trainer@2节点 + 16 infer@2节点,32 ranks 跨 4 节点):
+kubectl 发现 pod IP(NODELIST DNS 不稳)、多节点 torchrun trainer(FSDP 跨节点)、
+多节点 TP=16 vllm(--nnodes/--node-rank/--master-addr,mp 无 ray 无 dp)、跨节点 etha
+cross-group、zmq 跨节点(frontend 连 worker 真实 IP)、DeepSeek MLA+MoE、多轮 sync。
+cluster.Topo 对齐 rl 框架(train/infer 切分、infer_head=ips[train_nodes]、base_rank=
+train_nodes×8)。EP32 = TP=infer_nodes×8 + enable_expert_parallel,etha mesh (1,1,tp)。
+余项(128→32 671B):tracer 加载(671B 不能 from_pretrained,meta+fully_shard+to_empty)、
+infer fp8(FLASHINFER_MOE_FP8)、加节点;真权重 Paris 要 GroupedMoEPlanner(DCP MoE 命名)。
+原 trainer 多节点 torchrun(>8 rank)、inference 多节点 vLLM
 (ray / external_launcher)、671B 加载(tracer-init 测机制 / sharded loading 出真权重)、
 节点预算(128→32 ≈ 20 节点)。多 replica、量化档、容错实测。
 
