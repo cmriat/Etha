@@ -63,12 +63,12 @@ def main():
         try:
             m2m = get_m2m_map(tmesh, (S(0),), vmesh, vpl)
             n_route += len(m2m.routes)
-            cell = 1.0
-            for d, ns in enumerate(m2m.target_num_slicers):
-                cell *= (p.shape[d] if d < p.ndim else 1) / max(ns, 1)
-            for d in range(len(m2m.target_num_slicers), p.ndim):
-                cell *= p.shape[d]
-            total_bytes += cell * len(m2m.routes) * 2  # bf16
+            wbytes = p.numel() * 2  # bf16,全权重一份
+            repl_factor = 1
+            for i, x in enumerate(vpl):  # 受端按 Replicate 维广播:每个元素落到那些维的所有 rank
+                if isinstance(x, Replicate):
+                    repl_factor *= int(vmesh.shape[i])
+            total_bytes += wbytes * repl_factor
         except Exception as e:
             msg = str(e)
             if "divisi" in msg.lower() or p.shape and p.shape[0] % T:
@@ -78,8 +78,10 @@ def main():
 
     print(f"\n=== plan dry-run: {args.model}  trainer={T} → vllm dp={dp} tp={tp} ===")
     print(f"weights: {n_w}  (replicate-fallback: {repl})")
+    model_gb = sum(p.numel() for n, p in model.named_parameters() if not (tied and n == "lm_head.weight")) * 2 / 1e9
     print(f"routes : {n_route}")
-    print(f"transfer (rough, full model once): {total_bytes / 1e9:.1f} GB")
+    print(f"model size (1×): {model_gb:.1f} GB")
+    print(f"total received across all infer ranks (含 replicate 广播): {total_bytes / 1e9:.1f} GB  ({total_bytes/1e9/model_gb:.1f}× model)")
     print(f"unsupported placements (HARD): {len(errors)}")
     for e in errors[:15]:
         print("  ", e)
