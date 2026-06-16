@@ -15,7 +15,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
 
-from etha import chunk_comm, get_m2m_map, m2m_to_chunks, create_cross_group
+from etha import chunk_comm, get_m2m_map, split_fanout, m2m_to_chunks, create_cross_group
 from etha.planner import _tensor_ndim, _shard_counts
 
 CASES = {
@@ -67,10 +67,12 @@ def _random_placements(rng, mesh_shape):
     return tuple(out)
 
 
-def run_case(rank, group, ref, src_ranks, src_shape, src_pl, tgt_ranks, tgt_shape, tgt_pl):
+def run_case(rank, group, ref, src_ranks, src_shape, src_pl, tgt_ranks, tgt_shape, tgt_pl, fanout=False):
     src_mt = torch.tensor(src_ranks).reshape(src_shape)
     tgt_mt = torch.tensor(tgt_ranks).reshape(tgt_shape)
     m2m = get_m2m_map(src_mt, src_pl, tgt_mt, tgt_pl)
+    if fanout:
+        m2m = split_fanout(m2m)
     src_mesh, tgt_mesh = DeviceMesh("cuda", src_mt), DeviceMesh("cuda", tgt_mt)
 
     def local(mesh, pl):
@@ -101,6 +103,9 @@ def main():
         dt = run_case(rank, group, ref, *case)
         if rank == 0:
             print(f"[case] {name}: {dt * 1e3:.1f} ms", flush=True)
+    dt = run_case(rank, group, ref, *CASES["chain_broadcast"], fanout=True)
+    if rank == 0:
+        print(f"[case] chain_broadcast(fanout): {dt * 1e3:.1f} ms", flush=True)
 
     seed_t = torch.tensor([random.randrange(2**31)], device="cuda")
     dist.broadcast(seed_t, src=0)

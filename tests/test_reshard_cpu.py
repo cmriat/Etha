@@ -16,7 +16,7 @@ import torch.multiprocessing as mp
 from torch.distributed.tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
 
-from etha import chunk_comm, get_m2m_map, m2m_to_chunks, create_cross_group
+from etha import chunk_comm, get_m2m_map, split_fanout, m2m_to_chunks, create_cross_group
 from etha.planner import _tensor_ndim, _shard_counts
 
 WORLD = 4
@@ -64,7 +64,7 @@ def _local(ref, mesh, placements):
     return distribute_tensor(ref, mesh, placements, src_data_rank=None).to_local()
 
 
-def _run(rank, store, port, src_ranks, src_shape, src_pl, tgt_ranks, tgt_shape, tgt_pl, transfer_dtype):
+def _run(rank, store, port, src_ranks, src_shape, src_pl, tgt_ranks, tgt_shape, tgt_pl, transfer_dtype, fanout=False):
     dist.init_process_group("gloo", rank=rank, world_size=WORLD, init_method=f"file://{store}")
     group = create_cross_group("127.0.0.1", port, rank, WORLD, backend="gloo")
     ref = torch.arange(12 * 8 * 4, dtype=torch.float32).reshape(12, 8, 4)
@@ -74,6 +74,8 @@ def _run(rank, store, port, src_ranks, src_shape, src_pl, tgt_ranks, tgt_shape, 
     tgt_mesh = DeviceMesh("cpu", tgt_mesh_tensor)
 
     m2m = get_m2m_map(src_mesh_tensor, src_pl, tgt_mesh_tensor, tgt_pl)
+    if fanout:
+        m2m = split_fanout(m2m)
 
     source_tensor = _local(ref, src_mesh, src_pl).clone() if rank in src_ranks else None
     expected = _local(ref, tgt_mesh, tgt_pl) if rank in tgt_ranks else None
@@ -179,6 +181,14 @@ def test_reshard_fuzz(tmp_path):
     mp.spawn(_run_fuzz, args=(tmp_path / "store", _free_port(), seed, 10), nprocs=WORLD, join=True)
 
 
+@pytest.mark.timeout(120)
+def test_reshard_fanout(tmp_path):
+    mp.spawn(
+        _run,
+        args=(tmp_path / "store", _free_port(), *CASES["broadcast_shard0_to_replicate"], None, True),
+        nprocs=WORLD,
+        join=True,
+    )
 
 
 @pytest.mark.timeout(120)

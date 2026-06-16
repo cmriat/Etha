@@ -100,6 +100,19 @@ def get_m2m_map(
     )
 
 
+def split_fanout(m2m: M2MMap) -> M2MMap:
+    """Rewrite one-to-many routes as independent single-destination routes.
+
+    The source then sends every destination its own copy (star fan-out)
+    instead of chaining — an A/B switch for benchmarks and an escape hatch.
+    """
+    return M2MMap(
+        routes=[Route(src=route.src, dsts=(dst,)) for route in m2m.routes for dst in route.dsts],
+        source_num_slicers=m2m.source_num_slicers,
+        target_num_slicers=m2m.target_num_slicers,
+    )
+
+
 def m2m_to_chunks(
     m2m: M2MMap,
     rank: int,
