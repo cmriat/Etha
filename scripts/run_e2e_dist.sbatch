@@ -47,19 +47,23 @@ else
   # ── inference 节点:vLLM TP 跨节点 ──
   IRANK=$(( RANK - TRAIN_NODES ))
   TP=$(( INFER_NODES * 8 ))
-  HEADLESS=""; [ "$IRANK" -ne 0 ] && HEADLESS="--headless"
+  if [ "$IRANK" -ne 0 ]; then
+    # 非 head:headless worker 前台跑(无 wait,kjobctl 不支持 wait)
+    exec pixi run -e vllm vllm serve $ETHA_MODEL \
+      --load-format dummy --trust-remote-code --enable-expert-parallel --enforce-eager \
+      --tensor-parallel-size $TP --nnodes $INFER_NODES --node-rank $IRANK --master-addr $INFER_HEAD \
+      --gpu-memory-utilization 0.85 --headless \
+      --worker-extension-cls vllm_side.EthaWorkerExtension \
+      --weight-transfer-config '{"backend": "nccl"}'
+  fi
+  # infer head:serve 后台 + driver(本地连 vLLM,经 train head 连 trainer + cross-group)
   pixi run -e vllm vllm serve $ETHA_MODEL \
     --load-format dummy --trust-remote-code --enable-expert-parallel --enforce-eager \
-    --tensor-parallel-size $TP --nnodes $INFER_NODES --node-rank $IRANK --master-addr $INFER_HEAD \
-    --gpu-memory-utilization 0.85 --host 0.0.0.0 --port $ETHA_VLLM_PORT $HEADLESS \
+    --tensor-parallel-size $TP --nnodes $INFER_NODES --node-rank 0 --master-addr $INFER_HEAD \
+    --gpu-memory-utilization 0.85 --host 0.0.0.0 --port $ETHA_VLLM_PORT \
     --worker-extension-cls vllm_side.EthaWorkerExtension \
     --weight-transfer-config '{"backend": "nccl"}' &
-  if [ "$IRANK" -eq 0 ]; then
-    # infer head:跑 driver(本地连 vLLM,经 train head 连 trainer + cross-group)
-    export ETHA_CROSS_HOST=$TRAIN_HEAD ETHA_TRAINER_HOST=$TRAIN_HEAD
-    export TRAINER_WORLD=$(( TRAIN_NODES * 8 )) VLLM_TP=$TP
-    pixi run -e vllm python examples/megatron_vllm/driver.py
-  else
-    wait
-  fi
+  export ETHA_CROSS_HOST=$TRAIN_HEAD ETHA_TRAINER_HOST=$TRAIN_HEAD
+  export TRAINER_WORLD=$(( TRAIN_NODES * 8 )) VLLM_TP=$TP
+  pixi run -e vllm python examples/megatron_vllm/driver.py
 fi
