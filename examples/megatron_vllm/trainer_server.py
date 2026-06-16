@@ -4,17 +4,17 @@ driver 经 rpc.CollectiveClient 调下面四个方法,与 vLLM 侧的 worker ext
 对称(README 时序)。
 """
 
+import base64
 import os
+import pickle
 
 import torch
 import torch.distributed as dist
-from rpc import serve
-from protocol import build_chunks
 from fsdp_side import FsdpWeightProtocol
-from transformers import AutoModelForCausalLM
+from protocol import EthaTrainerEngine
+from rpc import serve
 from torch.distributed.fsdp import fully_shard
-
-from etha import chunk_comm, create_cross_group
+from transformers import AutoModelForCausalLM
 
 
 class TrainerWorker:
