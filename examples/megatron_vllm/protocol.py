@@ -32,6 +32,7 @@ driver 的通用流程(不含任何引擎知识):
 """
 
 import base64
+import os
 import pickle
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -40,7 +41,15 @@ from typing import Protocol
 import torch
 from torch.distributed.tensor import Placement
 
-from etha import chunk_comm, create_cross_group, get_m2m_map, m2m_to_chunks
+from etha import (
+    Transport,
+    chunk_comm,
+    create_broadcast_subgroups,
+    create_cross_group,
+    get_m2m_map,
+    m2m_to_chunks,
+    split_fanout,
+)
 
 
 class EngineWeightProtocol(Protocol):
@@ -61,12 +70,21 @@ def build_chunks(api, manifest, peer_shardings, my_rank, sending):
     两端窗口归属一致,FIFO 配对成立。
     发送侧落点是 param view(api.local_view);接收侧 buffer 延迟到执行流分配
     (target_shape 从 manifest,transfer_dtype 从源声明)。
+
+    返回 (chunks, bcast_groups):bcast_groups = 全局 broadcast 子组 rank 集
+    ({src}∪dsts,有序去重),两端从同一 m2m 推出、一致,供建子组用。
+    ETHA_FANOUT 时退化为纯 P2P,bcast_groups 为空。
     """
-    chunks, offset = [], 0
+    chunks, offset, bcast = [], 0, set()
     for name, shape in manifest.items():
         mine = api.get_sharding(name)
         src, dst = (mine, peer_shardings[name]) if sending else (peer_shardings[name], mine)
         m2m = get_m2m_map(src[0], src[1], dst[0], dst[1])
+        if os.environ.get("ETHA_FANOUT"):  # 退回纯 P2P 星型(K 小时用),不建子组
+            m2m = split_fanout(m2m)
+        for route in m2m.routes:
+            if route.kind == Transport.BROADCAST:
+                bcast.add(tuple(sorted({route.src.rank} | {d.rank for d in route.dsts})))
         if sending:
             new = m2m_to_chunks(m2m, my_rank, source_tensor=api.local_view(name))
         else:
@@ -76,7 +94,7 @@ def build_chunks(api, manifest, peer_shardings, my_rank, sending):
             c.route_idx += offset
             chunks.append(c)
         offset += len(m2m.routes)
-    return chunks
+    return chunks, sorted(bcast)
 
 
 @dataclass
@@ -110,11 +128,12 @@ class EthaTrainerEngine:
 
     def init_transfer_engine(self, init_info):
         manifest, peer = _dec(init_info.manifest), _dec(init_info.peer_decl)
-        self._group = create_cross_group(init_info.host, init_info.port, self.rank, init_info.world)
-        self._chunks = build_chunks(self.api, manifest, peer, self.rank, sending=True)
+        self._group, store = create_cross_group(init_info.host, init_info.port, self.rank, init_info.world)
+        self._chunks, bcast = build_chunks(self.api, manifest, peer, self.rank, sending=True)
+        self._subgroups = create_broadcast_subgroups(store, self.rank, bcast)
 
     def update_weights(self, update_info=None):
-        chunk_comm(self._chunks, group=self._group)
+        chunk_comm(self._chunks, group=self._group, subgroups=self._subgroups)
 
     def shutdown(self):
         pass

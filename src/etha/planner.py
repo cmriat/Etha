@@ -7,11 +7,9 @@ every rank's shard is a closed-form box over it; joining the boxes by global
 cell id recovers every source cell's destinations. Any rank (or a driver)
 computes the identical plan locally.
 
-``m2m_to_chunks`` compiles routes into per-rank chain actions: members of a
-route form one chain (source first, then destinations in rank order), data
-flows down the chain and pipelines across routes at execution time. A
-destination equal to the source rank becomes a local self-copy and is excluded
-from the chain.
+``get_m2m_map`` 给每条 route 定 ``kind``:单目标 P2P,多目标 BROADCAST。
+``m2m_to_chunks`` 把 route 编成每个参与 rank 的 ``Chunk``:源侧出 src_slice(P2P 直发
+或 broadcast root),目标侧落 dst_slice(P2P 收或 broadcast 收)。无中继链。
 
 Mesh tensors must hold ranks in the same numbering used at execution time
 (the communicator's ranks).
@@ -28,7 +26,7 @@ from torch.distributed.tensor.placement_types import _StridedShard
 
 _SHARD_TYPES = (Shard, _StridedShard)
 
-from .ir import Cell, Chunk, Route, M2MMap, Endpoint
+from .ir import Cell, Chunk, Route, M2MMap, Endpoint, Transport
 from .utils import cell_slice
 
 
@@ -92,7 +90,10 @@ def get_m2m_map(
     for src_rank in sorted(build):
         cells = build[src_rank]
         for cell in sorted(cells):
-            routes.append(Route(src=Endpoint(rank=src_rank, cell=cell), dsts=tuple(cells[cell])))
+            dsts = tuple(cells[cell])
+            remote = {d.rank for d in dsts} - {src_rank}  # 落在源 rank 上的 dst 是本地自拷,不计入 wire
+            kind = Transport.BROADCAST if len(remote) > 1 else Transport.P2P
+            routes.append(Route(src=Endpoint(rank=src_rank, cell=cell), dsts=dsts, kind=kind))
     return M2MMap(
         routes=routes,
         source_num_slicers=[m // s for m, s in zip(middle_shape, source_counts, strict=True)],
@@ -126,25 +127,29 @@ def m2m_to_chunks(
     chunks: list[Chunk] = []
     for route_idx, route in enumerate(m2m.routes):
         src_rank = route.src.rank
-        chain = [src_rank, *sorted({d.rank for d in route.dsts} - {src_rank})]
+        remote = tuple(sorted({d.rank for d in route.dsts} - {src_rank}))  # wire dst;broadcast 组 = {src}∪remote
 
         if src_rank == rank:
             src_slice = cell_slice(source_tensor.shape, m2m.source_num_slicers, route.src.cell)
-            if len(chain) > 1:
+            if remote:  # 源侧 wire:P2P 直发 / broadcast root
                 chunks.append(
                     Chunk(
                         route_idx=route_idx,
-                        send_to=chain[1],
+                        transport=route.kind,
+                        src_rank=src_rank,
+                        dst_ranks=remote,
                         src_tensor=source_tensor,
                         src_slice=src_slice,
                         transfer_dtype=transfer_dtype,
                     )
                 )
-            for dst in route.dsts:
+            for dst in route.dsts:  # dst 落在源 rank 上:本地自拷,无 wire
                 if dst.rank == rank:
                     chunks.append(
                         Chunk(
                             route_idx=route_idx,
+                            transport=Transport.LOCAL,
+                            src_rank=src_rank,
                             src_tensor=source_tensor,
                             src_slice=src_slice,
                             dst_tensor=target_tensor,
@@ -153,16 +158,15 @@ def m2m_to_chunks(
                         )
                     )
         else:
-            for dst in route.dsts:
+            for dst in route.dsts:  # 目标侧 wire:P2P 收 / broadcast 收
                 if dst.rank != rank:
                     continue
-                position = chain.index(rank)
                 chunks.append(
                     Chunk(
                         route_idx=route_idx,
-                        hop=position,
-                        recv_from=chain[position - 1],
-                        send_to=chain[position + 1] if position + 1 < len(chain) else None,
+                        transport=route.kind,
+                        src_rank=src_rank,
+                        dst_ranks=remote,
                         dst_tensor=target_tensor,
                         dst_slice=cell_slice(target_shape, m2m.target_num_slicers, dst.cell),
                         transfer_dtype=transfer_dtype,

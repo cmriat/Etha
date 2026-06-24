@@ -17,10 +17,20 @@ ZMQ_PORT_BASE = HTTP_PORT + 100
 
 def serve(obj, rank, world, rank_ips=None):
     # rank_ips[r] = rank r 所在节点的 IP(多节点;None=单节点全 127.0.0.1)。
+    import time
+
     import zmq
 
     rep = zmq.Context().socket(zmq.REP)
-    rep.bind(f"tcp://*:{ZMQ_PORT_BASE + rank}")
+    addr = f"tcp://*:{ZMQ_PORT_BASE + rank}"
+    for _ in range(40):  # 残留 job 进程 teardown 有延迟,等它释放端口(hostNetwork 共享)
+        try:
+            rep.bind(addr)
+            break
+        except zmq.error.ZMQError:
+            time.sleep(3)
+    else:
+        rep.bind(addr)
     if rank == 0:
         ips = rank_ips or ["127.0.0.1"] * world
         threading.Thread(target=_http_frontend, args=(world, ips), daemon=True).start()

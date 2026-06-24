@@ -19,12 +19,16 @@ from transformers import AutoModelForCausalLM
 
 class TrainerWorker:
     def __init__(self):
-        model = AutoModelForCausalLM.from_pretrained(
-            os.environ.get("ETHA_MODEL", "Qwen/Qwen3-0.6B"), dtype=torch.bfloat16
-        ).cuda()
-        for layer in model.model.layers:
-            fully_shard(layer)
-        fully_shard(model)
+        name = os.environ.get("ETHA_MODEL", "Qwen/Qwen3-0.6B")
+        if os.environ.get("ETHA_DCP"):
+            from dcp_load import load_sharded
+
+            model = load_sharded(name, tracer=os.environ.get("ETHA_TRACER") == "1")
+        else:
+            model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16).cuda()
+            for layer in model.model.layers:
+                fully_shard(layer)
+            fully_shard(model)
         self.api = FsdpWeightProtocol(model)
         self.rank = dist.get_rank()
 
@@ -44,7 +48,7 @@ class TrainerWorker:
 def main():
     from cluster import Topo
 
-    dist.init_process_group("nccl")
+    dist.init_process_group("cuda:nccl,cpu:gloo")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     worker = TrainerWorker()
     world = dist.get_world_size()

@@ -98,6 +98,12 @@ async def main():
         t_decl_b64 = (await trainer(client, "etha_export", 0))[0]
         v_decl_b64 = (await vllm(client, "etha_export", T))[0]
 
+        import pathlib  # 诊断:落盘真实 decls,离线验 P2P 配对一致性
+        pathlib.Path(os.environ.get("ETHA_DECL_DUMP", "/tmp/etha_decls.pkl")).write_bytes(
+            pickle.dumps({"manifest": manifest, "t_decl": dec(t_decl_b64), "v_decl": dec(v_decl_b64), "T": T, "tp": tp})
+        )
+        print("[decls dumped]", flush=True)
+
         # 两端完全同形:EthaInitInfo 即 init_info schema,self/peer 声明互换
         common = {"host": CROSS_HOST, "port": CROSS_PORT, "world": T + tp, "manifest": enc(manifest)}
         await asyncio.gather(
@@ -107,11 +113,15 @@ async def main():
                  {**common, "base_rank": T, "self_decl": v_decl_b64, "peer_decl": t_decl_b64}),
         )
         # 多轮 sync:RL 每步都同步,验证 plan 缓存复用 + layerwise 重入 + re-record 跨轮持久
+        import time
+
         for r in range(2):
+            t0 = time.perf_counter()
             await asyncio.gather(
                 trainer(client, "update_weights", {}),
-                vllm(client, "update_weights", {}),
+                vllm(client, "etha_update_native", {}),
             )
+            print(f"[transfer round {r}] {time.perf_counter() - t0:.2f}s", flush=True)
             out = await generate(client, model, "The capital of France is")
             print(f"[after round {r}]", repr(out), flush=True)
 

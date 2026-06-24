@@ -16,7 +16,15 @@ import torch.multiprocessing as mp
 from torch.distributed.tensor import Shard, Replicate, DeviceMesh, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
 
-from etha import chunk_comm, get_m2m_map, split_fanout, m2m_to_chunks, create_cross_group
+from etha import (
+    Transport,
+    chunk_comm,
+    create_broadcast_subgroups,
+    create_cross_group,
+    get_m2m_map,
+    m2m_to_chunks,
+    split_fanout,
+)
 from etha.planner import _tensor_ndim, _shard_counts
 
 WORLD = 4
@@ -26,6 +34,11 @@ def _free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _subgroups(m2m, store, rank):
+    bcast = {tuple(sorted({r.src.rank} | {d.rank for d in r.dsts})) for r in m2m.routes if r.kind == Transport.BROADCAST}
+    return create_broadcast_subgroups(store, rank, sorted(bcast), backend="gloo")
 
 
 CASES = {
@@ -66,7 +79,7 @@ def _local(ref, mesh, placements):
 
 def _run(rank, store, port, src_ranks, src_shape, src_pl, tgt_ranks, tgt_shape, tgt_pl, transfer_dtype, fanout=False):
     dist.init_process_group("gloo", rank=rank, world_size=WORLD, init_method=f"file://{store}")
-    group = create_cross_group("127.0.0.1", port, rank, WORLD, backend="gloo")
+    group, xstore = create_cross_group("127.0.0.1", port, rank, WORLD, backend="gloo")
     ref = torch.arange(12 * 8 * 4, dtype=torch.float32).reshape(12, 8, 4)
     src_mesh_tensor = torch.tensor(src_ranks).reshape(src_shape)
     tgt_mesh_tensor = torch.tensor(tgt_ranks).reshape(tgt_shape)
@@ -76,6 +89,7 @@ def _run(rank, store, port, src_ranks, src_shape, src_pl, tgt_ranks, tgt_shape, 
     m2m = get_m2m_map(src_mesh_tensor, src_pl, tgt_mesh_tensor, tgt_pl)
     if fanout:
         m2m = split_fanout(m2m)
+    subgroups = _subgroups(m2m, xstore, rank)
 
     source_tensor = _local(ref, src_mesh, src_pl).clone() if rank in src_ranks else None
     expected = _local(ref, tgt_mesh, tgt_pl) if rank in tgt_ranks else None
@@ -86,7 +100,7 @@ def _run(rank, store, port, src_ranks, src_shape, src_pl, tgt_ranks, tgt_shape, 
     chunks = m2m_to_chunks(
         m2m, rank, source_tensor=source_tensor, target_tensor=target_tensor, transfer_dtype=transfer_dtype
     )
-    chunk_comm(chunks, group=group)
+    chunk_comm(chunks, group=group, subgroups=subgroups)
 
     if expected is not None:
         torch.testing.assert_close(target_tensor, expected)
@@ -138,9 +152,10 @@ def _random_placements(rng, mesh_shape):
 def _run_fuzz(rank, store, port, seed, rounds):
     """Same seed on every rank: all draw the identical case sequence."""
     dist.init_process_group("gloo", rank=rank, world_size=WORLD, init_method=f"file://{store}")
-    group = create_cross_group("127.0.0.1", port, rank, WORLD, backend="gloo")
+    group, xstore = create_cross_group("127.0.0.1", port, rank, WORLD, backend="gloo")
     rng = random.Random(seed)
     ref = torch.arange(16 * 16, dtype=torch.float32).reshape(16, 16)
+    seen, cache = set(), {}  # 跨轮缓存子组(同 ranks 只建一次,各 rank 同序)
     done = 0
     while done < rounds:
         src_shape, src_ranks = FUZZ_MESHES[rng.randrange(len(FUZZ_MESHES))]
@@ -163,11 +178,16 @@ def _run_fuzz(rank, store, port, seed, rounds):
         except NotImplementedError:
             continue  # planner rejects the combo on every rank alike; sample again
         src_mesh, tgt_mesh = DeviceMesh("cpu", src_mt), DeviceMesh("cpu", tgt_mt)
+        needed = sorted({tuple(sorted({r.src.rank} | {d.rank for d in r.dsts})) for r in m2m.routes if r.kind == Transport.BROADCAST})
+        fresh = [k for k in needed if k not in seen]
+        seen.update(fresh)
+        cache.update(create_broadcast_subgroups(xstore, rank, fresh, backend="gloo"))
+
         source_tensor = _local(ref, src_mesh, src_pl).clone() if rank in src_ranks else None
         expected = _local(ref, tgt_mesh, tgt_pl) if rank in tgt_ranks else None
         target_tensor = torch.zeros_like(expected) if expected is not None else None
         chunks = m2m_to_chunks(m2m, rank, source_tensor=source_tensor, target_tensor=target_tensor)
-        chunk_comm(chunks, group=group)
+        chunk_comm(chunks, group=group, subgroups=cache)
         if expected is not None:
             torch.testing.assert_close(target_tensor, expected, msg=f"seed={seed} case {done}: {src_pl} -> {tgt_pl}")
         done += 1
@@ -204,12 +224,13 @@ def test_reshard_wire_dtype(tmp_path):
 def _run_streaming(rank, store, port):
     """Deferred dst allocation + per-weight completion hand-off."""
     dist.init_process_group("gloo", rank=rank, world_size=WORLD, init_method=f"file://{store}")
-    group = create_cross_group("127.0.0.1", port, rank, WORLD, backend="gloo")
+    group, xstore = create_cross_group("127.0.0.1", port, rank, WORLD, backend="gloo")
     src_ranks, src_shape, src_pl, tgt_ranks, tgt_shape, tgt_pl = CASES["broadcast_shard0_to_replicate"]
     ref = torch.arange(12 * 8 * 4, dtype=torch.float32).reshape(12, 8, 4)
     src_mt = torch.tensor(src_ranks).reshape(src_shape)
     tgt_mt = torch.tensor(tgt_ranks).reshape(tgt_shape)
     m2m = get_m2m_map(src_mt, src_pl, tgt_mt, tgt_pl)
+    subgroups = _subgroups(m2m, xstore, rank)
     src_mesh, tgt_mesh = DeviceMesh("cpu", src_mt), DeviceMesh("cpu", tgt_mt)
 
     source = _local(ref, src_mesh, src_pl).clone() if rank in src_ranks else None
@@ -225,6 +246,7 @@ def _run_streaming(rank, store, port):
     chunk_comm(
         chunks,
         group=group,
+        subgroups=subgroups,
         target_alloc=lambda n: torch.zeros(tuple(expected.shape)),
         on_complete=lambda n, buf: received.__setitem__(n, buf),
     )
