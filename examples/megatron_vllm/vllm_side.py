@@ -181,7 +181,7 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
         self._rank = init_info.base_rank + self._ep_rank
         self._group, store = create_cross_group(init_info.host, init_info.port, self._rank, init_info.world)
         self._chunks, bcast = build_chunks(_Api(self._shardings), self._manifest, self._peer, self._rank, sending=False)
-        self._subgroups = create_broadcast_subgroups(store, self._rank, bcast)
+        self._subgroups = create_broadcast_subgroups(store, self._rank, bcast, parent_group=self._group)
         self._targets = {
             name: (local_shape(shape, *self._shardings[name][:2], self._rank), self._peer[name][2])
             for name, shape in self._manifest.items()
@@ -203,11 +203,17 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
             peak[0] = max(peak[0], live[0])
             return buf
 
-        def complete(n, buf):
-            self._feed(n, buf, load_weights)
-            live[0] -= buf.nbytes / 1e9
+        def complete_batch(items):
+            self._feed_batch(items, load_weights)
+            live[0] -= sum(buf.nbytes for _, buf in items) / 1e9
 
-        chunk_comm(chunks, group=self._group, subgroups=self._subgroups, target_alloc=alloc, on_complete=complete)
+        chunk_comm(
+            chunks,
+            group=self._group,
+            subgroups=self._subgroups,
+            target_alloc=alloc,
+            on_complete_batch=complete_batch,
+        )
         if self.parallel_config.rank == 0:
             full = sum(math.prod(s) * d.itemsize for s, d in targets.values()) / 1e9
             print(f"[etha recv] in-flight buffer peak {peak[0]:.3f} GB vs full-shard {full:.3f} GB", flush=True)
@@ -216,11 +222,17 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
         """MoE 融合 buffer 喂时切 per-expert(贴合 native 的 per-expert loader);
         dense 直接喂。buf 是本 rank 的本地 expert 融合块,全局 expert id 由
         ep_rank(EP 借 dp×tp 格子 → == parallel_config.rank)× local 推出。"""
-        if self._lm_subtree:
-            load_weights = lambda it, f=load_weights: f([(_to_hf(n), t) for n, t in it])
-        self._feed_impl(name, buf, load_weights)
+        self._feed_batch([(name, buf)], load_weights)
 
-    def _feed_impl(self, name, buf, load_weights):
+    def _feed_batch(self, completed, load_weights):
+        items = []
+        for name, buf in completed:
+            items.extend(self._feed_items(name, buf))
+        if self._lm_subtree:
+            items = [(_to_hf(n), t) for n, t in items]
+        load_weights(items)
+
+    def _feed_items(self, name, buf):
         if name.endswith(".experts.gate_up_proj"):
             stem = name[: -len(".gate_up_proj")]
             inter, local = buf.shape[1] // 2, buf.shape[0]
@@ -229,13 +241,12 @@ class EthaWeightTransferEngine(WeightTransferEngine[EthaInitInfo, EthaUpdateInfo
                 g = self._ep_rank * local + i
                 items.append((f"{stem}.{g}.gate_proj.weight", buf[i, :inter]))
                 items.append((f"{stem}.{g}.up_proj.weight", buf[i, inter:]))
-            load_weights(items)  # 一次喂全部 local expert:load_weights→_load_module 递归遍历 model 仅 1 次(原 for 每 expert 一次=256× 遍历)
+            return items  # 一次喂全部 local expert:load_weights→_load_module 递归遍历 model 仅 1 次(原 for 每 expert 一次=256× 遍历)
         elif name.endswith(".experts.down_proj"):
             stem = name[: -len(".down_proj")]
             local = buf.shape[0]
-            load_weights([(f"{stem}.{self._ep_rank * local + i}.down_proj.weight", buf[i]) for i in range(local)])
-        else:
-            load_weights([(name, buf)])
+            return [(f"{stem}.{self._ep_rank * local + i}.down_proj.weight", buf[i]) for i in range(local)]
+        return [(name, buf)]
 
     def shutdown(self):
         pass

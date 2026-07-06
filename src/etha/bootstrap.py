@@ -17,7 +17,7 @@ import datetime
 import os
 
 import torch.distributed as dist
-from torch.distributed.distributed_c10d import _world, _new_process_group_helper
+from torch.distributed.distributed_c10d import GroupMember, _new_process_group_helper, _update_default_pg, _world
 
 _TIMEOUT_S = float(os.environ.get("ETHA_PG_TIMEOUT", 1800))
 
@@ -49,17 +49,47 @@ def create_broadcast_subgroups(
     store: dist.TCPStore,
     rank: int,
     subgroup_ranks: list[tuple[int, ...]],
+    parent_group: dist.ProcessGroup | None = None,
     backend: str = "nccl",
     timeout_s: float = _TIMEOUT_S,
 ) -> dict[tuple[int, ...], dist.ProcessGroup]:
     """每个 broadcast 子组(``{src}∪dsts`` 的有序 rank 元组)建一个 cross-world PG。
 
-    全 rank 按同一排序遍历(子组集由 plan 决定,确定性一致),**只有成员 rank 调入**——
-    每子组独立 PrefixStore(键含成员)做 rendezvous,非成员不碰、无需参与。
+    推荐路径:所有 cross-world rank 都传入 ``parent_group``(即 ``etha_cross``),
+    本函数临时把它设为 torch 默认 PG,再用稳定 group_name 调
+    ``_new_process_group_helper`` 创建子组。这样成员校验、NCCL 拓扑都用
+    cross-world rank,同时避免 ``dist.new_group`` 的本地计数 group_name 在
+    trainer/vLLM 两侧不一致。
+
+    兼容路径:未传 ``parent_group`` 时保留老的成员-only 手工拼接逻辑。
     """
     timeout = datetime.timedelta(seconds=timeout_s)
     groups: dict[tuple[int, ...], dist.ProcessGroup] = {}
-    for key in sorted(set(subgroup_ranks)):
+    keys = sorted(set(subgroup_ranks))
+
+    if parent_group is not None:
+        old_default_pg = _world.default_pg
+        _update_default_pg(parent_group)
+        try:
+            for key in keys:
+                tag = "_".join(map(str, key))
+                pg, _ = _new_process_group_helper(
+                    group_size=len(key),
+                    group_rank=key.index(rank) if rank in key else None,
+                    global_ranks_in_group=list(key),
+                    backend=backend,
+                    store=dist.PrefixStore(f"etha_bcast_{tag}", store),
+                    group_name=f"etha_bcast_{tag}",
+                    timeout=timeout,
+                )
+                if pg != GroupMember.NON_GROUP_MEMBER:
+                    _world.pg_group_ranks[pg] = {r: i for i, r in enumerate(key)}
+                    groups[key] = pg
+        finally:
+            _update_default_pg(old_default_pg)
+        return groups
+
+    for key in keys:
         if rank not in key:
             continue
         tag = "_".join(map(str, key))

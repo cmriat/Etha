@@ -130,7 +130,7 @@ class EthaTrainerEngine:
         manifest, peer = _dec(init_info.manifest), _dec(init_info.peer_decl)
         self._group, store = create_cross_group(init_info.host, init_info.port, self.rank, init_info.world)
         self._chunks, bcast = build_chunks(self.api, manifest, peer, self.rank, sending=True)
-        self._subgroups = create_broadcast_subgroups(store, self.rank, bcast)
+        self._subgroups = create_broadcast_subgroups(store, self.rank, bcast, parent_group=self._group)
 
     def update_weights(self, update_info=None):
         chunk_comm(self._chunks, group=self._group, subgroups=self._subgroups)
