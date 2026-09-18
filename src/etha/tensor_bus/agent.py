@@ -26,6 +26,7 @@ from etha.comm import (
     get_m2m_map,
     m2m_to_chunks,
     chunk_to_bucket_ops,
+    prewarm_broadcast_groups,
 )
 from etha.comm.ir import Chunk
 from etha.kvstore import KVStore, create_store
@@ -581,6 +582,20 @@ class TensorBusAgent:
         batch_state.local_leader = sorted(first_pair.local_ranks)[0]
         batch_state.local_group = first_pair.local_group
         batch_state.batch_group = first_pair.pair_group
+
+        # Create every broadcast group this batch will touch — across BOTH
+        # directions of every pair — before any m2m_to_chunks call. Each side
+        # materializes its send-direction chunks before its recv-direction ones,
+        # and those are opposite directions on the two sides of a pair, so
+        # per-direction first-touch creation would interleave the
+        # WORLD-collective new_group calls differently per side and cross-wire
+        # the communicators. Route tables are identical on both sides, so this
+        # pass runs identically everywhere (see prewarm_broadcast_groups).
+        prewarm_broadcast_groups(
+            m2m
+            for pair_name in batch_state.pair_names
+            for m2m in (self.pairs[pair_name].m2m_send, self.pairs[pair_name].m2m_recv)
+        )
 
         all_send_chunks = []
         all_recv_chunks = []

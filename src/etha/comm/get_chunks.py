@@ -1,5 +1,7 @@
 """Build chunk descriptors from routes."""
 
+from collections.abc import Iterable
+
 import torch
 import torch.distributed as dist
 
@@ -7,6 +9,42 @@ from etha.pg_utils import get_or_create_process_group
 
 from .ir import Chunk, M2MMap, Transport
 from .utils import get_slicer_tuples, get_slice_from_multi_index
+
+
+def broadcast_group_ranks(m2m: M2MMap) -> set[tuple[int, ...]]:
+    """Canonical broadcast-group rank tuples for one direction's ``M2MMap``.
+
+    Each BROADCAST route contributes its complete, sorted membership tuple —
+    the same key the process-group cache is indexed by. Sorting the source
+    together with the destinations also deduplicates the same process group
+    when opposite directions use different broadcast roots.
+    """
+    groups: set[tuple[int, ...]] = set()
+    for route in m2m.routes or []:
+        if route.kind == Transport.BROADCAST:
+            groups.add(tuple(sorted({route.src.rank} | {dst.rank for dst in route.dsts})))
+    return groups
+
+
+def prewarm_broadcast_groups(m2m_maps: Iterable[M2MMap | None]) -> None:
+    """Create every broadcast group across the given maps in one canonical pass.
+
+    ``dist.new_group`` is collective on WORLD, so every rank must issue the same
+    sequence of calls. ``m2m_to_chunks`` creates a direction's groups on first
+    touch, and the two sides of a pair materialize chunks in opposite direction
+    orders (each walks local-send before local-recv), so per-direction
+    first-touch creation interleaves the calls differently on the two sides once
+    both directions broadcast — silently cross-wiring the communicators. Route
+    tables are identical on both sides (merged via ``all_gather_object`` in
+    ``get_m2m_map``), so this union-then-sort pass runs identically everywhere
+    and turns the later per-direction creations into cache hits.
+    """
+    groups: set[tuple[int, ...]] = set()
+    for m2m in m2m_maps:
+        if m2m is not None:
+            groups |= broadcast_group_ranks(m2m)
+    for group_ranks in sorted(groups):
+        get_or_create_process_group(list(group_ranks))
 
 
 def calculate_chunk_shape(
@@ -45,13 +83,7 @@ def m2m_to_chunks(
     if target_tensor_shape is not None:
         target_num_slicers_extended = (target_num_slicers + [1] * len(target_tensor_shape))[: len(target_tensor_shape)]
         target_slicer_tuples = get_slicer_tuples(target_tensor_shape, target_num_slicers_extended)
-    broadcast_groups = set()
-
-    for route in routes:
-        if route.kind == Transport.BROADCAST:
-            group_ranks = (route.src.rank,) + tuple(sorted({d.rank for d in route.dsts}))
-            broadcast_groups.add(group_ranks)
-    for group_ranks in sorted(broadcast_groups):
+    for group_ranks in sorted(broadcast_group_ranks(m2m)):
         get_or_create_process_group(list(group_ranks))
 
     chunks: list[Chunk] = []
