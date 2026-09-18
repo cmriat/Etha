@@ -559,9 +559,20 @@ class TensorBusAgent:
                 grouped[pair_name] = []
             grouped[pair_name].append(tensor_payload)
 
+        pair_names = sorted(grouped)
+        layout = (
+            batch_id,
+            bucket_size,
+            tuple((name, len(grouped[name]), name in self.pairs) for name in pair_names),
+        )
+        layouts = [None] * self.world_size
+        dist.all_gather_object(layouts, layout, group=dist.group.WORLD)
+        if not pair_names or not all(known for _, _, known in layout[2]) or any(other != layout for other in layouts):
+            raise ValueError(f"Inconsistent or invalid RegisterTensors layout across ranks: {layouts}")
+
         batch_state = BatchState(
             batch_id=batch_id,
-            pair_names=list(grouped.keys()),
+            pair_names=pair_names,
             bucket_size=bucket_size,
         )
         self.batches[batch_id] = batch_state
@@ -583,14 +594,8 @@ class TensorBusAgent:
         batch_state.local_group = first_pair.local_group
         batch_state.batch_group = first_pair.pair_group
 
-        # Create every broadcast group this batch will touch — across BOTH
-        # directions of every pair — before any m2m_to_chunks call. Each side
-        # materializes its send-direction chunks before its recv-direction ones,
-        # and those are opposite directions on the two sides of a pair, so
-        # per-direction first-touch creation would interleave the
-        # WORLD-collective new_group calls differently per side and cross-wire
-        # the communicators. Route tables are identical on both sides, so this
-        # pass runs identically everywhere (see prewarm_broadcast_groups).
+        # Both sides materialize local send before recv, which are opposite
+        # directions. Create their union before either can first-touch a group.
         prewarm_broadcast_groups(
             m2m
             for pair_name in batch_state.pair_names
@@ -600,11 +605,9 @@ class TensorBusAgent:
         all_send_chunks = []
         all_recv_chunks = []
 
-        # Process each pair
-        for pair_name, tensor_payloads in grouped.items():
-            if pair_name not in self.pairs:
-                raise ValueError(f"RegisterTensors for unknown pair: {pair_name}")
-
+        # Process each pair in the validated canonical order.
+        for pair_name in batch_state.pair_names:
+            tensor_payloads = grouped[pair_name]
             pair_state = self.pairs[pair_name]
 
             logger.info(

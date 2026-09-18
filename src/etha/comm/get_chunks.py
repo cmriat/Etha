@@ -11,7 +11,7 @@ from .ir import Chunk, M2MMap, Transport
 from .utils import get_slicer_tuples, get_slice_from_multi_index
 
 
-def broadcast_group_ranks(m2m: M2MMap) -> set[tuple[int, ...]]:
+def _broadcast_group_ranks(m2m: M2MMap) -> set[tuple[int, ...]]:
     """Canonical broadcast-group rank tuples for one direction's ``M2MMap``.
 
     Each BROADCAST route contributes its complete, sorted membership tuple —
@@ -42,7 +42,7 @@ def prewarm_broadcast_groups(m2m_maps: Iterable[M2MMap | None]) -> None:
     groups: set[tuple[int, ...]] = set()
     for m2m in m2m_maps:
         if m2m is not None:
-            groups |= broadcast_group_ranks(m2m)
+            groups |= _broadcast_group_ranks(m2m)
     for group_ranks in sorted(groups):
         get_or_create_process_group(list(group_ranks))
 
@@ -83,7 +83,7 @@ def m2m_to_chunks(
     if target_tensor_shape is not None:
         target_num_slicers_extended = (target_num_slicers + [1] * len(target_tensor_shape))[: len(target_tensor_shape)]
         target_slicer_tuples = get_slicer_tuples(target_tensor_shape, target_num_slicers_extended)
-    for group_ranks in sorted(broadcast_group_ranks(m2m)):
+    for group_ranks in sorted(_broadcast_group_ranks(m2m)):
         get_or_create_process_group(list(group_ranks))
 
     chunks: list[Chunk] = []
