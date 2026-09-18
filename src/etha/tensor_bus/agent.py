@@ -26,6 +26,7 @@ from etha.comm import (
     get_m2m_map,
     m2m_to_chunks,
     chunk_to_bucket_ops,
+    prewarm_broadcast_groups,
 )
 from etha.comm.ir import Chunk
 from etha.kvstore import KVStore, create_store
@@ -558,9 +559,20 @@ class TensorBusAgent:
                 grouped[pair_name] = []
             grouped[pair_name].append(tensor_payload)
 
+        pair_names = sorted(grouped)
+        layout = (
+            batch_id,
+            bucket_size,
+            tuple((name, len(grouped[name]), name in self.pairs) for name in pair_names),
+        )
+        layouts = [None] * self.world_size
+        dist.all_gather_object(layouts, layout, group=dist.group.WORLD)
+        if not pair_names or not all(known for _, _, known in layout[2]) or any(other != layout for other in layouts):
+            raise ValueError(f"Inconsistent or invalid RegisterTensors layout across ranks: {layouts}")
+
         batch_state = BatchState(
             batch_id=batch_id,
-            pair_names=list(grouped.keys()),
+            pair_names=pair_names,
             bucket_size=bucket_size,
         )
         self.batches[batch_id] = batch_state
@@ -582,14 +594,20 @@ class TensorBusAgent:
         batch_state.local_group = first_pair.local_group
         batch_state.batch_group = first_pair.pair_group
 
+        # Both sides materialize local send before recv, which are opposite
+        # directions. Create their union before either can first-touch a group.
+        prewarm_broadcast_groups(
+            m2m
+            for pair_name in batch_state.pair_names
+            for m2m in (self.pairs[pair_name].m2m_send, self.pairs[pair_name].m2m_recv)
+        )
+
         all_send_chunks = []
         all_recv_chunks = []
 
-        # Process each pair
-        for pair_name, tensor_payloads in grouped.items():
-            if pair_name not in self.pairs:
-                raise ValueError(f"RegisterTensors for unknown pair: {pair_name}")
-
+        # Process each pair in the validated canonical order.
+        for pair_name in batch_state.pair_names:
+            tensor_payloads = grouped[pair_name]
             pair_state = self.pairs[pair_name]
 
             logger.info(
