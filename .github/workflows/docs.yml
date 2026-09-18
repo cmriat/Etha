@@ -22,6 +22,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # The workspace-wide CUDA requirement also applies to the CPU-only docs env.
+      CONDA_OVERRIDE_CUDA: "12.9"
     steps:
       - uses: actions/checkout@v4
         with:
