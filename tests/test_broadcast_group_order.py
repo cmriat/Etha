@@ -18,6 +18,7 @@ import etha.tensor_bus.client as client_module
 from etha.comm import M2MMap, bucket_comm, get_m2m_map, m2m_to_chunks, chunk_to_bucket_ops, prewarm_broadcast_groups
 from etha.comm.ir import Route, Endpoint
 from etha.comm.transfer import Transport
+from etha.tensor_bus.commands import command_error_key
 
 
 def _route(src: int, *dsts: int, kind: Transport = Transport.BROADCAST) -> Route:
@@ -170,7 +171,7 @@ def test_empty_registration_reaches_agent_error_channel(monkeypatch):
         def close(self):
             pass
 
-    writer = SimpleNamespace(state_env=StateEnv(), state_db=object())
+    writer = SimpleNamespace(state_env=StateEnv(), state_db=object(), _command_error_times={})
 
     class Queue:
         message = None
@@ -194,6 +195,59 @@ def test_empty_registration_reaches_agent_error_channel(monkeypatch):
     with pytest.raises(RuntimeError, match="register_tensors failed.*empty registration"):
         client.register_tensors("batch", [], timeout=1)
     assert queue.message.tensors == []
+
+
+def test_command_error_record_lifecycle(monkeypatch):
+    state = {}
+
+    class Transaction:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def put(self, key, value):
+            state[key] = value
+
+        def delete(self, key):
+            state.pop(key, None)
+
+    class StateEnv:
+        def begin(self, **_kwargs):
+            return Transaction()
+
+    agent = SimpleNamespace(
+        rank=0,
+        state_env=StateEnv(),
+        state_db=object(),
+        _command_error_times={},
+        pairs={},
+        batches={},
+    )
+    record = agent_module.TensorBusAgent._record_command_error
+
+    monkeypatch.setattr(agent_module, "COMMAND_ERROR_TTL", 0.0)
+    record(agent, "/sem-a", ValueError("first"))
+    record(agent, "/sem-b", ValueError("second"))
+    assert command_error_key("/sem-a") not in state
+    assert command_error_key("/sem-b") in state
+
+    released = []
+
+    def fail_record(*_args):
+        raise RuntimeError("state lmdb unavailable")
+
+    def fail_registration(_msg):
+        raise agent_module._InvalidRegistrationError("bad layout")
+
+    agent._record_command_error = fail_record
+    agent._release_semaphore = released.append
+    agent._handle_register_tensors = fail_registration
+    message = agent_module.RegisterTensors(batch_id="batch", tensors=[])
+    message.semaphore_name = "/sem-c"
+    agent_module.TensorBusAgent._execute_command(agent, message)
+    assert released == ["/sem-c"]
 
 
 def _run_bidirectional_broadcast(rank: int):

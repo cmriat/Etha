@@ -49,6 +49,8 @@ from .command_queue import CommandQueue
 logger = logging.getLogger(__name__)
 
 TIME_INTERVAL = 0.001  # 1ms
+# Error records are reclaimed once older than any plausible client wait (default timeout 30s).
+COMMAND_ERROR_TTL = 30 * 60.0
 
 
 class _InvalidRegistrationError(ValueError):
@@ -149,6 +151,7 @@ class TensorBusAgent:
             lock=True,
         )
         self.state_db = self.state_env.open_db(b"pair_state")
+        self._command_error_times: dict[str, float] = {}
         logger.info(f"Agent {rank}: State LMDB initialized at {lmdb_state_path}")
 
         # Write initial heartbeat (for connection validation)
@@ -208,7 +211,13 @@ class TensorBusAgent:
         except Exception as e:
             logger.error(f"Agent {self.rank}: Error handling command {type(command)}: {e} {traceback.format_exc()}")
             if command.semaphore_name:
-                self._record_command_error(command.semaphore_name, e)
+                try:
+                    self._record_command_error(command.semaphore_name, e)
+                except Exception:
+                    logger.error(
+                        f"Agent {self.rank}: Failed to record command error for {command.semaphore_name}:"
+                        f" {traceback.format_exc()}"
+                    )
                 self._release_semaphore(command.semaphore_name)
                 if isinstance(e, _InvalidRegistrationError):
                     return
@@ -797,8 +806,17 @@ class TensorBusAgent:
 
     def _record_command_error(self, semaphore_name: str, error: Exception) -> None:
         payload = f"{type(error).__name__}: {error}"
+        now = time.monotonic()
+        expired = [
+            name for name, written_at in self._command_error_times.items() if now - written_at > COMMAND_ERROR_TTL
+        ]
         with self.state_env.begin(write=True, db=self.state_db) as txn:
+            for name in expired:
+                txn.delete(command_error_key(name))
             txn.put(command_error_key(semaphore_name), msgspec.msgpack.encode(payload))
+        for name in expired:
+            del self._command_error_times[name]
+        self._command_error_times[semaphore_name] = now
 
     def _release_semaphore(self, semaphore_name: str):
         try:
