@@ -1,0 +1,422 @@
+"""Dual-endpoint sync rounds, multi-pair batches, and pair-init ordering.
+
+Three regressions, one per review Critical, all CPU:
+
+1. ``test_multi_round_same_batch_updates_every_round`` — a dual batch
+   supports unbounded sync rounds on the SAME batch: round r executes only
+   when both roles' Transfer commands for r arrived, updates the target
+   every round (a permanent done-flag would freeze round 1+), acknowledges
+   stale (r < done) and duplicate (r == done) rounds WITHOUT re-executing
+   them, and publishes a versioned per-round completion signal.
+
+2. ``test_multi_pair_dual_batch_transfers_every_pair`` — a batch spanning
+   two pairs with different placements: each direction's chunks accumulate
+   across ALL pairs before bucketization (per-pair assignment kept only the
+   last pair's weights). Multiple tensors per pair, every round writes
+   distinct global coordinates, cross-rank reversed command order in one
+   round.
+
+3. ``test_pair_init_out_of_order_no_deadlock`` — two agents whose InitPair
+   commands arrive in different pair orders: pending pairs must complete in
+   a globally deterministic (sorted) sequence so new_group bootstraps cannot
+   interleave; both pairs end up usable.
+"""
+
+import os
+import time
+import socket
+import logging
+import threading
+from types import SimpleNamespace
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+
+import torch
+import pytest
+import torch.distributed as dist
+from torch.distributed.tensor.placement_types import Shard, Replicate
+
+from etha.pg_utils import _PROCESS_GROUP_CACHE
+from etha.tensor_bus import TensorBusAgent, TensorBusClient
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+TRAIN, INFER = "train", "infer"
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        return s.getsockname()[1]
+
+
+class _MeshSpec:
+    def __init__(self, shape: tuple[int, ...]):
+        self.mesh = SimpleNamespace(shape=tuple(shape))
+
+
+def _cleanup_stale(command_queue_path: str, state_path: str) -> None:
+    for path_str in (command_queue_path, state_path):
+        path = Path(path_str)
+        for f in path.parent.glob(f"{path.name}*"):
+            f.unlink(missing_ok=True)
+
+
+def _agent_loop(agent: TensorBusAgent, stop: threading.Event) -> None:
+    while not stop.is_set():
+        agent.step()
+
+
+def _round_transfer(handler_src, handler_dst, src_role, dst_role, rnd, send_first=True):
+    """Both roles' commands for one round; order controlled by send_first."""
+    order = [("send", handler_src, src_role), ("recv", handler_dst, dst_role)]
+    if not send_first:
+        order.reverse()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(h.transfer, transfer_type=t, role=r, blocking=True, timeout=60, sync_round=rnd)
+            for t, h, r in order
+        ]
+        for fut in futures:
+            fut.result(timeout=90)
+
+
+@pytest.mark.timeout(300)
+def test_multi_round_same_batch_updates_every_round(tmp_path):
+    """Rounds on ONE batch: park-handshake, every round lands, stale/dup skip, cleanup fails closed."""
+    root = str(tmp_path)
+    store_port, dist_port = _free_port(), _free_port()
+    if dist.is_initialized():  # main-process tests must not stack PGs
+        dist.destroy_process_group()
+    # the agent constructor initializes the default PG from these env vars
+    os.environ.update(RANK="0", WORLD_SIZE="1", MASTER_ADDR="localhost", MASTER_PORT=str(dist_port))
+    cmd_path, state_path = f"{root}/command.lmdb", f"{root}/state.lmdb"
+    _cleanup_stale(cmd_path, state_path)
+
+    agent = TensorBusAgent(
+        rank=0,
+        world_size=1,
+        store_host="localhost",
+        store_port=store_port,
+        lmdb_command_queue_path=cmd_path,
+        lmdb_state_path=state_path,
+    )
+    stop = threading.Event()
+    thread = threading.Thread(target=_agent_loop, args=(agent, stop), daemon=True)
+    thread.start()
+    try:
+        pair = "w"
+        client_train = TensorBusClient(agent_rank=0, lmdb_command_queue_path=cmd_path, agent_state_lmdb_path=state_path)
+        client_infer = TensorBusClient(agent_rank=0, lmdb_command_queue_path=cmd_path, agent_state_lmdb_path=state_path)
+        # both roles' InitPair commands concurrently: the first parks until the
+        # pair rendezvous completes, which needs the second role's keys — a
+        # sequential same-thread pair would self-deadlock (same contract as
+        # registration below)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_train = pool.submit(
+                client_train.init_pair, pair, TRAIN, INFER, 1, _MeshSpec((1,)), (Shard(0),), timeout=60
+            )
+            fut_infer = pool.submit(
+                client_infer.init_pair, pair, INFER, TRAIN, 1, _MeshSpec((1,)), (Replicate(),), timeout=60
+            )
+            fut_train.result(timeout=90)
+            fut_infer.result(timeout=90)
+
+        torch.manual_seed(0)
+        master = torch.randn(8, 4, dtype=torch.float32)
+        target = torch.zeros(8, 4, dtype=torch.float32)
+        # both roles' registrations concurrently: the first parks until the
+        # second arrives, so a sequential same-thread pair would self-deadlock
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_train = pool.submit(
+                client_train.register_tensors, batch_id="b", tensors=[(master, pair)], role=TRAIN, timeout=60
+            )
+            fut_infer = pool.submit(
+                client_infer.register_tensors, batch_id="b", tensors=[(target, pair)], role=INFER, timeout=60
+            )
+            handler_train = fut_train.result(timeout=90)
+            handler_infer = fut_infer.result(timeout=90)
+
+        # Round r: distinct global coordinates; rounds alternate which role's
+        # command arrives first (sender-first AND recv-first must both work).
+        for rnd in range(3):
+            master.copy_(torch.full_like(master, float(rnd + 1)) + torch.arange(8).unsqueeze(1) * 10.0)
+            expected = master.clone()
+            _round_transfer(handler_train, handler_infer, TRAIN, INFER, rnd, send_first=(rnd % 2 == 0))
+            assert torch.equal(target, expected), f"round {rnd}: target must track the round's values"
+            assert agent.batches["b"].dual_direction_done[(TRAIN, INFER)] == rnd
+            assert handler_infer.query_transfer_signal(sync_round=rnd) is True
+            assert handler_infer.query_transfer_signal(sync_round=rnd + 1) is False
+
+        # Stale round (0 < done=2) and duplicate of the executed round: both
+        # acknowledged without re-execution — a poison source must NOT land.
+        last = 2
+        expected = target.clone()
+        master.copy_(torch.full_like(master, -777.0))
+        handler_train.transfer(transfer_type="send", role=TRAIN, blocking=True, timeout=60, sync_round=0)
+        handler_infer.transfer(transfer_type="recv", role=INFER, blocking=True, timeout=60, sync_round=0)
+        handler_train.transfer(transfer_type="send", role=TRAIN, blocking=True, timeout=60, sync_round=last)
+        assert torch.equal(target, expected), "stale/duplicate rounds must not overwrite the target"
+        assert not agent.batches["b"].dual_round_pending, "acknowledged rounds leave nothing parked"
+
+        # A round still parked when the batch is cleaned up fails CLOSED: the
+        # parked blocking call raises instead of returning as if it executed.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(
+                handler_train.transfer, transfer_type="send", role=TRAIN, blocking=True, timeout=60, sync_round=3
+            )
+            deadline = time.monotonic() + 30
+            while ((TRAIN, INFER), 3) not in agent.batches["b"].dual_round_pending:
+                if time.monotonic() > deadline:
+                    raise TimeoutError("round-3 send never parked")
+                time.sleep(0.05)
+            assert not fut.done(), "a parked send must not complete before its peer arrives"
+            handler_infer.close()
+            with pytest.raises(RuntimeError, match="cleaned up before direction-round executed"):
+                fut.result(timeout=30)
+
+        handler_train.close()
+        handler_infer.close()
+        client_train.close()
+        client_infer.close()
+    finally:
+        stop.set()
+        thread.join(timeout=30)
+        agent.close(destroy=True)
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        # Subgroup cache holds handles of the destroyed world; a later
+        # main-process test would reuse them (see test_dual_endpoint_agent).
+        _PROCESS_GROUP_CACHE.clear()
+
+
+def _multi_pair_worker(rank: int, world_size: int, root: str, store_port: int, dist_port: int) -> None:
+    os.environ.update(RANK=str(rank), WORLD_SIZE=str(world_size), MASTER_ADDR="localhost", MASTER_PORT=str(dist_port))
+    cmd_path, state_path = f"{root}/{rank}_command.lmdb", f"{root}/{rank}_state.lmdb"
+
+    agent = TensorBusAgent(
+        rank=rank,
+        world_size=world_size,
+        store_host="localhost",
+        store_port=store_port,
+        lmdb_command_queue_path=cmd_path,
+        lmdb_state_path=state_path,
+    )
+    stop = threading.Event()
+    thread = threading.Thread(target=_agent_loop, args=(agent, stop), daemon=True)
+    thread.start()
+    try:
+        pair_a, pair_b = "pair_a", "pair_b"  # sorted order: a before b
+        client_train = TensorBusClient(
+            agent_rank=rank, lmdb_command_queue_path=cmd_path, agent_state_lmdb_path=state_path
+        )
+        client_infer = TensorBusClient(
+            agent_rank=rank, lmdb_command_queue_path=cmd_path, agent_state_lmdb_path=state_path
+        )
+        # pair_a: cross-rank reshard, rows -> column halves (the ARC2 shape);
+        # pair_b: replicated full copy — a different placement, same batch.
+        # All four InitPair commands concurrently: the first parks until the
+        # rendezvous completes, so sequential same-thread issue deadlocks.
+        inits = [
+            (client_train, pair_a, TRAIN, INFER, world_size, _MeshSpec((world_size,)), (Shard(0),)),
+            (client_infer, pair_a, INFER, TRAIN, world_size, _MeshSpec((1, world_size)), (Replicate(), Shard(1))),
+            (client_train, pair_b, TRAIN, INFER, world_size, _MeshSpec((world_size,)), (Replicate(),)),
+            (client_infer, pair_b, INFER, TRAIN, world_size, _MeshSpec((world_size,)), (Replicate(),)),
+        ]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futs = [
+                pool.submit(c.init_pair, p, ln, rn, ws, mesh, plc, timeout=60) for c, p, ln, rn, ws, mesh, plc in inits
+            ]
+            for f in futs:
+                f.result(timeout=90)
+
+        rows, cols = 8, 4
+        torch.manual_seed(100)  # identical global tensors on every rank
+        full_a1 = torch.randn(rows, cols)
+        full_a2 = torch.randn(rows, cols)
+        full_b1 = torch.randn(cols, cols)
+        full_b2 = torch.randn(cols, cols)
+
+        train_local = [
+            # clone(): a chunk of a contiguous tensor is itself contiguous, so
+            # .contiguous() would alias the source storage and round r's copy_
+            # would corrupt the expectations computed from the full tensors
+            full_a1.chunk(world_size, dim=0)[rank].clone(),
+            full_a2.chunk(world_size, dim=0)[rank].clone(),
+            full_b1.clone(),
+            full_b2.clone(),
+        ]
+        infer_local = [
+            torch.zeros(rows, cols // world_size, dtype=torch.bfloat16),  # a1: column half
+            torch.zeros(rows, cols // world_size, dtype=torch.bfloat16),  # a2
+            torch.zeros(cols, cols),  # b1: full fp32 copy
+            torch.zeros(cols, cols),  # b2
+        ]
+
+        tensors_train = [
+            (train_local[0], pair_a),
+            (train_local[1], pair_a),
+            (train_local[2], pair_b),
+            (train_local[3], pair_b),
+        ]
+        tensors_infer = [
+            (infer_local[0], pair_a),
+            (infer_local[1], pair_a),
+            (infer_local[2], pair_b),
+            (infer_local[3], pair_b),
+        ]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_train = pool.submit(
+                client_train.register_tensors, batch_id="multi", tensors=tensors_train, role=TRAIN, timeout=60
+            )
+            fut_infer = pool.submit(
+                client_infer.register_tensors, batch_id="multi", tensors=tensors_infer, role=INFER, timeout=60
+            )
+            handler_train = fut_train.result(timeout=90)
+            handler_infer = fut_infer.result(timeout=90)
+
+        def pattern(full: torch.Tensor, rnd: int) -> torch.Tensor:
+            # distinct global coordinates per round: round offset + column ramp
+            return full + float(rnd + 1) * 100.0 + torch.arange(full.shape[-1])
+
+        for rnd in range(2):
+            exp_a1, exp_a2 = pattern(full_a1, rnd), pattern(full_a2, rnd)
+            exp_b1, exp_b2 = pattern(full_b1, rnd), pattern(full_b2, rnd)
+            train_local[0].copy_(exp_a1.chunk(world_size, dim=0)[rank])
+            train_local[1].copy_(exp_a2.chunk(world_size, dim=0)[rank])
+            train_local[2].copy_(exp_b1)
+            train_local[3].copy_(exp_b2)
+
+            # rank parity flips which role's command arrives first this round
+            _round_transfer(handler_train, handler_infer, TRAIN, INFER, rnd, send_first=(rank + rnd) % 2 == 0)
+
+            col = rank % world_size
+            want_a1 = exp_a1.to(torch.bfloat16).chunk(world_size, dim=1)[col]
+            assert torch.equal(infer_local[0], want_a1), (
+                f"rank {rank} round {rnd}: pair_a tensor 0 not delivered: "
+                f"got {infer_local[0].tolist()} want {want_a1.tolist()}"
+            )
+            assert torch.equal(infer_local[1], exp_a2.to(torch.bfloat16).chunk(world_size, dim=1)[col]), (
+                f"rank {rank} round {rnd}: pair_a tensor 1 not delivered"
+            )
+            assert torch.equal(infer_local[2], exp_b1), f"rank {rank} round {rnd}: pair_b tensor 0 not delivered"
+            assert torch.equal(infer_local[3], exp_b2), f"rank {rank} round {rnd}: pair_b tensor 1 not delivered"
+            assert handler_infer.query_transfer_signal(sync_round=rnd) is True
+
+        handler_train.close()
+        handler_infer.close()
+        client_train.close()
+        client_infer.close()
+    finally:
+        stop.set()
+        thread.join(timeout=30)
+        agent.close(destroy=True)
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+@pytest.mark.timeout(600)
+def test_multi_pair_dual_batch_transfers_every_pair(tmp_path):
+    """Two placement-different pairs, one batch, two rounds: all tensors land."""
+    store_port, dist_port = _free_port(), _free_port()
+    try:
+        torch.multiprocessing.spawn(
+            _multi_pair_worker, args=(2, str(tmp_path), store_port, dist_port), nprocs=2, join=True
+        )
+    except Exception as e:
+        pytest.fail(f"multi-pair dual batch failed: {e}")
+
+
+def _out_of_order_worker(rank: int, world_size: int, root: str, store_port: int, dist_port: int) -> None:
+    os.environ.update(RANK=str(rank), WORLD_SIZE=str(world_size), MASTER_ADDR="localhost", MASTER_PORT=str(dist_port))
+    cmd_path, state_path = f"{root}/{rank}_command.lmdb", f"{root}/{rank}_state.lmdb"
+
+    agent = TensorBusAgent(
+        rank=rank,
+        world_size=world_size,
+        store_host="localhost",
+        store_port=store_port,
+        lmdb_command_queue_path=cmd_path,
+        lmdb_state_path=state_path,
+    )
+    stop = threading.Event()
+    thread = threading.Thread(target=_agent_loop, args=(agent, stop), daemon=True)
+    thread.start()
+    try:
+        pair_a, pair_b = "zz_pair_b_first", "aa_pair_a_second"  # issue order != name order
+        first, second = (pair_a, pair_b) if rank == 0 else (pair_b, pair_a)
+        client_train = TensorBusClient(
+            agent_rank=rank, lmdb_command_queue_path=cmd_path, agent_state_lmdb_path=state_path
+        )
+        client_infer = TensorBusClient(
+            agent_rank=rank, lmdb_command_queue_path=cmd_path, agent_state_lmdb_path=state_path
+        )
+        for pair in (first, second):
+            # non-blocking init: commands for both pairs are in flight before
+            # either completes, so the two agents' insertion orders differ
+            client_train.init_pair(
+                pair, TRAIN, INFER, world_size, _MeshSpec((world_size,)), (Shard(0),), blocking=False
+            )
+            client_infer.init_pair(
+                pair, INFER, TRAIN, world_size, _MeshSpec((world_size,)), (Replicate(),), blocking=False
+            )
+
+        deadline = time.monotonic() + 60
+        while not {pair_a, pair_b} <= set(agent.pairs):
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"rank {rank}: pairs never completed (pending={sorted(agent.pending_pairs)})")
+            time.sleep(0.05)
+
+        # both pairs usable: one dual batch spanning them transfers correctly.
+        # Shard(0) over 2 ranks: local halves of global 4 / global 6 tensors.
+        t_a = torch.full((2,), float(rank), dtype=torch.float32)  # -> [0,0,1,1]
+        t_b = torch.full((3,), float(10 + rank), dtype=torch.float32)  # -> [10,10,10,11,11,11]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_train = pool.submit(
+                client_train.register_tensors,
+                batch_id="oo",
+                tensors=[(t_a, pair_a), (t_b, pair_b)],
+                role=TRAIN,
+                timeout=60,
+            )
+            fut_infer = pool.submit(
+                client_infer.register_tensors,
+                batch_id="oo",
+                tensors=[(torch.zeros(4), pair_a), (torch.zeros(6), pair_b)],
+                role=INFER,
+                timeout=60,
+            )
+            handler_train = fut_train.result(timeout=90)
+            handler_infer = fut_infer.result(timeout=90)
+        _round_transfer(handler_train, handler_infer, TRAIN, INFER, 0)
+        # Replicate targets hold the full concatenated Sharded source
+        assert torch.equal(
+            agent.batches["oo"].pair_role_tensors[(pair_a, INFER)][0], torch.tensor([0.0, 0.0, 1.0, 1.0])
+        )
+        assert torch.equal(
+            agent.batches["oo"].pair_role_tensors[(pair_b, INFER)][0], torch.tensor([10.0] * 3 + [11.0] * 3)
+        )
+        handler_train.close()
+        handler_infer.close()
+        client_train.close()
+        client_infer.close()
+    finally:
+        stop.set()
+        thread.join(timeout=30)
+        agent.close(destroy=True)
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+@pytest.mark.timeout(300)
+def test_pair_init_out_of_order_no_deadlock(tmp_path):
+    """Rank-reversed InitPair arrival orders must complete both pairs."""
+    store_port, dist_port = _free_port(), _free_port()
+    try:
+        torch.multiprocessing.spawn(
+            _out_of_order_worker, args=(2, str(tmp_path), store_port, dist_port), nprocs=2, join=True
+        )
+    except Exception as e:
+        pytest.fail(f"out-of-order pair init deadlocked or failed: {e}")

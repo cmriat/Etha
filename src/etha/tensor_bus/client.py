@@ -60,6 +60,7 @@ class BatchHandler:
         blocking: bool = False,
         timeout: float = 30.0,
         role: str | None = None,
+        sync_round: int = 0,
     ) -> posix_ipc.Semaphore:
         """Transfer all tensors in this batch atomically.
 
@@ -73,22 +74,39 @@ class BatchHandler:
             role: Issuing side's peer name — required on dual-endpoint
                 (colocated) batches, where one agent hosts both sides; ignored
                 on split (single-role) batches.
+            sync_round: Weight-sync round within this batch (dual batches).
+                A direction-round executes once both roles' commands for it
+                arrived; older/duplicate rounds are acknowledged, not
+                re-executed. Split batches ignore it.
 
         Returns:
             Semaphore for operation completion
         """
-        msg = Transfer(batch_id=self.batch_id, transfer_type=transfer_type, role=role)
+        msg = Transfer(batch_id=self.batch_id, transfer_type=transfer_type, role=role, sync_round=sync_round)
         return self.client._execute_command_with_semaphore(
             msg, "transfer", context_id=f"batch_{self.batch_id}_{transfer_type}", blocking=blocking, timeout=timeout
         )
 
-    def query_transfer_signal(self, blocking: bool = True, timeout: float = 30.0) -> bool:
+    def query_transfer_signal(
+        self, blocking: bool = True, timeout: float = 30.0, sync_round: int | None = None
+    ) -> bool:
         """Query transfer signal status for this batch.
 
+        Args:
+            sync_round: dual-endpoint batches publish a VERSIONED completion
+                (the last completed round id, monotonic). With ``sync_round=r``
+                this returns True once round r (or later) completed — a
+                watcher cannot lose a pulse. Without it, the legacy boolean
+                signal of split batches is returned.
+
         Returns:
-            Transfer signal status (True if sender has completed transfer)
+            bool for the legacy signal / the round query; callers of the
+            round query may also pass ``sync_round`` and treat the return
+            as bool.
         """
-        return self.client.query_transfer_signal(self.batch_id, blocking=blocking, timeout=timeout)
+        return self.client.query_transfer_signal(
+            self.batch_id, blocking=blocking, timeout=timeout, sync_round=sync_round
+        )
 
     def close(self, blocking: bool = True, timeout: float = 30.0):
         """Explicitly cleanup batch state in agent.
@@ -278,8 +296,9 @@ class TensorBusClient:
         blocking: bool = False,
         timeout: float = 30.0,
         role: str | None = None,
+        sync_round: int = 0,
     ) -> posix_ipc.Semaphore:
-        msg = Transfer(batch_id=batch_id, transfer_type=transfer_type, role=role)
+        msg = Transfer(batch_id=batch_id, transfer_type=transfer_type, role=role, sync_round=sync_round)
         logger.debug(
             f"TensorBusClient[{self.agent_rank}]: Sending transfer command for pair '{batch_id} {transfer_type}'"
         )
@@ -287,9 +306,22 @@ class TensorBusClient:
             msg, "transfer", context_id=batch_id, blocking=blocking, timeout=timeout
         )
 
-    def query_transfer_signal(self, batch_id: str, blocking: bool = True, timeout: float = 30.0) -> bool:
-        query_msg = QueryStatus(batch_id=batch_id, state_name="transfer_signal")
-        logger.debug(f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for batch '{batch_id}'")
+    def query_transfer_signal(
+        self, batch_id: str, blocking: bool = True, timeout: float = 30.0, sync_round: int | None = None
+    ) -> bool | int:
+        """Legacy boolean signal (split) or versioned dual completion.
+
+        With ``sync_round=r``: returns True once the dual direction-round r
+        (or any later round) completed — the agent publishes a monotonic
+        round id, so a poll cannot miss a completed round it hasn't seen.
+        Without: the split batches' boolean transfer signal.
+        """
+        if sync_round is None:
+            state_name = "transfer_signal"
+        else:
+            state_name = "transfer_signal_round"
+        query_msg = QueryStatus(batch_id=batch_id, state_name=state_name)
+        logger.debug(f"TensorBusClient[{self.agent_rank}]: Query {state_name} for batch '{batch_id}'")
         # Execute with semaphore synchronization (blocking)
         self._execute_command_with_semaphore(
             query_msg, "query", context_id=f"batch_{batch_id}", blocking=blocking, timeout=timeout
@@ -299,17 +331,16 @@ class TensorBusClient:
             raise RuntimeError("State environment not initialized")
 
         # Get the status from LMDB
-        state_key = f"batch:{batch_id}/state:transfer_signal".encode()
+        state_key = f"batch:{batch_id}/state:{state_name}".encode()
         with self.state_env.begin(db=self.state_db) as txn:
             state_bytes = txn.get(state_key)
-            if state_bytes:
-                state = msgspec.msgpack.Decoder(bool).decode(state_bytes)
-                logger.debug(
-                    f"TensorBusClient[{self.agent_rank}]: Query transfer signal status for batch '{batch_id}': {state}"
-                )
-                return state
-            else:
-                return False
+            if sync_round is None:
+                if not state_bytes:
+                    return False
+                return msgspec.msgpack.Decoder(bool).decode(state_bytes)
+            completed_round = msgspec.msgpack.Decoder(int).decode(state_bytes) if state_bytes else -1
+            logger.debug(f"TensorBusClient[{self.agent_rank}]: batch '{batch_id}' completed round: {completed_round}")
+            return completed_round >= sync_round
 
     def register_tensors(
         self,

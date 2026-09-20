@@ -53,11 +53,17 @@ class BatchState:
     pair_role_tensors: dict[tuple[str, str], list[torch.Tensor]] = field(default_factory=dict)
     # (pair_name, role) -> per-tensor dtypes (needed for min-itemsize wire dtype)
     pair_role_dtypes: dict[tuple[str, str], list[torch.dtype]] = field(default_factory=dict)
-    # (src_role, dst_role) -> flattened buckets for that direction; executed
-    # once per direction by whichever Transfer command arrives first
+    # (src_role, dst_role) -> flattened buckets for that direction (chunks
+    # accumulated across ALL pairs of the batch, then bucketized once)
     dual_direction_buckets: dict[tuple[str, str], list[Bucket]] = field(default_factory=dict)
-    # (src_role, dst_role) -> True once that direction has been executed here
-    dual_direction_done: dict[tuple[str, str], bool] = field(default_factory=dict)
+    # (src_role, dst_role) -> last executed sync_round for that direction;
+    # rounds <= it are acknowledged without re-execution (stale/duplicate)
+    dual_direction_done: dict[tuple[str, str], int] = field(default_factory=dict)
+    # ((src_role, dst_role), sync_round) -> {"roles": {arrived roles},
+    # "semaphores": [parked command semaphores]}. A direction-round executes
+    # only once both roles' Transfer commands arrived; until then the first
+    # command parks here. Cleared by execution or CleanupBatch.
+    dual_round_pending: dict[tuple[tuple[str, str], int], dict] = field(default_factory=dict)
     # role -> {agent_rank: layout signature} accumulated across this batch's
     # registration gathers, so per-role layout equality can be checked once
     # both roles have registered (a single gather sees a role-mixed set)

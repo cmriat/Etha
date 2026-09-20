@@ -246,7 +246,7 @@ class TensorBusAgent:
                 case InitPair():
                     self._handle_init_pair(command)
                 case Transfer():
-                    self._handle_transfer(command)
+                    complete = self._handle_transfer(command)
                 case QueryStatus():
                     self._handle_query_status(command)
                 case RegisterTensors():
@@ -381,8 +381,15 @@ class TensorBusAgent:
         return expected, sorted(present)[:expected]
 
     def _poll_pending_pairs(self):
-        """Complete pending pairs whose rendezvous is fully visible."""
-        for pair_name in list(self.pending_pairs):
+        """Complete pending pairs whose rendezvous is fully visible.
+
+        Iterated in sorted(pair_name) order — NOT insertion order — so every
+        agent completes completable pairs in the same sequence regardless of
+        when each pair's InitPair commands reached it. ``new_group`` is
+        WORLD-collective; two agents that completed the same set of pairs in
+        different orders could otherwise interleave group bootstraps and hang.
+        """
+        for pair_name in sorted(self.pending_pairs):
             pending = self.pending_pairs[pair_name]
             try:
                 completed = self._complete_pair(pending)
@@ -606,8 +613,12 @@ class TensorBusAgent:
         )
         return True
 
-    def _handle_transfer(self, msg: Transfer):
-        """Handle Transfer command for batch tensor transfer."""
+    def _handle_transfer(self, msg: Transfer) -> bool:
+        """Handle Transfer command for batch tensor transfer.
+
+        Returns True when the command is finished (semaphore releasable);
+        False when a dual direction-round parks waiting for the peer role.
+        """
         batch_id = msg.batch_id
         transfer_type = msg.transfer_type
         logger.info(f"Agent {self.rank}: Handling transfer for batch '{batch_id}' ({transfer_type})")
@@ -618,8 +629,7 @@ class TensorBusAgent:
         batch_state = self.batches[batch_id]
 
         if batch_state.dual:
-            self._execute_dual_transfer(msg, batch_state)
-            return
+            return self._execute_dual_transfer(msg, batch_state)
 
         # Set transfer_signal to notify receiver that sender is ready (before barrier)
         transfer_signal_key = f"batch:{batch_id}/state:transfer_signal"
@@ -685,16 +695,34 @@ class TensorBusAgent:
         if transfer_type == "recv":
             self._leader_set(transfer_signal_key, "0", batch_state)
         logger.info(f"Agent {self.rank}: Batch {batch_id}: Transfer complete in {transfer_time_ms:.2f} ms")
+        return True
 
-    def _execute_dual_transfer(self, msg: Transfer, batch_state: BatchState):
-        """Execute one direction of a dual-endpoint (colocated) batch.
+    def _execute_dual_transfer(self, msg: Transfer, batch_state: BatchState) -> bool:
+        """Execute one direction-round of a dual-endpoint (colocated) batch.
 
         One agent holds both roles' tensors, so both roles' Transfer commands
-        for a direction arrive on this same agent — the first one executes the
-        direction's buckets (source and target chunks together, in this rank's
-        bucket order, identical on every rank) and the second is a no-op. Both
-        commands keep their client-side semantics: ``send`` from role R and
-        ``recv`` from the other role map to the same (R → other) direction.
+        for a direction arrive on this same agent: ``send`` from role R and
+        ``recv`` from the other role map to the same (R → other) direction,
+        identified further by ``sync_round``.
+
+        Handshake: a direction-round executes only after BOTH roles' commands
+        for that round arrived — the source side's command is source-ready,
+        the destination side's command is dest-ready (its engine is done
+        reading the previous weights). The first command therefore PARKS (its
+        semaphore is deferred) instead of executing alone; whoever arrives
+        second triggers execution. A command for an already-executed or older
+        round is acknowledged without re-execution, so a same batch supports
+        unbounded sync rounds and duplicates/stale re-issues cannot roll
+        weights back.
+
+        Completion is published as a VERSIONED signal
+        (``batch:{id}/state:transfer_signal_round`` = round id, monotonic):
+        a watcher that polls ``query_transfer_signal(sync_round=r)`` cannot
+        lose a pulse the way the legacy boolean flag's 1→0 reset could.
+
+        Returns True when this command is finished (its semaphore may
+        release); False when it parks waiting for the peer role's command of
+        the same round.
         """
         batch_id = msg.batch_id
         if msg.role is None:
@@ -713,11 +741,26 @@ class TensorBusAgent:
             src_role, dst_role = other_role, msg.role
         direction = (src_role, dst_role)
 
-        if batch_state.dual_direction_done.get(direction):
+        done_round = batch_state.dual_direction_done.get(direction, -1)
+        if msg.sync_round <= done_round:
             logger.info(
-                f"Agent {self.rank}: Batch {batch_id}: direction {src_role}->{dst_role} already executed; skipping"
+                f"Agent {self.rank}: Batch {batch_id}: direction {src_role}->{dst_role} round {msg.sync_round} "
+                f"already executed (done={done_round}); acknowledging without re-execution"
             )
-            return
+            return True
+
+        pending = batch_state.dual_round_pending.setdefault(
+            (direction, msg.sync_round), {"roles": set(), "semaphores": []}
+        )
+        pending["roles"].add(msg.role)
+        if msg.semaphore_name:
+            pending["semaphores"].append(msg.semaphore_name)
+        if len(pending["roles"]) < 2:
+            logger.info(
+                f"Agent {self.rank}: Batch {batch_id}: direction {src_role}->{dst_role} round {msg.sync_round} "
+                f"parked (have {sorted(pending['roles'])}); waiting for the peer role's command"
+            )
+            return False
 
         buckets = batch_state.dual_direction_buckets.get(direction)
         if buckets is None:
@@ -726,20 +769,27 @@ class TensorBusAgent:
                 f"Both roles must register before transferring."
             )
 
-        transfer_signal_key = f"batch:{batch_id}/state:transfer_signal"
-        self._leader_set(transfer_signal_key, "1", batch_state)
         dist.barrier(batch_state.batch_group)
-
         logger.info(
             f"Agent {self.rank}: Batch {batch_id}: Executing dual transfer {src_role}->{dst_role} "
-            f"with {len(buckets)} buckets"
+            f"round {msg.sync_round} with {len(buckets)} buckets"
         )
         bucket_comm(buckets=buckets)
-        batch_state.dual_direction_done[direction] = True
+        batch_state.dual_direction_done[direction] = msg.sync_round
 
+        # Publish the versioned completion signal before any parked semaphore
+        # releases: when a recv client's blocking call returns, the round is
+        # already queryable, so derived tensors may refresh immediately.
         dist.barrier(batch_state.batch_group)
-        self._leader_set(transfer_signal_key, "0", batch_state)
-        logger.info(f"Agent {self.rank}: Batch {batch_id}: Dual transfer {src_role}->{dst_role} complete")
+        self._leader_set(f"batch:{batch_id}/state:transfer_signal_round", str(msg.sync_round), batch_state)
+        dist.barrier(batch_state.batch_group)
+        for parked in pending["semaphores"]:
+            self._release_semaphore(parked)
+        del batch_state.dual_round_pending[(direction, msg.sync_round)]
+        logger.info(
+            f"Agent {self.rank}: Batch {batch_id}: Dual transfer {src_role}->{dst_role} round {msg.sync_round} complete"
+        )
+        return True
 
     def _handle_query_status(self, msg: QueryStatus):
         batch_id = msg.batch_id
@@ -758,6 +808,12 @@ class TensorBusAgent:
             raw_value = self._leader_get(store_state_key, batch_state)
             state = raw_value == b"1"
             logger.info(f"Agent {self.rank}: Query {state_name} batch={batch_id}: raw={raw_value}, state={state}")
+        elif state_name == "transfer_signal_round":
+            # Versioned dual-endpoint completion: the store holds the last
+            # completed round id (monotonic), published after execution.
+            raw_value = self._leader_get(store_state_key, batch_state)
+            state = int(raw_value.decode()) if raw_value is not None else -1
+            logger.info(f"Agent {self.rank}: Query {state_name} batch={batch_id}: raw={raw_value}, state={state}")
         else:
             logger.error(f"Agent {self.rank}: Invalid state name: {state_name}")
             return
@@ -771,10 +827,22 @@ class TensorBusAgent:
 
         if batch_id in self.batches:
             # A dual batch that never reached its second role still parks the
-            # first role's RegisterTensors semaphore — release it here so a
-            # failed batch cannot hang its client.
+            # first role's RegisterTensors semaphore — and a direction-round
+            # whose peer command never arrived parks transfer semaphores.
+            # Both release HERE so a failed batch cannot hang its clients, but
+            # FAIL-CLOSED: the error is recorded first, so the parked blocking
+            # call raises instead of returning as if it had succeeded.
             for parked in self.batches[batch_id].pending_register_semaphores:
+                self._record_command_error(
+                    parked, RuntimeError(f"Batch {batch_id}: cleaned up before registration completed")
+                )
                 self._release_semaphore(parked)
+            for pending in self.batches[batch_id].dual_round_pending.values():
+                for parked in pending["semaphores"]:
+                    self._record_command_error(
+                        parked, RuntimeError(f"Batch {batch_id}: cleaned up before direction-round executed")
+                    )
+                    self._release_semaphore(parked)
             del self.batches[batch_id]
             logger.info(f"Agent {self.rank}: Cleaned up batch {batch_id}")
         else:
@@ -858,8 +926,10 @@ class TensorBusAgent:
 
         if batch_dual:
             # A single gather sees a role-mixed set: agents may process the
-            # two roles' commands in different orders, so per-role layout
-            # equality is checked across both gathers, at completion.
+            # two roles' commands in different orders (rank 0 train first,
+            # rank 1 infer first), so every payload is filed under its OWN
+            # role and per-role layout equality is checked across both
+            # gathers, at completion.
             batch_state = self.batches.get(batch_id)
             if batch_state is None:
                 batch_state = BatchState(
@@ -869,10 +939,10 @@ class TensorBusAgent:
                     dual=True,
                 )
                 self.batches[batch_id] = batch_state
-            gathered = batch_state.dual_gathered_layouts.setdefault(role, {})
             for idx, other in enumerate(layouts):
-                if other is not None and other[4] == role:
-                    gathered[idx] = other[:4]
+                if other is None:
+                    continue
+                batch_state.dual_gathered_layouts.setdefault(other[4], {})[idx] = other[:4]
             return self._register_dual_role(batch_state, grouped, role, msg.semaphore_name)
 
         if any(other != layout for other in layouts):
@@ -1088,7 +1158,14 @@ class TensorBusAgent:
             for m2m in (self.pairs[pair_name].m2m_by_source_role or {}).values()
         )
 
-        for pair_name in batch_state.pair_names:
+        # Chunks accumulate across ALL pairs of the batch per direction before
+        # a single bucketization: assigning per pair would keep only the LAST
+        # pair's buckets for a direction and silently drop every other pair's
+        # weights. Chunk order is canonical (pairs sorted, directions by
+        # source-role name, tensors in registration order) and identical on
+        # every rank, so bucket boundaries are deterministic too.
+        chunks_by_direction: dict[tuple[str, str], list[Chunk]] = {}
+        for pair_name in sorted(batch_state.pair_names):
             pair = self.pairs[pair_name]
             for src_role in sorted(pair.m2m_by_source_role):
                 dst_roles = [name for name in pair.m2m_by_source_role if name != src_role]
@@ -1098,10 +1175,10 @@ class TensorBusAgent:
                 m2m = pair.m2m_by_source_role[src_role]
                 if m2m is None:
                     logger.info(
-                        f"Agent {self.rank}: Batch {batch_id}: no map for direction "
-                        f"{src_role}->{dst_role} (Partial target unsupported); direction disabled"
+                        f"Agent {self.rank}: Batch {batch_id}: pair '{pair_name}' has no map for direction "
+                        f"{src_role}->{dst_role} (Partial target unsupported); contributes no chunks"
                     )
-                    batch_state.dual_direction_buckets[(src_role, dst_role)] = []
+                    chunks_by_direction.setdefault((src_role, dst_role), [])
                     continue
                 partials = (pair.partial_by_source_role or {}).get(src_role)
                 src_tensors = batch_state.pair_role_tensors[(pair_name, src_role)]
@@ -1114,7 +1191,7 @@ class TensorBusAgent:
                         f"{src_role}={len(src_tensors)}, {dst_role}={len(dst_tensors)}"
                     )
 
-                chunks: list[Chunk] = []
+                chunks = chunks_by_direction.setdefault((src_role, dst_role), [])
                 for i in range(len(src_tensors)):
                     # Wire dtype: min(itemsize) of the two roles, source side casts
                     if src_dtypes[i].itemsize <= dst_dtypes[i].itemsize:
@@ -1131,13 +1208,20 @@ class TensorBusAgent:
                             source_partial_groups=partials,
                         )
                     )
-                batch_state.dual_direction_buckets[(src_role, dst_role)] = chunk_to_bucket_ops(
-                    chunks=chunks, bucket_size=coalesce_bytes
-                )
                 logger.info(
                     f"Agent {self.rank}: Batch {batch_id}: pair '{pair_name}' direction "
-                    f"{src_role}->{dst_role}: {len(batch_state.dual_direction_buckets[(src_role, dst_role)])} buckets"
+                    f"{src_role}->{dst_role}: {len(chunks)} chunks so far"
                 )
+
+        for direction in sorted(chunks_by_direction):
+            batch_state.dual_direction_buckets[direction] = chunk_to_bucket_ops(
+                chunks=chunks_by_direction[direction], bucket_size=coalesce_bytes
+            )
+            logger.info(
+                f"Agent {self.rank}: Batch {batch_id}: direction {direction[0]}->{direction[1]}: "
+                f"{len(batch_state.dual_direction_buckets[direction])} buckets "
+                f"({len(chunks_by_direction[direction])} chunks across {len(batch_state.pair_names)} pairs)"
+            )
 
         logger.info(
             f"Agent {self.rank}: Batch {batch_id}: Dual registration complete - "

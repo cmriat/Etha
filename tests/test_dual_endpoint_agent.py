@@ -11,9 +11,10 @@ thread) and checks the rendezvous/batch contracts that make that work:
   chunks generate only once both are present — the first role's semaphore
   releases then, not earlier;
 - role=None on a dual pair is rejected and reported to the client;
-- Transfer is per-direction: the sender's "send" executes the direction, the
-  receiver's "recv" for the same direction dedups; the reverse direction
-  never auto-executes;
+- Transfer is per-direction and per-round: a direction-round executes only
+  after BOTH roles' commands arrived (source-ready and dest-ready), a
+  re-issued or older round is acknowledged without re-execution, and the
+  reverse direction never auto-executes;
 - an FP32 master transfers to a BF16 target bit-stably, master untouched.
 
 The split (one role per agent) path is kept as a CPU regression: disjoint
@@ -31,9 +32,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import torch
 import pytest
+import torch.distributed as dist
 from torch.distributed.tensor.placement_types import Shard, Replicate
 
 from etha.comm.ir import Transport
+from etha.pg_utils import _PROCESS_GROUP_CACHE
 from etha.tensor_bus import TensorBusAgent, TensorBusClient
 
 logging.basicConfig(level=logging.INFO)
@@ -182,14 +185,23 @@ def test_dual_endpoint_agent_flow(tmp_path):
             client_train.register_tensors(batch_id="bad_batch", tensors=[(master, PAIR)], role=None)
         assert set(agent.batches) == {BATCH}, "rejected registration leaves no residue"
 
-        # --- per-direction transfer with dedup
-        handler_train.transfer(transfer_type="send", role=TRAIN, blocking=True, timeout=60)
-        handler_infer.transfer(transfer_type="recv", role=INFER, blocking=True, timeout=60)
+        # --- per-direction transfer: BOTH roles' commands are required
+        # (send parks until the peer role's recv arrives — issued concurrently
+        # because a send blocks until the round executes)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_send = pool.submit(handler_train.transfer, transfer_type="send", role=TRAIN, blocking=True, timeout=60)
+            fut_recv = pool.submit(handler_infer.transfer, transfer_type="recv", role=INFER, blocking=True, timeout=60)
+            fut_send.result(timeout=90)
+            fut_recv.result(timeout=90)
 
         assert torch.equal(infer_local, master.to(torch.bfloat16)), "BF16 target must match the cast master"
         assert torch.equal(master, master_snapshot), "FP32 master must be bit-stable through the transfer"
-        assert batch.dual_direction_done.get((TRAIN, INFER)) is True
+        assert batch.dual_direction_done.get((TRAIN, INFER)) == 0, "round 0 executed exactly once"
         assert (INFER, TRAIN) not in batch.dual_direction_done, "reverse direction must never auto-execute"
+        assert handler_train.query_transfer_signal(sync_round=0) is True, (
+            "versioned round signal must be queryable once the round executed"
+        )
+        assert handler_train.query_transfer_signal(sync_round=1) is False, "future rounds are not signaled"
 
         # --- cleanup is idempotent at the handler level
         handler_train.close()
@@ -203,6 +215,12 @@ def test_dual_endpoint_agent_flow(tmp_path):
         if thread is not None:
             thread.join(timeout=30)
         agent.close(destroy=True)
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        # The agent's subgroup cache outlives the destroyed world; a later
+        # main-process world-1 test would reuse dead handles (size-1 barriers
+        # pass silently, broadcasts raise) — clear it at the world boundary.
+        _PROCESS_GROUP_CACHE.clear()
         for key, value in saved.items():
             if value is None:
                 os.environ.pop(key, None)

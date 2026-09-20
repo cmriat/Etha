@@ -31,11 +31,19 @@ class Transfer(BaseCommand):
     the issuing client's side (its ``init_pair`` ``local_name``). ``send`` from
     role R executes the R→other direction; ``recv`` from role R executes the
     other→R direction. Split (single-role) agents leave it None.
+
+    ``sync_round`` identifies the weight-sync round within one batch: a
+    direction-round executes exactly once, only after BOTH roles' commands
+    for that round arrived (source-ready and dest-ready), and re-issues of an
+    already-executed or older round are acknowledged without re-execution.
+    Monotonic per (batch, direction); round 0 is the first sync. Split
+    batches ignore it.
     """
 
     batch_id: str
     transfer_type: Literal["send", "recv"]
     role: str | None = None
+    sync_round: int = 0
 
 
 class RegisterTensors(BaseCommand):
