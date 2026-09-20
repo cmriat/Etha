@@ -72,6 +72,10 @@ class Chunk:
     dst_ranks: tuple[int, ...]
     chunk_shape: tuple[int, ...]
     tensor: torch.Tensor | None = None
+    # LOCAL chunks on colocated meshes read a *different* tensor than they write
+    # (source and target are two registrations on the same rank). None keeps the
+    # single-tensor self-copy semantics: read and write ``tensor``.
+    src_tensor: torch.Tensor | None = None
     src_slice: tuple[slice, ...] = ()  # read here when is_source
     dst_slice: tuple[slice, ...] = ()  # written here when is_target
     transfer_dtype: torch.dtype | None = None  # Wire dtype (None = use tensor.dtype, set in __post_init__)
@@ -110,7 +114,8 @@ class Chunk:
         op lands directly in the target.
         """
         if self.is_source:
-            buffer = self.tensor[self.src_slice]
+            read_tensor = self.src_tensor if self.src_tensor is not None else self.tensor
+            buffer = read_tensor[self.src_slice]
             if contiguous:
                 buffer = buffer.contiguous()
             if self.source_partial_groups:

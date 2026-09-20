@@ -84,6 +84,32 @@ def _create_partial_groups(
     return my_groups
 
 
+class _PendingPair:
+    """Rendezvous state for a pair whose InitPair handshake is in flight.
+
+    The agent writes its side's keys immediately (``_handle_init_pair``) and
+    completes the pair from the main-loop poll once every side's registration
+    is visible in the store. Per peer name we track the semaphores of the
+    InitPair commands that registered it, so completion (or failure) can
+    release exactly those clients.
+    """
+
+    def __init__(self, pair_name: str, local_name: str, remote_name: str, expected: dict[str, int]):
+        self.pair_name = pair_name
+        # Perspective of the first InitPair seen for this pair (split-mode
+        # local/remote semantics); both peer names are known from any InitPair.
+        self.local_name = local_name
+        self.remote_name = remote_name
+        self.expected = expected
+        self.semaphores: dict[str, list[str | None]] = {}
+
+    def add_semaphore(self, name: str, semaphore_name: str | None) -> None:
+        self.semaphores.setdefault(name, []).append(semaphore_name)
+
+    def all_semaphores(self) -> list[str]:
+        return [s for names in self.semaphores.values() for s in names if s is not None]
+
+
 class TensorBusAgent:
     """Tensor Bus Agent."""
 
@@ -98,6 +124,7 @@ class TensorBusAgent:
         store_timeout: float = 3600.0,
         store_backend: str = "tcp",
         store_namespace: str | None = None,
+        dist_backend: str | None = None,
     ):
         """Initialize Agent.
 
@@ -110,15 +137,21 @@ class TensorBusAgent:
             lmdb_state_path: Path to State LMDB
             store_timeout: KVStore connection timeout in seconds
             store_backend: KVStore backend ("tcp" or "etcd")
+            dist_backend: torch.distributed backend string. Defaults to
+                "cuda:nccl,cpu:gloo" on CUDA hosts and "cpu:gloo" otherwise
+                (CPU instantiation exists for the gloo test ladder).
         """
         self.rank = rank
         self.world_size = world_size
 
-        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if torch.cuda.is_available():
+            torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
 
         # Initialize torch.distributed first (needed for namespace broadcast)
         logger.debug(f"Agent {rank}: Initializing torch.distributed")
-        dist.init_process_group(backend="cuda:nccl,cpu:gloo", rank=rank, world_size=world_size)
+        if dist_backend is None:
+            dist_backend = "cuda:nccl,cpu:gloo" if torch.cuda.is_available() else "cpu:gloo"
+        dist.init_process_group(backend=dist_backend, rank=rank, world_size=world_size)
 
         if store_namespace is None:
             # Generate namespace: rank 0 creates UUID, broadcasts to all
@@ -160,6 +193,11 @@ class TensorBusAgent:
 
         self.pairs: dict[str, PairState] = {}
         self.batches: dict[str, BatchState] = {}
+        # Rendezvous state for pairs whose InitPair handshake is not yet
+        # complete. InitPair never blocks (see _handle_init_pair); completion
+        # is polled from the main loop so one agent can drive both roles of a
+        # colocated pair concurrently.
+        self.pending_pairs: dict[str, _PendingPair] = {}
 
         setup_cuda_rebuild_patch()
 
@@ -170,12 +208,26 @@ class TensorBusAgent:
         logger.info(f"Agent {self.rank}: Starting main loop")
 
         while True:
-            # Update heartbeat (for connection validation)
-            self._update_heartbeat()
+            self.step()
 
-            msg = self.command_queue.dequeue(block=True, timeout=TIME_INTERVAL)
-            if msg is not None:
-                self._handle_command(msg)
+    def step(self) -> bool:
+        """One loop iteration: heartbeat, one command, pending-pair polling.
+
+        Split out of ``run`` so tests (and future embedders) can drive the
+        agent single-stepped. Returns True when a command was processed.
+        """
+        # Update heartbeat (for connection validation)
+        self._update_heartbeat()
+
+        msg = self.command_queue.dequeue(block=True, timeout=TIME_INTERVAL)
+        handled = msg is not None
+        if msg is not None:
+            self._handle_command(msg)
+
+        if self.pending_pairs:
+            self._poll_pending_pairs()
+
+        return handled
 
     def _handle_command(self, command):
         """Dispatch command to appropriate handler and handle semaphore release."""
@@ -189,6 +241,7 @@ class TensorBusAgent:
     def _execute_command(self, command):
         """Execute the actual command logic."""
         try:
+            complete = True
             match command:
                 case InitPair():
                     self._handle_init_pair(command)
@@ -197,16 +250,22 @@ class TensorBusAgent:
                 case QueryStatus():
                     self._handle_query_status(command)
                 case RegisterTensors():
-                    self._handle_register_tensors(command)
+                    complete = self._handle_register_tensors(command)
                 case CleanupBatch():
                     self._handle_cleanup_batch(command)
                 case _:
                     logger.warning(f"Agent {self.rank}: Unknown command type: {type(command)}")
                     return  # Don't release semaphore for unknown commands
 
-            # Release semaphore if specified
-            if command.semaphore_name:
-                self._release_semaphore(command.semaphore_name)
+            # Release semaphore if specified. Two commands complete
+            # asynchronously and release at completion (or recorded failure)
+            # instead: InitPair in _poll_pending_pairs, because the handler
+            # returns before the rendezvous completes; and the first role's
+            # RegisterTensors on a dual batch, in _register_dual_role, because
+            # generation only runs once the second role registers.
+            if command.semaphore_name and not isinstance(command, InitPair):
+                if complete:
+                    self._release_semaphore(command.semaphore_name)
 
         except Exception as e:
             logger.error(f"Agent {self.rank}: Error handling command {type(command)}: {e} {traceback.format_exc()}")
@@ -224,16 +283,20 @@ class TensorBusAgent:
             raise
 
     def _handle_init_pair(self, msg: InitPair):
-        """Handle RegisterPair command.
+        """Handle InitPair: write this side's rendezvous keys, never block.
 
-        Steps:
-        1. Write to KVStore ready local registration
-        2. Write expected_world_size (if first)
-        3. Write device mesh and placement info to KVStore
-        4. Poll KVStore until my side is complete
-        5. Poll KVStore until remote side is complete
-        6. Exchange and collect device mesh/placement info from all ranks
-        7. Create PairState with m2m maps info
+        The pair completes from the main-loop poll (``_poll_pending_pairs``)
+        once every side's registration is visible in the store. Blocking here
+        would deadlock a dual-endpoint agent: the first role's InitPair would
+        wait for the second role's keys, which are only written by a command
+        queued behind it on this same agent. The command's semaphore is
+        released at pair completion (or recorded failure), not on return.
+
+        Steps (write phase):
+        1. Write to KVStore this side's registration
+        2. Write expected_world_size for this side (idempotent)
+        3. Write this side's device mesh and placement info (role-ized keys)
+        4. Register the pending pair; completion runs the remaining old steps
         """
         pair_name = msg.pair_name
         local_name = msg.local_name
@@ -242,88 +305,156 @@ class TensorBusAgent:
 
         logger.info(f"Agent {self.rank}: RegisterPair pair={pair_name}, local={local_name} -> remote={remote_name}")
 
+        if pair_name in self.pairs:
+            # Duplicate InitPair for an already-matched pair (e.g. client
+            # retry): keys are rewritten idempotently and the caller is
+            # released immediately — the pair is already usable.
+            logger.info(f"Agent {self.rank}: Pair '{pair_name}' already matched; InitPair is idempotent")
+            self._write_init_pair_keys(msg)
+            if msg.semaphore_name:
+                self._release_semaphore(msg.semaphore_name)
+            return
+
+        # Steps 1-3: write this side's keys (idempotent across retries)
+        self._write_init_pair_keys(msg)
+
+        # Step 4: record pending state; the main loop completes the pair
+        pending = self.pending_pairs.get(pair_name)
+        if pending is None:
+            pending = _PendingPair(
+                pair_name=pair_name,
+                local_name=local_name,
+                remote_name=remote_name,
+                expected={local_name: expected_local},
+            )
+            self.pending_pairs[pair_name] = pending
+        else:
+            if pending.local_name != local_name and pending.remote_name != local_name:
+                raise ValueError(
+                    f"Agent {self.rank}: InitPair for pair '{pair_name}' names unknown peer "
+                    f"'{local_name}' (known: {pending.local_name}, {pending.remote_name})"
+                )
+            pending.expected.setdefault(local_name, expected_local)
+        pending.add_semaphore(local_name, msg.semaphore_name)
+        logger.info(
+            f"Agent {self.rank}: Pair '{pair_name}' pending; waiting for store rendezvous "
+            f"(peers: {pending.local_name}, {pending.remote_name})"
+        )
+
+    def _write_init_pair_keys(self, msg: InitPair):
+        """Write one side's rendezvous keys: registration, expected size, mesh."""
+        pair_name = msg.pair_name
+        local_name = msg.local_name
+
         # Step 1: Write local registration to KVStore
-        logger.info(f"Agent {self.rank}: About to write local registration to KVStore")
         local_key = f"pair:{pair_name}/rank:{self.rank}/{local_name}"
         self.store.set(local_key, "1")
-        logger.info(f"Agent {self.rank}: Wrote {local_key} = '1' to KVStore")
 
         # Step 2: Write expected_world_size (all ranks write the same value, idempotent)
-        logger.info(f"Agent {self.rank}: About to write expected_world_size")
         expected_key = f"pair:{pair_name}/{local_name}/expected_world_size"
-        self.store.set(expected_key, str(expected_local))
-        logger.info(f"Agent {self.rank}: Wrote {expected_key}={expected_local}")
+        self.store.set(expected_key, str(msg.expected_world_size))
 
-        # Step 3: Write device mesh and placement info to store
+        # Step 3: Write device mesh and placement info to store. The peer name
+        # is part of the key: a dual-endpoint agent writes two different meshes
+        # (one per role) under the same pair, and a rank-only key would have
+        # the second role overwrite the first.
         if msg.mesh_shape_payload is not None and msg.placements_payload is not None:
-            logger.info(f"Agent {self.rank}: About to write device mesh info")
-            mesh_shape_key = f"pair:{pair_name}/rank:{self.rank}/mesh_shape"
+            mesh_shape_key = f"pair:{pair_name}/rank:{self.rank}/{local_name}/mesh_shape"
             self.store.set_bytes(mesh_shape_key, bytes(msg.mesh_shape_payload))
-            logger.info(f"Agent {self.rank}: Wrote mesh_shape to store")
 
-            placements_key = f"pair:{pair_name}/rank:{self.rank}/placements"
+            placements_key = f"pair:{pair_name}/rank:{self.rank}/{local_name}/placements"
             self.store.set_bytes(placements_key, bytes(msg.placements_payload))
-            logger.info(f"Agent {self.rank}: Wrote placements to store")
-        else:
-            logger.info(f"Agent {self.rank}: No mesh/placement info to write")
 
-        # Step 4: Wait until local peer is complete
-        logger.info(f"Agent {self.rank}: Waiting for local peer '{local_name}' (expected={expected_local})")
-        local_keys = self.store.wait_for_keys(
-            key_pattern=f"pair:{pair_name}/rank:*/{local_name}",
-            expected_count=expected_local,
-            candidate_keys=[f"pair:{pair_name}/rank:{r}/{local_name}" for r in range(self.world_size)],
+    def _check_side_ready(self, pair_name: str, name: str) -> tuple[int, list[int]] | None:
+        """Non-blocking readiness of one side: (expected, ranks) or None."""
+        expected_bytes = self.store.get(f"pair:{pair_name}/{name}/expected_world_size")
+        if expected_bytes is None:
+            return None
+        expected = int(expected_bytes.decode())
+
+        present = []
+        for r in range(self.world_size):
+            if self.store.get(f"pair:{pair_name}/rank:{r}/{name}") == b"1":
+                present.append(r)
+        if len(present) < expected:
+            return None
+        return expected, sorted(present)[:expected]
+
+    def _poll_pending_pairs(self):
+        """Complete pending pairs whose rendezvous is fully visible."""
+        for pair_name in list(self.pending_pairs):
+            pending = self.pending_pairs[pair_name]
+            try:
+                completed = self._complete_pair(pending)
+            except Exception as e:
+                logger.error(f"Agent {self.rank}: Pair '{pair_name}' completion failed: {e} {traceback.format_exc()}")
+                for semaphore_name in pending.all_semaphores():
+                    try:
+                        self._record_command_error(semaphore_name, e)
+                    except Exception:
+                        logger.error(f"Agent {self.rank}: Failed to record InitPair error: {traceback.format_exc()}")
+                    self._release_semaphore(semaphore_name)
+                self.pending_pairs.pop(pair_name, None)
+                raise
+            if completed:
+                for semaphore_name in pending.all_semaphores():
+                    self._release_semaphore(semaphore_name)
+                self.pending_pairs.pop(pair_name, None)
+
+    def _complete_pair(self, pending: _PendingPair) -> bool:
+        """Run the old blocking InitPair tail against the current store state.
+
+        Returns True when the pair was created (rendezvous complete), False
+        when either side is not yet fully registered.
+        """
+        pair_name = pending.pair_name
+        sides: dict[str, list[int]] = {}
+        for name in (pending.local_name, pending.remote_name):
+            ready = self._check_side_ready(pair_name, name)
+            if ready is None:
+                return False
+            sides[name] = ready[1]
+
+        # Canonical ordering so all ranks call collectives in the same order;
+        # the first-registered local/remote perspective is kept for the split
+        # (single-role) fields.
+        first_name, second_name = sorted(sides)
+        local_name, remote_name = pending.local_name, pending.remote_name
+        local_ranks, remote_ranks = sides[local_name], sides[remote_name]
+        first_ranks, second_ranks = sides[first_name], sides[second_name]
+
+        logger.info(
+            f"Agent {self.rank}: Pair '{pair_name}' rendezvous complete: "
+            f"{local_name}={local_ranks}, {remote_name}={remote_ranks}"
         )
-        local_ranks = sorted([self._extract_rank(k) for k in local_keys])
-        logger.info(f"Agent {self.rank}: Local peer complete: {local_ranks}")
 
-        # Step 5: Wait until remote peer has written expected_world_size
-        logger.info(f"Agent {self.rank}: Waiting for remote peer '{remote_name}'")
-
-        remote_expected_key = f"pair:{pair_name}/{remote_name}/expected_world_size"
-        expected_remote = int(self.store.wait_for_key(remote_expected_key).decode())
-        logger.debug(f"Agent {self.rank}: Remote peer '{remote_name}' expects {expected_remote} ranks")
-
-        # Then, wait for all remote ranks to register
-        remote_keys = self.store.wait_for_keys(
-            key_pattern=f"pair:{pair_name}/rank:*/{remote_name}",
-            expected_count=expected_remote,
-            candidate_keys=[f"pair:{pair_name}/rank:{r}/{remote_name}" for r in range(self.world_size)],
-        )
-        remote_ranks = sorted([self._extract_rank(k) for k in remote_keys])
-
-        logger.info(f"Agent {self.rank}: Remote peer '{remote_name}' complete: {remote_ranks}")
-        logger.debug(f"Agent {self.rank}: Creating pair group with ranks: {local_ranks + remote_ranks}")
         pair_group = get_or_create_process_group(local_ranks + remote_ranks)
-        logger.debug(f"Agent {self.rank}: Pair group created: {pair_group}")
 
-        # Step 6: Collect device mesh and placement info from all ranks
-        local_mesh_info = self._collect_mesh_placement_info(pair_name, local_ranks)
-        remote_mesh_info = self._collect_mesh_placement_info(pair_name, remote_ranks)
+        # Collect device mesh and placement info from all ranks (per side)
+        local_mesh_info = self._collect_mesh_placement_info(pair_name, local_ranks, local_name)
+        remote_mesh_info = self._collect_mesh_placement_info(pair_name, remote_ranks, remote_name)
 
-        # Step 7: Validate mesh/placement consistency
+        # Validate mesh/placement consistency per side
         if local_mesh_info:
             self._validate_mesh_placement_consistency(local_mesh_info)
-
         if remote_mesh_info:
             self._validate_mesh_placement_consistency(remote_mesh_info)
 
-        # Step 8: Generate P2P maps if validation passed
+        # Generate P2P maps if validation passed. All ranks take the same
+        # branch: the collected info is store-derived and identical everywhere.
         m2m_map_send = None
         m2m_map_recv = None
+        m2m_first_to_second = None
+        m2m_second_to_first = None
+        first_mesh_tensor = None
+        second_mesh_tensor = None
 
-        # Determine canonical ordering to ensure all ranks call get_m2m_map in same order
-        # This prevents deadlock in collective operations within get_m2m_map
-        # We use alphabetical order of role names as the tie-breaker
         local_is_first = local_name < remote_name
 
-        # Canonical (first, second) swap helper. Same on every rank, used to align
-        # paired-by-side data (mesh, placements, ranks, group) before collectives.
         def _order(loc, rem):
             return (loc, rem) if local_is_first else (rem, loc)
 
         if local_mesh_info and remote_mesh_info:
-            # Get local mesh info (this process's mesh)
             local_mesh_shape, local_placements = local_mesh_info[0]
             local_mesh_tensor = torch.arange(
                 local_ranks[0], local_ranks[0] + int(torch.prod(torch.tensor(local_mesh_shape)).item())
@@ -341,20 +472,11 @@ class TensorBusAgent:
             first_placements, second_placements = _order(local_placements, remote_placements)
             logger.info(f"Agent {self.rank}: Generating M2M maps for pair '{pair_name}'")
 
-            # Generate M2M Maps (topology layer, shape-independent)
-            # IMPORTANT: All ranks must call in the same order to avoid deadlock
-            # in get_m2m_map's collective ops. Partial is supported only on
-            # *source* — skip the direction whose target side has Partial
-            # (cross-PG decomposition into Partial is undefined). Placement
-            # info is consistent across ranks via _collect_mesh_placement_info,
-            # so this branch is taken identically everywhere.
+            # Partial is supported only on *source* — skip the direction whose
+            # target side has Partial. Branch is identical on every rank.
             first_has_partial = any(isinstance(p, Partial) for p in first_placements)
             second_has_partial = any(isinstance(p, Partial) for p in second_placements)
 
-            m2m_first_to_second = None
-            m2m_second_to_first = None
-
-            # First call: first_mesh -> second_mesh (skip if second is Partial target)
             if not second_has_partial:
                 m2m_first_to_second = get_m2m_map(
                     source_mesh=first_mesh,
@@ -370,7 +492,6 @@ class TensorBusAgent:
                     f"(second side has Partial placement; cross-PG Partial target is not supported)"
                 )
 
-            # Second call: second_mesh -> first_mesh (skip if first is Partial target)
             if not first_has_partial:
                 m2m_second_to_first = get_m2m_map(
                     source_mesh=second_mesh,
@@ -386,32 +507,39 @@ class TensorBusAgent:
                     f"(first side has Partial placement; cross-PG Partial target is not supported)"
                 )
 
-            # Send is "local -> remote", so it's first->second when local is first.
+            # Send is "local -> remote".
             m2m_map_send, m2m_map_recv = _order(m2m_first_to_second, m2m_second_to_first)
             logger.info(
-                f"Agent {self.rank}: Generated P2P maps for pair '{pair_name}'. m2m_map_send: {m2m_map_send} m2m_map_recv: {m2m_map_recv}"
+                f"Agent {self.rank}: Generated P2P maps for pair '{pair_name}'. "
+                f"m2m_map_send: {m2m_map_send} m2m_map_recv: {m2m_map_recv}"
             )
 
             for mesh in (first_mesh, second_mesh):
                 mesh_ranks = mesh.mesh.flatten().tolist()
                 if self.rank in mesh_ranks:
                     for pg in mesh.get_all_groups():
+                        # A mesh dim covering the whole WORLD aliases the
+                        # default group (and singleton dims hand back None) —
+                        # destroying either would tear down the agent itself.
+                        if pg is None or pg is dist.group.WORLD:
+                            continue
                         dist.destroy_process_group(pg)
             logger.debug(f"Agent {self.rank}: Destroyed DeviceMesh process groups for pair '{pair_name}'")
         else:
             logger.info(f"Agent {self.rank}: Skipping P2P map generation - missing or inconsistent mesh/placement info")
 
-        # Step 9: Create local_group and remote_group (NCCL groups for send/recv side).
-        # Create in canonical (first, second) order so non-member ranks call new_group
-        # in the same sequence — new_group is WORLD-collective.
-        first_ranks, second_ranks = _order(local_ranks, remote_ranks)
+        # Side groups (NCCL groups for send/recv side), created in canonical
+        # (first, second) order so non-member ranks call new_group in the same
+        # sequence — new_group is WORLD-collective.
         first_group = get_or_create_process_group(first_ranks)
         second_group = get_or_create_process_group(second_ranks)
         local_group, remote_group = _order(first_group, second_group)
 
-        # Both directions' Partial sub-groups are created in deterministic order
-        # for the same reason; only the local-side groups are kept.
-        source_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = None
+        # Both directions' Partial sub-groups are created in deterministic
+        # order for the same reason; per-side groups for the dual view.
+        first_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = None
+        second_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = None
+        local_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = None
         if local_mesh_info and remote_mesh_info:
             partial_red_1 = m2m_first_to_second.source_partial_reductions if m2m_first_to_second else []
             partial_red_2 = m2m_second_to_first.source_partial_reductions if m2m_second_to_first else []
@@ -423,40 +551,60 @@ class TensorBusAgent:
             )
 
             local_partial_groups, _ = _order(mesh_1_partial_groups, mesh_2_partial_groups)
-            source_partial_groups = local_partial_groups or None
-            if source_partial_groups:
+            first_partial_groups, second_partial_groups = _order(mesh_1_partial_groups, mesh_2_partial_groups)
+            if local_partial_groups:
                 logger.info(
-                    f"Agent {self.rank}: Created {len(source_partial_groups)} source Partial sub-group(s) "
+                    f"Agent {self.rank}: Created {len(local_partial_groups)} source Partial sub-group(s) "
                     f"for pair '{pair_name}'"
                 )
 
+        dual_endpoint = set(first_ranks) == set(second_ranks)
         state = PairState(
             pair_name=pair_name,
             local_name=local_name,
             local_ranks=local_ranks,
             remote_name=remote_name,
             remote_ranks=remote_ranks,
-            pair_size=expected_local + expected_remote,
+            pair_size=len(first_ranks) + len(second_ranks),
             local_group=local_group,
             pair_group=pair_group,
             local_is_first=local_is_first,
             m2m_send=m2m_map_send,
             m2m_recv=m2m_map_recv,
-            source_partial_groups=source_partial_groups,
+            source_partial_groups=local_partial_groups,
+            dual_endpoint=dual_endpoint,
+            role_ranks={first_name: first_ranks, second_name: second_ranks},
+            role_groups={first_name: first_group, second_name: second_group},
+            role_mesh_shapes={
+                first_name: tuple(first_mesh_tensor.shape) if first_mesh_tensor is not None else (),
+                second_name: tuple(second_mesh_tensor.shape) if second_mesh_tensor is not None else (),
+            },
+            m2m_by_source_role={first_name: m2m_first_to_second, second_name: m2m_second_to_first},
+            partial_by_source_role={
+                first_name: first_partial_groups or None,
+                second_name: second_partial_groups or None,
+            },
         )
         self.pairs[pair_name] = state
+        if dual_endpoint:
+            if not (local_mesh_info and remote_mesh_info):
+                raise ValueError(
+                    f"Agent {self.rank}: Dual-endpoint pair '{pair_name}' requires mesh/placement "
+                    f"payloads from both roles (no-mesh fallback is single-role only)"
+                )
+            logger.info(f"Agent {self.rank}: Pair '{pair_name}' is dual-endpoint (both roles on ranks {first_ranks})")
 
-        # Step 10: Write PairState to State LMDB (for Worker verification)
+        # Write PairState to State LMDB (for Worker verification)
         state_key = f"pair:{pair_name}/state:match".encode()  # LMDB key
         state_bytes = msgspec.msgpack.encode("matched")
         with self.state_env.begin(write=True, db=self.state_db) as txn:
             txn.put(state_key, state_bytes)
-        logger.debug(f"Agent {self.rank}: Wrote PairState to State LMDB")
 
         logger.info(
             f"Agent {self.rank}: Pair '{pair_name}' matched! "
             f"Local '{local_name}': {local_ranks}, Remote '{remote_name}': {remote_ranks}"
         )
+        return True
 
     def _handle_transfer(self, msg: Transfer):
         """Handle Transfer command for batch tensor transfer."""
@@ -469,6 +617,10 @@ class TensorBusAgent:
 
         batch_state = self.batches[batch_id]
 
+        if batch_state.dual:
+            self._execute_dual_transfer(msg, batch_state)
+            return
+
         # Set transfer_signal to notify receiver that sender is ready (before barrier)
         transfer_signal_key = f"batch:{batch_id}/state:transfer_signal"
         if transfer_type == "send":
@@ -480,9 +632,11 @@ class TensorBusAgent:
         dist.barrier(batch_state.batch_group)
         logger.debug(f"Agent {self.rank}: Batch {batch_id}: All ranks synchronized")
 
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
+        cuda_timing = torch.cuda.is_available()
+        if cuda_timing:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
 
         # Execute transfer using the flattened buckets
         if batch_state.send_buckets or batch_state.recv_buckets:
@@ -520,14 +674,72 @@ class TensorBusAgent:
                         torch.distributed.recv(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
                     logger.debug(f"Agent {self.rank}: Batch {batch_id}: Transfered tensor {i}")
 
-        end_event.record()
-        torch.cuda.synchronize()
-        transfer_time_ms = start_event.elapsed_time(end_event)
+        if cuda_timing:
+            end_event.record()
+            torch.cuda.synchronize()
+            transfer_time_ms = start_event.elapsed_time(end_event)
+        else:
+            transfer_time_ms = 0.0
 
         dist.barrier(batch_state.batch_group)
         if transfer_type == "recv":
             self._leader_set(transfer_signal_key, "0", batch_state)
         logger.info(f"Agent {self.rank}: Batch {batch_id}: Transfer complete in {transfer_time_ms:.2f} ms")
+
+    def _execute_dual_transfer(self, msg: Transfer, batch_state: BatchState):
+        """Execute one direction of a dual-endpoint (colocated) batch.
+
+        One agent holds both roles' tensors, so both roles' Transfer commands
+        for a direction arrive on this same agent — the first one executes the
+        direction's buckets (source and target chunks together, in this rank's
+        bucket order, identical on every rank) and the second is a no-op. Both
+        commands keep their client-side semantics: ``send`` from role R and
+        ``recv`` from the other role map to the same (R → other) direction.
+        """
+        batch_id = msg.batch_id
+        if msg.role is None:
+            raise ValueError(
+                f"Batch {batch_id}: dual-endpoint transfer requires the issuing role (Transfer.role); got None"
+            )
+        first_pair = self.pairs[batch_state.pair_names[0]]
+        other_roles = [name for name in first_pair.role_ranks if name != msg.role]
+        if not other_roles:
+            raise ValueError(f"Batch {batch_id}: role '{msg.role}' is not a peer of pair '{first_pair.pair_name}'")
+        other_role = other_roles[0]
+
+        if msg.transfer_type == "send":
+            src_role, dst_role = msg.role, other_role
+        else:
+            src_role, dst_role = other_role, msg.role
+        direction = (src_role, dst_role)
+
+        if batch_state.dual_direction_done.get(direction):
+            logger.info(
+                f"Agent {self.rank}: Batch {batch_id}: direction {src_role}->{dst_role} already executed; skipping"
+            )
+            return
+
+        buckets = batch_state.dual_direction_buckets.get(direction)
+        if buckets is None:
+            raise ValueError(
+                f"Batch {batch_id}: no buckets for direction {src_role}->{dst_role}. "
+                f"Both roles must register before transferring."
+            )
+
+        transfer_signal_key = f"batch:{batch_id}/state:transfer_signal"
+        self._leader_set(transfer_signal_key, "1", batch_state)
+        dist.barrier(batch_state.batch_group)
+
+        logger.info(
+            f"Agent {self.rank}: Batch {batch_id}: Executing dual transfer {src_role}->{dst_role} "
+            f"with {len(buckets)} buckets"
+        )
+        bucket_comm(buckets=buckets)
+        batch_state.dual_direction_done[direction] = True
+
+        dist.barrier(batch_state.batch_group)
+        self._leader_set(transfer_signal_key, "0", batch_state)
+        logger.info(f"Agent {self.rank}: Batch {batch_id}: Dual transfer {src_role}->{dst_role} complete")
 
     def _handle_query_status(self, msg: QueryStatus):
         batch_id = msg.batch_id
@@ -558,6 +770,11 @@ class TensorBusAgent:
         batch_id = msg.batch_id
 
         if batch_id in self.batches:
+            # A dual batch that never reached its second role still parks the
+            # first role's RegisterTensors semaphore — release it here so a
+            # failed batch cannot hang its client.
+            for parked in self.batches[batch_id].pending_register_semaphores:
+                self._release_semaphore(parked)
             del self.batches[batch_id]
             logger.info(f"Agent {self.rank}: Cleaned up batch {batch_id}")
         else:
@@ -566,11 +783,23 @@ class TensorBusAgent:
     def _handle_register_tensors(self, msg: RegisterTensors):
         """Handle RegisterTensors command for batch tensor registration.
 
-        Creates a new BatchState with flattened chunks/buckets across all pairs.
+        Split pairs (one role per agent) keep the legacy path: one BatchState
+        per registration, chunks generated immediately with the rank0 dtype
+        exchange. Dual-endpoint (colocated) pairs merge both roles'
+        registrations into one batch — never overwriting — and generate
+        chunks only once both roles are present: the agent then holds both
+        roles' dtypes locally (no exchange needed; the rank0 P2P exchange
+        would be a self-send on colocated ranks).
+
+        Returns True when the registration completed (batch immediately
+        usable). Returns False when a dual batch still waits for its other
+        role — the command's semaphore is then released at completion by
+        ``_register_dual_role`` (or ``_handle_cleanup_batch``), not here.
         """
         batch_id = msg.batch_id
         tensors = msg.tensors  # list[tuple[str, memoryview]]
         bucket_size = msg.bucket_size
+        role = msg.role
 
         logger.info(f"Agent {self.rank}: Starting batch {batch_id}: {len(tensors)} tensors")
 
@@ -582,6 +811,32 @@ class TensorBusAgent:
             grouped[pair_name].append(tensor_payload)
 
         pair_names = sorted(grouped)
+
+        # A batch is dual-endpoint when any (hence every) pair hosts both
+        # roles on the agent ranks; mixing dual and split pairs in one batch
+        # is rejected — the two paths differ in merge and chunk semantics.
+        pair_dual = {
+            name: (self.pairs[name].dual_endpoint if self.pairs.get(name) is not None else False) for name in pair_names
+        }
+        batch_dual = any(pair_dual.values())
+        if batch_dual and not all(pair_dual.values()):
+            raise _InvalidRegistrationError(f"Batch {batch_id} mixes dual-endpoint and split pairs: {pair_dual}")
+        if batch_dual and role is None:
+            raise _InvalidRegistrationError(
+                f"Batch {batch_id} registers a dual-endpoint pair; RegisterTensors.role is required"
+            )
+        if not batch_dual and role is not None:
+            raise _InvalidRegistrationError(
+                f"Batch {batch_id} has no dual-endpoint pair; RegisterTensors.role must be None"
+            )
+        if batch_dual:
+            for name in pair_names:
+                if role not in self.pairs[name].role_ranks:
+                    raise _InvalidRegistrationError(
+                        f"Batch {batch_id}: role '{role}' is not a peer of pair '{name}' "
+                        f"(peers: {sorted(self.pairs[name].role_ranks)})"
+                    )
+
         pair_layout = []
         local_memberships = set()
         for name in pair_names:
@@ -594,17 +849,33 @@ class TensorBusAgent:
                 membership = tuple(sorted((local_ranks, remote_ranks)))
             pair_layout.append((name, len(grouped[name]), membership))
         local_membership_valid = len(local_memberships) == 1
-        layout = (batch_id, bucket_size, tuple(pair_layout), local_membership_valid)
+        layout = (batch_id, bucket_size, tuple(pair_layout), local_membership_valid, role)
         layouts = [None] * self.world_size
         dist.all_gather_object(layouts, layout, group=dist.group.WORLD)
         memberships = {membership for _, _, membership in pair_layout}
-        if (
-            not pair_names
-            or None in memberships
-            or len(memberships) != 1
-            or not local_membership_valid
-            or any(other != layout for other in layouts)
-        ):
+        if not pair_names or None in memberships or len(memberships) != 1 or not local_membership_valid:
+            raise _InvalidRegistrationError(f"Inconsistent or invalid RegisterTensors layout across ranks: {layouts}")
+
+        if batch_dual:
+            # A single gather sees a role-mixed set: agents may process the
+            # two roles' commands in different orders, so per-role layout
+            # equality is checked across both gathers, at completion.
+            batch_state = self.batches.get(batch_id)
+            if batch_state is None:
+                batch_state = BatchState(
+                    batch_id=batch_id,
+                    pair_names=pair_names,
+                    bucket_size=bucket_size,
+                    dual=True,
+                )
+                self.batches[batch_id] = batch_state
+            gathered = batch_state.dual_gathered_layouts.setdefault(role, {})
+            for idx, other in enumerate(layouts):
+                if other is not None and other[4] == role:
+                    gathered[idx] = other[:4]
+            return self._register_dual_role(batch_state, grouped, role, msg.semaphore_name)
+
+        if any(other != layout for other in layouts):
             raise _InvalidRegistrationError(f"Inconsistent or invalid RegisterTensors layout across ranks: {layouts}")
 
         batch_state = BatchState(
@@ -731,16 +1002,161 @@ class TensorBusAgent:
             f"Agent {self.rank}: Batch {batch_id}: Registration complete - "
             f"{len(tensors)} tensors across {len(grouped)} pairs"
         )
+        return True
+
+    def _register_dual_role(
+        self, batch_state: BatchState, grouped: dict[str, list[memoryview]], role: str, semaphore_name: str | None
+    ) -> bool:
+        """Merge one role's registration into a dual-endpoint batch.
+
+        Chunks are generated once both roles are present for every pair of
+        the batch (see _generate_dual_buckets). Returns True when generation
+        ran; False when the batch still waits for the other role, in which
+        case ``semaphore_name`` is parked on the batch for release at
+        completion (the caller must not release it).
+        """
+        batch_id = batch_state.batch_id
+
+        first_pair = self.pairs[batch_state.pair_names[0]]
+        first_name = min(first_pair.role_ranks)  # canonical, same on every agent
+        batch_state.local_leader = sorted(first_pair.role_ranks[first_name])[0]
+        batch_state.local_group = first_pair.role_groups[first_name]
+        batch_state.batch_group = first_pair.pair_group
+
+        for pair_name in batch_state.pair_names:
+            if (pair_name, role) in batch_state.pair_role_tensors:
+                raise _InvalidRegistrationError(
+                    f"Batch {batch_id}: role '{role}' already registered for pair '{pair_name}'; "
+                    f"dual-endpoint batches merge roles and never overwrite"
+                )
+            tensors_role = [ForkingPickler.loads(payload) for payload in grouped[pair_name]]
+            batch_state.pair_role_tensors[(pair_name, role)] = tensors_role
+            batch_state.pair_role_dtypes[(pair_name, role)] = [t.dtype for t in tensors_role]
+            logger.info(
+                f"Agent {self.rank}: Batch {batch_id}: Registered {len(tensors_role)} tensors for "
+                f"pair '{pair_name}' role '{role}'"
+            )
+
+        # Both roles present for every pair?
+        for pair_name in batch_state.pair_names:
+            roles_present = {r for (p, r) in batch_state.pair_role_tensors if p == pair_name}
+            if len(roles_present) < 2:
+                logger.info(
+                    f"Agent {self.rank}: Batch {batch_id}: waiting for the other role of pair "
+                    f"'{pair_name}' (have {roles_present})"
+                )
+                if semaphore_name:
+                    batch_state.pending_register_semaphores.append(semaphore_name)
+                return False
+
+        # Cross-gather layout equality, per role, now that both gathers ran.
+        for r, signatures in batch_state.dual_gathered_layouts.items():
+            if len(signatures) != self.world_size:
+                raise _InvalidRegistrationError(
+                    f"Batch {batch_id}: role '{r}' layout gathered from {len(signatures)}/{self.world_size} "
+                    f"agents — every agent must register every role of a dual batch"
+                )
+            reference = next(iter(signatures.values()))
+            if any(sig != reference for sig in signatures.values()):
+                raise _InvalidRegistrationError(
+                    f"Batch {batch_id}: inconsistent layout across ranks for role '{r}': {signatures}"
+                )
+
+        self._generate_dual_buckets(batch_state)
+        for parked in batch_state.pending_register_semaphores:
+            self._release_semaphore(parked)
+        batch_state.pending_register_semaphores.clear()
+        return True
+
+    def _generate_dual_buckets(self, batch_state: BatchState):
+        """Generate per-direction buckets for a fully-registered dual batch.
+
+        For each direction (src_role -> dst_role) every tensor index produces
+        source chunks and target chunks from the same map in one call, so the
+        same-rank overlap surfaces as LOCAL chunks. Order is canonical (pairs
+        sorted, direction by source-role name, tensors in registration order)
+        and identical on every rank.
+        """
+        batch_id = batch_state.batch_id
+        coalesce_bytes = batch_state.bucket_size or 1
+
+        # Both directions may broadcast; create the union of groups before any
+        # direction can first-touch one (same contract as the split path).
+        prewarm_broadcast_groups(
+            m2m
+            for pair_name in batch_state.pair_names
+            for m2m in (self.pairs[pair_name].m2m_by_source_role or {}).values()
+        )
+
+        for pair_name in batch_state.pair_names:
+            pair = self.pairs[pair_name]
+            for src_role in sorted(pair.m2m_by_source_role):
+                dst_roles = [name for name in pair.m2m_by_source_role if name != src_role]
+                if not dst_roles:
+                    raise ValueError(f"Pair '{pair_name}' has a single peer name; not dual")
+                dst_role = dst_roles[0]
+                m2m = pair.m2m_by_source_role[src_role]
+                if m2m is None:
+                    logger.info(
+                        f"Agent {self.rank}: Batch {batch_id}: no map for direction "
+                        f"{src_role}->{dst_role} (Partial target unsupported); direction disabled"
+                    )
+                    batch_state.dual_direction_buckets[(src_role, dst_role)] = []
+                    continue
+                partials = (pair.partial_by_source_role or {}).get(src_role)
+                src_tensors = batch_state.pair_role_tensors[(pair_name, src_role)]
+                dst_tensors = batch_state.pair_role_tensors[(pair_name, dst_role)]
+                src_dtypes = batch_state.pair_role_dtypes[(pair_name, src_role)]
+                dst_dtypes = batch_state.pair_role_dtypes[(pair_name, dst_role)]
+                if len(src_tensors) != len(dst_tensors):
+                    raise _InvalidRegistrationError(
+                        f"Batch {batch_id}: pair '{pair_name}' role tensor-count mismatch: "
+                        f"{src_role}={len(src_tensors)}, {dst_role}={len(dst_tensors)}"
+                    )
+
+                chunks: list[Chunk] = []
+                for i in range(len(src_tensors)):
+                    # Wire dtype: min(itemsize) of the two roles, source side casts
+                    if src_dtypes[i].itemsize <= dst_dtypes[i].itemsize:
+                        transfer_dtype = src_dtypes[i]
+                    else:
+                        transfer_dtype = dst_dtypes[i]
+                    chunks.extend(
+                        m2m_to_chunks(
+                            m2m,
+                            rank=self.rank,
+                            source_tensor=src_tensors[i],
+                            target_tensor=dst_tensors[i],
+                            transfer_dtype=transfer_dtype,
+                            source_partial_groups=partials,
+                        )
+                    )
+                batch_state.dual_direction_buckets[(src_role, dst_role)] = chunk_to_bucket_ops(
+                    chunks=chunks, bucket_size=coalesce_bytes
+                )
+                logger.info(
+                    f"Agent {self.rank}: Batch {batch_id}: pair '{pair_name}' direction "
+                    f"{src_role}->{dst_role}: {len(batch_state.dual_direction_buckets[(src_role, dst_role)])} buckets"
+                )
+
+        logger.info(
+            f"Agent {self.rank}: Batch {batch_id}: Dual registration complete - "
+            f"directions: {sorted(batch_state.dual_direction_buckets)}"
+        )
 
     def _collect_mesh_placement_info(
-        self, pair_name: str, ranks: list[int]
+        self, pair_name: str, ranks: list[int], name: str
     ) -> list[tuple[tuple[int, ...], tuple[Placement, ...]]]:
-        """Collect mesh shape and placement info from ranks."""
+        """Collect one side's mesh shape and placement info from its ranks.
+
+        ``name`` selects the side (peer name): mesh metadata keys carry the
+        peer name so a dual-endpoint agent can hold both sides' meshes.
+        """
         mesh_info_list = []
 
         for rank in ranks:
-            mesh_shape_key = f"pair:{pair_name}/rank:{rank}/mesh_shape"
-            placements_key = f"pair:{pair_name}/rank:{rank}/placements"
+            mesh_shape_key = f"pair:{pair_name}/rank:{rank}/{name}/mesh_shape"
+            placements_key = f"pair:{pair_name}/rank:{rank}/{name}/placements"
 
             mesh_shape_bytes = self.store.get_bytes(mesh_shape_key)
             placements_bytes = self.store.get_bytes(placements_key)

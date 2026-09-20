@@ -55,7 +55,11 @@ class BatchHandler:
         return client
 
     def transfer(
-        self, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
+        self,
+        transfer_type: Literal["send", "recv"],
+        blocking: bool = False,
+        timeout: float = 30.0,
+        role: str | None = None,
     ) -> posix_ipc.Semaphore:
         """Transfer all tensors in this batch atomically.
 
@@ -66,11 +70,14 @@ class BatchHandler:
             transfer_type: "send" or "recv"
             blocking: If True, block until transfer completes
             timeout: Timeout in seconds
+            role: Issuing side's peer name — required on dual-endpoint
+                (colocated) batches, where one agent hosts both sides; ignored
+                on split (single-role) batches.
 
         Returns:
             Semaphore for operation completion
         """
-        msg = Transfer(batch_id=self.batch_id, transfer_type=transfer_type)
+        msg = Transfer(batch_id=self.batch_id, transfer_type=transfer_type, role=role)
         return self.client._execute_command_with_semaphore(
             msg, "transfer", context_id=f"batch_{self.batch_id}_{transfer_type}", blocking=blocking, timeout=timeout
         )
@@ -265,9 +272,14 @@ class TensorBusClient:
         logger.info(f"TensorBusClient[{self.agent_rank}]: Pair '{pair_name}' registered successfully")
 
     def transfer(
-        self, batch_id: str, transfer_type: Literal["send", "recv"], blocking: bool = False, timeout: float = 30.0
+        self,
+        batch_id: str,
+        transfer_type: Literal["send", "recv"],
+        blocking: bool = False,
+        timeout: float = 30.0,
+        role: str | None = None,
     ) -> posix_ipc.Semaphore:
-        msg = Transfer(batch_id=batch_id, transfer_type=transfer_type)
+        msg = Transfer(batch_id=batch_id, transfer_type=transfer_type, role=role)
         logger.debug(
             f"TensorBusClient[{self.agent_rank}]: Sending transfer command for pair '{batch_id} {transfer_type}'"
         )
@@ -305,6 +317,7 @@ class TensorBusClient:
         tensors: list[tuple[torch.Tensor, str]],
         bucket_size: int | None = None,
         timeout: float = 30.0,
+        role: str | None = None,
     ) -> BatchHandler:
         """Register multiple tensors across pairs.
 
@@ -316,13 +329,17 @@ class TensorBusClient:
             tensors: list of (tensor, pair_name) tuples
             bucket_size: optional bucket size in bytes for bucketization optimization
             timeout: timeout in seconds
+            role: peer name of the registering side — required when a pair in
+                this batch is dual-endpoint (colocated); both sides register
+                into the same batch on the same agent and the role tells them
+                apart. Split pairs leave it None.
 
         Returns:
             BatchHandler for managing the registered tensors
         """
         tensor_tuples = [(pair_name, (ForkingPickler.dumps(tensor.detach()))) for tensor, pair_name in tensors]
 
-        msg = RegisterTensors(batch_id=batch_id, tensors=tensor_tuples, bucket_size=bucket_size)
+        msg = RegisterTensors(batch_id=batch_id, tensors=tensor_tuples, bucket_size=bucket_size, role=role)
 
         self._execute_command_with_semaphore(
             msg, "register_tensors", context_id=f"batch_{batch_id}", blocking=True, timeout=timeout

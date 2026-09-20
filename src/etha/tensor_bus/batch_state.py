@@ -41,3 +41,28 @@ class BatchState:
 
     # Configuration
     bucket_size: int | None = None
+
+    # --- Dual-endpoint (colocated) state --------------------------------------
+    # A dual batch is registered twice on the same agent — once per role. The
+    # two registrations merge (never overwrite) into the structures below;
+    # chunks/buckets are generated only once both roles are present, because
+    # the wire dtype needs both sides and the wire ops live in physical rank
+    # space shared by both roles.
+    dual: bool = False
+    # (pair_name, role) -> that role's registered tensors, in registration order
+    pair_role_tensors: dict[tuple[str, str], list[torch.Tensor]] = field(default_factory=dict)
+    # (pair_name, role) -> per-tensor dtypes (needed for min-itemsize wire dtype)
+    pair_role_dtypes: dict[tuple[str, str], list[torch.dtype]] = field(default_factory=dict)
+    # (src_role, dst_role) -> flattened buckets for that direction; executed
+    # once per direction by whichever Transfer command arrives first
+    dual_direction_buckets: dict[tuple[str, str], list[Bucket]] = field(default_factory=dict)
+    # (src_role, dst_role) -> True once that direction has been executed here
+    dual_direction_done: dict[tuple[str, str], bool] = field(default_factory=dict)
+    # role -> {agent_rank: layout signature} accumulated across this batch's
+    # registration gathers, so per-role layout equality can be checked once
+    # both roles have registered (a single gather sees a role-mixed set)
+    dual_gathered_layouts: dict[str, dict[int, tuple]] = field(default_factory=dict)
+    # Semaphores of RegisterTensors commands that returned while the batch was
+    # still waiting for its other role; released when the second role completes
+    # generation (or by CleanupBatch, so a failed batch cannot hang a client)
+    pending_register_semaphores: list[str] = field(default_factory=list)

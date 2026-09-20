@@ -99,21 +99,26 @@ def m2m_to_chunks(
                     src_idx, source_num_slicers_extended, source_slicer_tuples
                 )
 
-            chunks.append(
-                Chunk(
-                    chunk_shape=calculate_chunk_shape(source_num_slicers_extended, source_tensor_shape),
-                    transport=transport,
-                    is_source=True,
-                    is_target=False,
-                    src_rank=rank,
-                    src_idx=src_idx,
-                    dst_ranks=dst_ranks,
-                    src_slice=src_slice_tuples,
-                    tensor=source_tensor,
-                    transfer_dtype=transfer_dtype,
-                    source_partial_groups=source_partial_groups,
+            # Colocated refinement: a P2P route whose only destination is this
+            # rank itself needs no wire op — the LOCAL chunk emitted below covers
+            # it in-process, and an isend to self would never match.
+            self_p2p = transport == Transport.P2P and dst_ranks == (rank,)
+            if not self_p2p:
+                chunks.append(
+                    Chunk(
+                        chunk_shape=calculate_chunk_shape(source_num_slicers_extended, source_tensor_shape),
+                        transport=transport,
+                        is_source=True,
+                        is_target=False,
+                        src_rank=rank,
+                        src_idx=src_idx,
+                        dst_ranks=dst_ranks,
+                        src_slice=src_slice_tuples,
+                        tensor=source_tensor,
+                        transfer_dtype=transfer_dtype,
+                        source_partial_groups=source_partial_groups,
+                    )
                 )
-            )
         for dst in route.dsts:
             dst_rank = dst.rank
             dst_idx = dst.cell
@@ -126,6 +131,10 @@ def m2m_to_chunks(
                 )
             if src_rank == rank:
                 # dst landed on the source rank: read source, write target locally.
+                # Colocated meshes make this the common case — the source and
+                # target are two different tensors on the same rank, so the chunk
+                # carries both (src_tensor); single-tensor self-copy keeps
+                # src_tensor=None and reads/writes ``tensor``.
                 chunks.append(
                     Chunk(
                         chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
@@ -139,6 +148,7 @@ def m2m_to_chunks(
                         src_slice=src_slice_tuples,
                         dst_slice=dst_slice_tuples,
                         tensor=target_tensor,
+                        src_tensor=source_tensor,
                     )
                 )
             else:

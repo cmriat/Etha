@@ -24,10 +24,18 @@ class BaseCommand(msgspec.Struct, tag=True, kw_only=True):
 
 
 class Transfer(BaseCommand):
-    """Transfer tensor command for a specific batch."""
+    """Transfer tensor command for a specific batch.
+
+    On a dual-endpoint (colocated) batch the agent hosts both sides of the
+    pair, so the command alone cannot tell which side issued it: ``role`` names
+    the issuing client's side (its ``init_pair`` ``local_name``). ``send`` from
+    role R executes the R→other direction; ``recv`` from role R executes the
+    other→R direction. Split (single-role) agents leave it None.
+    """
 
     batch_id: str
     transfer_type: Literal["send", "recv"]
+    role: str | None = None
 
 
 class RegisterTensors(BaseCommand):
@@ -36,11 +44,17 @@ class RegisterTensors(BaseCommand):
     Creates a new batch with a unique batch_id. Multiple tensors can be
     registered across different pairs in a single batch, enabling efficient
     cross-pair execution via flattened chunks/buckets.
+
+    ``role`` is required when a pair of the batch is dual-endpoint (colocated):
+    both sides of the pair register into the same batch on the same agent, and
+    the role names which side this registration's tensors belong to. It must
+    match one of the pair's peer names. Split pairs leave it None.
     """
 
     batch_id: str
     tensors: list[tuple[str, memoryview]]  # (pair_name, tensor_payload)
     bucket_size: int | None = None  # Optional bucket size in bytes
+    role: str | None = None
 
 
 class InitPair(BaseCommand):
