@@ -5,6 +5,11 @@ from typing import Literal
 import msgspec
 
 
+def command_error_key(semaphore_name: str) -> bytes:
+    """LMDB key used to report a command failure to its waiting client."""
+    return f"command:{semaphore_name}:error".encode()
+
+
 class BaseCommand(msgspec.Struct, tag=True, kw_only=True):
     """Base class for all Tensor Bus commands.
 

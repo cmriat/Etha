@@ -11,9 +11,9 @@ def get_or_create_process_group(ranks: list[int]) -> dist.ProcessGroup:
 
     Uses caching to avoid repeated dist.new_group() calls.
     Process groups must be created in same order on all ranks (PyTorch requirement).
-    The cache key uses sorted ranks to ensure consistency.
+    The cache key uses sorted, unique ranks to ensure consistency.
     """
-    key = tuple(sorted(ranks))
+    key = tuple(sorted(set(ranks)))
     if key not in _PROCESS_GROUP_CACHE:
         _PROCESS_GROUP_CACHE[key] = dist.new_group(ranks=list(key))
     return _PROCESS_GROUP_CACHE[key]

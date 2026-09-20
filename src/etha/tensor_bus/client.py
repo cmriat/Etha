@@ -21,7 +21,7 @@ import posix_ipc
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
-from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors
+from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors, command_error_key
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
@@ -169,6 +169,7 @@ class TensorBusClient:
         if blocking:
             try:
                 sem.acquire(timeout=timeout)
+                self._raise_command_error(sem_name, command_type, context_id)
                 logger.debug(
                     f"TensorBusClient[{self.agent_rank}]: {command_type} completed for context '{context_id}' with semaphore {sem_name}"
                 )
@@ -180,6 +181,17 @@ class TensorBusClient:
                 sem.close()
 
         return sem
+
+    def _raise_command_error(self, semaphore_name: str, command_type: str, context_id: str) -> None:
+        if self.state_env is None:
+            raise RuntimeError("State environment not initialized")
+        with self.state_env.begin(db=self.state_db) as txn:
+            error_bytes = txn.get(command_error_key(semaphore_name))
+        if error_bytes is not None:
+            error = msgspec.msgpack.Decoder(str).decode(error_bytes)
+            raise RuntimeError(
+                f"TensorBusClient[{self.agent_rank}]: {command_type} failed for context '{context_id}': {error}"
+            )
 
     def init_pair(
         self,
@@ -308,9 +320,6 @@ class TensorBusClient:
         Returns:
             BatchHandler for managing the registered tensors
         """
-        if not tensors:
-            raise ValueError("tensors list cannot be empty")
-
         tensor_tuples = [(pair_name, (ForkingPickler.dumps(tensor.detach()))) for tensor, pair_name in tensors]
 
         msg = RegisterTensors(batch_id=batch_id, tensors=tensor_tuples, bucket_size=bucket_size)
