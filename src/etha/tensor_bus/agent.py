@@ -34,7 +34,14 @@ from etha.pg_utils import get_or_create_process_group
 from etha.comm.utils import enumerate_partial_subgroup_ranks
 
 from .utils import setup_cuda_rebuild_patch
-from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors
+from .commands import (
+    InitPair,
+    Transfer,
+    QueryStatus,
+    CleanupBatch,
+    RegisterTensors,
+    command_error_key,
+)
 from .pair_state import PairState
 from .batch_state import BatchState
 from .command_queue import CommandQueue
@@ -42,6 +49,10 @@ from .command_queue import CommandQueue
 logger = logging.getLogger(__name__)
 
 TIME_INTERVAL = 0.001  # 1ms
+
+
+class _InvalidRegistrationError(ValueError):
+    """Registration rejection that is safe to report without stopping the agent."""
 
 
 def _create_partial_groups(
@@ -196,9 +207,11 @@ class TensorBusAgent:
 
         except Exception as e:
             logger.error(f"Agent {self.rank}: Error handling command {type(command)}: {e} {traceback.format_exc()}")
-            # Still try to release semaphore even on error to avoid client hanging
             if command.semaphore_name:
+                self._record_command_error(command.semaphore_name, e)
                 self._release_semaphore(command.semaphore_name)
+                if isinstance(e, _InvalidRegistrationError):
+                    return
             raise
 
     def _handle_init_pair(self, msg: InitPair):
@@ -560,15 +573,30 @@ class TensorBusAgent:
             grouped[pair_name].append(tensor_payload)
 
         pair_names = sorted(grouped)
-        layout = (
-            batch_id,
-            bucket_size,
-            tuple((name, len(grouped[name]), name in self.pairs) for name in pair_names),
-        )
+        pair_layout = []
+        local_memberships = set()
+        for name in pair_names:
+            pair = self.pairs.get(name)
+            membership = None
+            if pair is not None:
+                local_ranks = tuple(sorted(pair.local_ranks))
+                remote_ranks = tuple(sorted(pair.remote_ranks))
+                local_memberships.add((local_ranks, remote_ranks))
+                membership = tuple(sorted((local_ranks, remote_ranks)))
+            pair_layout.append((name, len(grouped[name]), membership))
+        local_membership_valid = len(local_memberships) == 1
+        layout = (batch_id, bucket_size, tuple(pair_layout), local_membership_valid)
         layouts = [None] * self.world_size
         dist.all_gather_object(layouts, layout, group=dist.group.WORLD)
-        if not pair_names or not all(known for _, _, known in layout[2]) or any(other != layout for other in layouts):
-            raise ValueError(f"Inconsistent or invalid RegisterTensors layout across ranks: {layouts}")
+        memberships = {membership for _, _, membership in pair_layout}
+        if (
+            not pair_names
+            or None in memberships
+            or len(memberships) != 1
+            or not local_membership_valid
+            or any(other != layout for other in layouts)
+        ):
+            raise _InvalidRegistrationError(f"Inconsistent or invalid RegisterTensors layout across ranks: {layouts}")
 
         batch_state = BatchState(
             batch_id=batch_id,
@@ -577,18 +605,9 @@ class TensorBusAgent:
         )
         self.batches[batch_id] = batch_state
 
-        # Validate all pairs have same local_ranks and remote_ranks, set batch-level groups
+        # The gathered membership signature above validates that every pair
+        # spans the same two sides before any batch state or process group is created.
         first_pair = self.pairs[batch_state.pair_names[0]]
-        first_local_ranks = set(first_pair.local_ranks)
-        first_remote_ranks = set(first_pair.remote_ranks)
-
-        for pair_name in batch_state.pair_names[1:]:
-            pair = self.pairs[pair_name]
-            if set(pair.local_ranks) != first_local_ranks or set(pair.remote_ranks) != first_remote_ranks:
-                raise ValueError(
-                    f"Batch {batch_id}: pair '{pair_name}' has different ranks"
-                    f"({pair.local_ranks}, {pair.remote_ranks}) than first pair ({first_pair.local_ranks}, {first_pair.remote_ranks})"
-                )
 
         batch_state.local_leader = sorted(first_pair.local_ranks)[0]
         batch_state.local_group = first_pair.local_group
@@ -775,6 +794,11 @@ class TensorBusAgent:
         result = [value]
         dist.broadcast_object_list(result, src=batch.local_leader, group=batch.local_group)
         return result[0]
+
+    def _record_command_error(self, semaphore_name: str, error: Exception) -> None:
+        payload = f"{type(error).__name__}: {error}"
+        with self.state_env.begin(write=True, db=self.state_db) as txn:
+            txn.put(command_error_key(semaphore_name), msgspec.msgpack.encode(payload))
 
     def _release_semaphore(self, semaphore_name: str):
         try:

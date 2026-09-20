@@ -3,7 +3,7 @@
 import os
 import time
 import socket
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -14,6 +14,7 @@ from torch.distributed._tensor import Shard, Replicate, DeviceMesh, distribute_t
 import etha.pg_utils as pg_utils
 import etha.comm.transfer as transfer_module
 import etha.tensor_bus.agent as agent_module
+import etha.tensor_bus.client as client_module
 from etha.comm import M2MMap, bucket_comm, get_m2m_map, m2m_to_chunks, chunk_to_bucket_ops, prewarm_broadcast_groups
 from etha.comm.ir import Route, Endpoint
 from etha.comm.transfer import Transport
@@ -114,6 +115,12 @@ def test_agent_validates_layout_and_prewarms_before_chunks(monkeypatch):
     assert events == [("prewarm", expected_maps), *(("chunks", m2m) for m2m in expected_maps)]
 
     events.clear()
+    pair_b = agent.pairs["pair_b"]
+    pair_b.local_ranks, pair_b.remote_ranks = [1], [0]
+    with pytest.raises(ValueError, match="Inconsistent or invalid RegisterTensors layout"):
+        agent_module.TensorBusAgent._handle_register_tensors(agent, message)
+    pair_b.local_ranks, pair_b.remote_ranks = [0], [1]
+    assert events == []
 
     def gather_mismatch(layouts, layout, **_kwargs):
         layouts[:] = [layout, ("different",)]
@@ -122,6 +129,71 @@ def test_agent_validates_layout_and_prewarms_before_chunks(monkeypatch):
     with pytest.raises(ValueError, match="Inconsistent or invalid RegisterTensors layout"):
         agent_module.TensorBusAgent._handle_register_tensors(agent, message)
     assert events == []
+
+    reported = []
+    message.semaphore_name = "/registration-test"
+    agent._handle_register_tensors = MethodType(agent_module.TensorBusAgent._handle_register_tensors, agent)
+    agent._record_command_error = lambda name, error: reported.append(("error", name, str(error)))
+    agent._release_semaphore = lambda name: reported.append(("release", name))
+    agent_module.TensorBusAgent._execute_command(agent, message)
+    assert reported[0][:2] == ("error", message.semaphore_name)
+    assert reported[1] == ("release", message.semaphore_name)
+
+
+def test_empty_registration_reaches_agent_error_channel(monkeypatch):
+    state = {}
+
+    class Transaction:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, key):
+            return state.get(key)
+
+        def put(self, key, value):
+            state[key] = value
+
+    class StateEnv:
+        def begin(self, **_kwargs):
+            return Transaction()
+
+    class Semaphore:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def acquire(self, **_kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    writer = SimpleNamespace(state_env=StateEnv(), state_db=object())
+
+    class Queue:
+        message = None
+
+        def enqueue(self, message):
+            self.message = message
+            agent_module.TensorBusAgent._record_command_error(
+                writer,
+                message.semaphore_name,
+                agent_module._InvalidRegistrationError("empty registration"),
+            )
+
+    queue = Queue()
+    client = client_module.TensorBusClient.__new__(client_module.TensorBusClient)
+    client.agent_rank = 0
+    client.command_queue = queue
+    client.state_env = writer.state_env
+    client.state_db = writer.state_db
+    monkeypatch.setattr(client_module.posix_ipc, "Semaphore", Semaphore)
+
+    with pytest.raises(RuntimeError, match="register_tensors failed.*empty registration"):
+        client.register_tensors("batch", [], timeout=1)
+    assert queue.message.tensors == []
 
 
 def _run_bidirectional_broadcast(rank: int):
@@ -166,6 +238,21 @@ def _run_bidirectional_broadcast(rank: int):
         assert torch.equal(reverse_target.full_tensor(), tensor_b)
     else:
         assert torch.equal(forward_target.full_tensor(), tensor_a)
+
+    ranks_a = list(range(mesh_size))
+    ranks_b = list(range(mesh_size, world_size))
+    local_ranks, remote_ranks = (ranks_a, ranks_b) if is_a else (ranks_b, ranks_a)
+    invalid_agent = SimpleNamespace(
+        rank=rank,
+        world_size=world_size,
+        batches={},
+        pairs={"pair": SimpleNamespace(local_ranks=local_ranks, remote_ranks=remote_ranks)},
+    )
+    invalid_tensors = [] if rank == 0 else [("pair", memoryview(b"tensor"))]
+    invalid_message = agent_module.RegisterTensors(batch_id="invalid", tensors=invalid_tensors)
+    with pytest.raises(ValueError, match="Inconsistent or invalid RegisterTensors layout"):
+        agent_module.TensorBusAgent._handle_register_tensors(invalid_agent, invalid_message)
+    dist.barrier()
     dist.destroy_process_group()
 
 
