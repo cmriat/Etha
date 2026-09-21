@@ -108,6 +108,23 @@ class BatchHandler:
             self.batch_id, blocking=blocking, timeout=timeout, sync_round=sync_round
         )
 
+    def query_transfer_request(
+        self,
+        direction: tuple[str, str],
+        blocking: bool = True,
+        timeout: float = 30.0,
+        sync_round: int = 0,
+    ) -> bool:
+        """Has the (src -> dst) direction of this dual batch requested round r?
+
+        True once the agent saw the direction-round's FIRST command — before
+        it parks. A reactive recv issuer polls this (quiesce, then issue the
+        matching ``sync_round`` recv); see ``TensorBusClient.query_transfer_request``.
+        """
+        return self.client.query_transfer_request(
+            self.batch_id, direction=direction, blocking=blocking, timeout=timeout, sync_round=sync_round
+        )
+
     def close(self, blocking: bool = True, timeout: float = 30.0):
         """Explicitly cleanup batch state in agent.
 
@@ -454,6 +471,39 @@ class TensorBusClient:
             f"Agent at {path} is not responding after {timeout}s. "
             f"Heartbeat is too old or missing. Agent may have crashed."
         )
+
+    def query_transfer_request(
+        self,
+        batch_id: str,
+        direction: tuple[str, str],
+        blocking: bool = True,
+        timeout: float = 30.0,
+        sync_round: int = 0,
+    ) -> bool:
+        """Has the (src -> dst) direction of a dual batch requested round r?
+
+        The agent publishes the request when the direction-round's FIRST
+        command arrives — before that command parks. True once the requested
+        round is ``sync_round`` or later; the value is monotonic and never
+        resets, so a polling watcher cannot miss it. A reactive recv issuer
+        (engine service) polls this, quiesces, and only then issues the
+        matching ``sync_round`` recv — the completion signal must never drive
+        the START of a recv.
+        """
+        state_name = f"transfer_request_round:{direction[0]}->{direction[1]}"
+        query_msg = QueryStatus(batch_id=batch_id, state_name=state_name)
+        logger.debug(f"TensorBusClient[{self.agent_rank}]: Query {state_name} for batch '{batch_id}'")
+        self._execute_command_with_semaphore(
+            query_msg, "query", context_id=f"batch_{batch_id}", blocking=blocking, timeout=timeout
+        )
+
+        if self.state_env is None:
+            raise RuntimeError("State environment is not initialized")
+        state_key = f"batch:{batch_id}/state:{state_name}".encode()
+        with self.state_env.begin(db=self.state_db) as txn:
+            state_bytes = txn.get(state_key)
+        requested = msgspec.msgpack.Decoder(int).decode(state_bytes) if state_bytes else -1
+        return requested >= sync_round
 
     def close(self):
         """Cleanup resources."""

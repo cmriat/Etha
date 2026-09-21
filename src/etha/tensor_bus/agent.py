@@ -198,6 +198,15 @@ class TensorBusAgent:
         # is polled from the main loop so one agent can drive both roles of a
         # colocated pair concurrently.
         self.pending_pairs: dict[str, _PendingPair] = {}
+        # Cursor into the store-backed completion log (see _poll_pending_pairs):
+        # the index of the last log entry this rank consumed. Every rank
+        # consumes the same log, so the sequence of _complete_pair calls — and
+        # therefore of process-group creations — is identical on every rank.
+        # ``_completion_log_len`` is the leader-only write index (the leader
+        # also consumes; the two counters must not be shared or its consume
+        # loop would skip the entries it just wrote).
+        self._completion_cursor = 0
+        self._completion_log_len = 0
 
         setup_cuda_rebuild_patch()
 
@@ -381,16 +390,84 @@ class TensorBusAgent:
         return expected, sorted(present)[:expected]
 
     def _poll_pending_pairs(self):
-        """Complete pending pairs whose rendezvous is fully visible.
+        """Complete pending pairs in one globally-serialized order.
 
-        Iterated in sorted(pair_name) order — NOT insertion order — so every
-        agent completes completable pairs in the same sequence regardless of
-        when each pair's InitPair commands reached it. ``new_group`` is
-        WORLD-collective; two agents that completed the same set of pairs in
-        different orders could otherwise interleave group bootstraps and hang.
+        ``dist.new_group`` names new groups by a per-process counter, so every
+        rank must create its groups in the SAME sequence or two ranks wire
+        different memberships to the same group name. A per-rank
+        ``sorted(ready-set)`` is not enough: readiness is store-derived and
+        monotonic, but two ranks polling at different instants can hold
+        different ready sets (rank A saw only pair X ready and completed it;
+        rank B polled after Y also became ready and, when name order opposes
+        readiness order, completes Y first) — the sequences then diverge.
+        Completion order is therefore serialized through the store by the
+        WORLD leader: it appends newly-ready pairs to a monotonic log
+        (``pair_completion:entry:{n}``, append is store-only and never blocks
+        inside a collective), and every rank — the leader included — consumes
+        entries in index order and completes exactly that sequence.
+
+        Assumes every rank received an InitPair for every pair of its world
+        (the registration layout check already requires this); an entry for a
+        pair this rank never saw is skipped, matching the previous behavior
+        for non-member ranks.
+        """
+        if not self.pending_pairs:
+            return
+        if self.rank == 0:
+            self._append_ready_pairs_to_log()
+        self._consume_completion_log()
+
+    def _pair_ready(self, pending: _PendingPair) -> bool:
+        """True when both sides of the pair are fully visible in the store."""
+        return all(
+            self._check_side_ready(pending.pair_name, name) is not None
+            for name in (pending.local_name, pending.remote_name)
+        )
+
+    def _append_ready_pairs_to_log(self):
+        """Leader-only: append newly-ready pairs to the completion log.
+
+        Appended in sorted order among simultaneously-ready pairs, so the log
+        sequence is a deterministic function of the store state. Store writes
+        only — this must stay collective-free: the leader may be blocked
+        inside a previous entry's ``new_group`` rendezvous, and other ranks
+        must still be able to read the entries already written.
         """
         for pair_name in sorted(self.pending_pairs):
-            pending = self.pending_pairs[pair_name]
+            marker = f"pair_completion:logged:{pair_name}"
+            if self.store.get(marker) is not None:
+                continue
+            if not self._pair_ready(self.pending_pairs[pair_name]):
+                continue
+            self._completion_log_len += 1
+            self.store.set(f"pair_completion:entry:{self._completion_log_len}", pair_name)
+            self.store.set(marker, "1")
+            logger.info(f"Agent {self.rank}: completion log entry {self._completion_log_len}: pair '{pair_name}'")
+
+    def _consume_completion_log(self):
+        """Complete pairs strictly in completion-log order on every rank."""
+        while True:
+            raw = self.store.get(f"pair_completion:entry:{self._completion_cursor + 1}")
+            if raw is None:
+                return
+            self._completion_cursor += 1
+            pair_name = raw.decode()
+            pending = self.pending_pairs.get(pair_name)
+            if pending is None:
+                # This rank never received the pair's InitPair (non-member);
+                # it creates no groups for it — same as before the log.
+                #
+                # The skip cannot drop a merely-QUEUED InitPair: the keys the
+                # leader's readiness check reads are written only by THIS
+                # rank's agent, inside _handle_init_pair, strictly before its
+                # pending insertion (same thread, no gap that yields). So
+                # keys-visible ⇒ this rank already processed the command ⇒
+                # pending exists by the time this loop can consume the entry
+                # (the consumer runs in that same thread, only after the
+                # handler returned). A rank with the command still queued has
+                # no keys in the store, so the pair is not ready and no entry
+                # names it yet.
+                continue
             try:
                 completed = self._complete_pair(pending)
             except Exception as e:
@@ -403,10 +480,21 @@ class TensorBusAgent:
                     self._release_semaphore(semaphore_name)
                 self.pending_pairs.pop(pair_name, None)
                 raise
-            if completed:
+            if not completed:
+                # Unreachable for a logged pair (readiness is monotonic and
+                # the leader logged it ready) — fail closed rather than leave
+                # the parked InitPair clients hanging on a popped entry.
+                error = RuntimeError(
+                    f"Agent {self.rank}: logged pair '{pair_name}' no longer ready at completion"
+                )
                 for semaphore_name in pending.all_semaphores():
+                    self._record_command_error(semaphore_name, error)
                     self._release_semaphore(semaphore_name)
                 self.pending_pairs.pop(pair_name, None)
+                raise error
+            for semaphore_name in pending.all_semaphores():
+                self._release_semaphore(semaphore_name)
+            self.pending_pairs.pop(pair_name, None)
 
     def _complete_pair(self, pending: _PendingPair) -> bool:
         """Run the old blocking InitPair tail against the current store state.
@@ -720,6 +808,14 @@ class TensorBusAgent:
         a watcher that polls ``query_transfer_signal(sync_round=r)`` cannot
         lose a pulse the way the legacy boolean flag's 1→0 reset could.
 
+        A REQUEST signal is published BEFORE the first command parks
+        (``transfer_request_round:{src}->{dst}``, monotonic per direction):
+        the completion signal can only say a round finished, but a reactive
+        peer — an engine service that must quiesce and only then issue the
+        matching recv — needs to learn the round was asked for. Driving the
+        recv off the completion signal would deadlock: the round completes
+        only after the recv arrives.
+
         Returns True when this command is finished (its semaphore may
         release); False when it parks waiting for the peer role's command of
         the same round.
@@ -752,6 +848,12 @@ class TensorBusAgent:
         pending = batch_state.dual_round_pending.setdefault(
             (direction, msg.sync_round), {"roles": set(), "semaphores": []}
         )
+        if not pending["roles"]:
+            # First command for this direction-round on this rank: publish
+            # the request BEFORE parking (see docstring) — after the park it
+            # is too late for a watcher to react, and the completion signal
+            # is definitionally not out yet.
+            self._publish_transfer_request(batch_state, direction, msg.sync_round)
         pending["roles"].add(msg.role)
         if msg.semaphore_name:
             pending["semaphores"].append(msg.semaphore_name)
@@ -791,6 +893,30 @@ class TensorBusAgent:
         )
         return True
 
+    def _publish_transfer_request(
+        self, batch_state: BatchState, direction: tuple[str, str], sync_round: int
+    ) -> None:
+        """Publish a direction's REQUEST round — monotonic, never reset.
+
+        Written when the direction-round's FIRST command arrives (before it
+        parks). ``transfer_signal_round`` (completion) can only say a round
+        FINISHED; a reactive peer — quiesce on request, issue the matching
+        recv, then wait for completion — must learn the round was REQUESTED.
+        The request is a separate key per direction with the same
+        no-pulse-loss property on the start edge that the completion signal
+        has on the finish edge.
+        """
+        src_role, dst_role = direction
+        key = f"batch:{batch_state.batch_id}/state:transfer_request_round:{src_role}->{dst_role}"
+        raw = self._leader_get(key, batch_state)
+        current = int(raw.decode()) if raw is not None else -1
+        if sync_round > current:
+            self._leader_set(key, str(sync_round), batch_state)
+            logger.info(
+                f"Agent {self.rank}: Batch {batch_state.batch_id}: request round {sync_round} "
+                f"published for {src_role}->{dst_role} (was {current})"
+            )
+
     def _handle_query_status(self, msg: QueryStatus):
         batch_id = msg.batch_id
         state_name = msg.state_name  # e.g. "transfer_signal"
@@ -811,6 +937,14 @@ class TensorBusAgent:
         elif state_name == "transfer_signal_round":
             # Versioned dual-endpoint completion: the store holds the last
             # completed round id (monotonic), published after execution.
+            raw_value = self._leader_get(store_state_key, batch_state)
+            state = int(raw_value.decode()) if raw_value is not None else -1
+            logger.info(f"Agent {self.rank}: Query {state_name} batch={batch_id}: raw={raw_value}, state={state}")
+        elif state_name.startswith("transfer_request_round"):
+            # Dual-endpoint REQUEST signal, per direction: the last round id
+            # whose first command arrived — published before that command
+            # parks, monotonic, never reset. Drives reactive recv issuers
+            # (quiesce, then issue the matching round's recv).
             raw_value = self._leader_get(store_state_key, batch_state)
             state = int(raw_value.decode()) if raw_value is not None else -1
             logger.info(f"Agent {self.rank}: Query {state_name} batch={batch_id}: raw={raw_value}, state={state}")

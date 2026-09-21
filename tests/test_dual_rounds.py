@@ -1,6 +1,6 @@
 """Dual-endpoint sync rounds, multi-pair batches, and pair-init ordering.
 
-Three regressions, one per review Critical, all CPU:
+Regressions for the round-handshake Criticals, all CPU:
 
 1. ``test_multi_round_same_batch_updates_every_round`` — a dual batch
    supports unbounded sync rounds on the SAME batch: round r executes only
@@ -18,10 +18,30 @@ Three regressions, one per review Critical, all CPU:
 
 3. ``test_pair_init_out_of_order_no_deadlock`` — two agents whose InitPair
    commands arrive in different pair orders: pending pairs must complete in
-   a globally deterministic (sorted) sequence so new_group bootstraps cannot
-   interleave; both pairs end up usable.
+   one globally serialized sequence (the store-backed completion log) so
+   new_group bootstraps cannot interleave; both pairs end up usable.
+
+4. ``test_request_signal_drives_reactive_recv`` — the PRODUCTION
+   notification path, not a hand-staged concurrent send/recv: the trainer
+   issues ONLY its blocking send; a watcher (the engine service's stand-in)
+   polls query_transfer_request and issues the round's recv only after the
+   request is published. The request is visible while the send is still
+   parked, the COMPLETION signal is not, and driving a recv off completion
+   would deadlock — this pins the request/completion split.
+
+5. ``test_pair_completion_order_identical_across_ranks`` — world-6, two
+   dual pairs whose mesh shapes ((2,3) vs (3,2)) create disjoint REAL mesh
+   sub-groups (the only surface where per-rank group-creation order can
+   diverge), pair NAME order opposing readiness order, and one rank whose
+   completion polling starts only after both pairs are ready. Every rank
+   must complete pairs in the IDENTICAL sequence (the store-backed
+   completion log) and both pairs must stay usable through one spanning
+   dual batch. Pre-log, order divergence across ranks is a race (the
+   all-rank rendezvous of a completed pair usually forces late ranks into
+   the same order); this test pins the invariant the log guarantees.
 """
 
+import json
 import os
 import time
 import socket
@@ -420,3 +440,231 @@ def test_pair_init_out_of_order_no_deadlock(tmp_path):
         )
     except Exception as e:
         pytest.fail(f"out-of-order pair init deadlocked or failed: {e}")
+
+
+@pytest.mark.timeout(300)
+def test_request_signal_drives_reactive_recv(tmp_path):
+    """The production notification path: the recv is REACTIVE, not concurrent.
+
+    The trainer issues ONLY its blocking send (it parks on the round
+    handshake). A watcher — standing in for the engine service — polls
+    query_transfer_request for the forward direction and issues the round's
+    recv only once the request is published. Before the send: no request.
+    After the send parks: the request IS visible, the completion signal is
+    NOT, and the send stays parked until the watcher's recv arrives."""
+    root = str(tmp_path)
+    store_port, dist_port = _free_port(), _free_port()
+    if dist.is_initialized():  # main-process tests must not stack PGs
+        dist.destroy_process_group()
+    os.environ.update(RANK="0", WORLD_SIZE="1", MASTER_ADDR="localhost", MASTER_PORT=str(dist_port))
+    cmd_path, state_path = f"{root}/command.lmdb", f"{root}/state.lmdb"
+    _cleanup_stale(cmd_path, state_path)
+
+    agent = TensorBusAgent(
+        rank=0,
+        world_size=1,
+        store_host="localhost",
+        store_port=store_port,
+        lmdb_command_queue_path=cmd_path,
+        lmdb_state_path=state_path,
+    )
+    stop = threading.Event()
+    thread = threading.Thread(target=_agent_loop, args=(agent, stop), daemon=True)
+    thread.start()
+    try:
+        pair = "rq"
+        client_train = TensorBusClient(agent_rank=0, lmdb_command_queue_path=cmd_path, agent_state_lmdb_path=state_path)
+        client_infer = TensorBusClient(agent_rank=0, lmdb_command_queue_path=cmd_path, agent_state_lmdb_path=state_path)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [
+                pool.submit(client_train.init_pair, pair, TRAIN, INFER, 1, _MeshSpec((1,)), (Shard(0),), timeout=60),
+                pool.submit(client_infer.init_pair, pair, INFER, TRAIN, 1, _MeshSpec((1,)), (Replicate(),), timeout=60),
+            ]
+            for fut in futs:
+                fut.result(timeout=90)
+
+        master = torch.arange(12, dtype=torch.float32).view(6, 2)
+        target = torch.zeros(6, 2, dtype=torch.float32)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [
+                pool.submit(
+                    client_train.register_tensors, batch_id="b", tensors=[(master, pair)], role=TRAIN, timeout=60
+                ),
+                pool.submit(
+                    client_infer.register_tensors, batch_id="b", tensors=[(target, pair)], role=INFER, timeout=60
+                ),
+            ]
+            handler_train = futs[0].result(timeout=90)
+            handler_infer = futs[1].result(timeout=90)
+
+        # Nothing was sent yet: the watcher must NOT see a request.
+        assert handler_infer.query_transfer_request((TRAIN, INFER), sync_round=0) is False
+
+        for rnd in range(2):
+            master.copy_(torch.full_like(master, float(rnd + 1)) + torch.arange(12, dtype=torch.float32).view(6, 2))
+            expected = master.clone()
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(
+                    handler_train.transfer, transfer_type="send", role=TRAIN, blocking=True, timeout=60, sync_round=rnd
+                )
+                deadline = time.monotonic() + 30
+                while not handler_infer.query_transfer_request((TRAIN, INFER), sync_round=rnd):
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f"round {rnd}: the parked send never published its request")
+                    time.sleep(0.05)
+                assert not fut.done(), "the send must stay parked until the watcher's recv arrives"
+                assert handler_infer.query_transfer_signal(sync_round=rnd) is False, (
+                    "request is not completion — the round cannot be complete before the recv exists"
+                )
+                assert handler_infer.query_transfer_request((TRAIN, INFER), sync_round=rnd + 1) is False, (
+                    "a later round must not look requested"
+                )
+                # The reactive side: only NOW does the engine issue the recv.
+                handler_infer.transfer(
+                    transfer_type="recv", role=INFER, blocking=True, timeout=60, sync_round=rnd
+                )
+                fut.result(timeout=30)
+            assert torch.equal(target, expected), f"round {rnd}: the reactive recv did not land the round's values"
+            assert agent.batches["b"].dual_direction_done[(TRAIN, INFER)] == rnd
+
+        handler_train.close()
+        handler_infer.close()
+        client_train.close()
+        client_infer.close()
+    finally:
+        stop.set()
+        thread.join(timeout=30)
+        agent.close(destroy=True)
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        # Subgroup cache holds handles of the destroyed world; a later
+        # main-process test would reuse them (see test_dual_endpoint_agent).
+        _PROCESS_GROUP_CACHE.clear()
+
+
+def _opposed_order_worker(rank: int, world_size: int, root: str, store_port: int, dist_port: int) -> None:
+    os.environ.update(RANK=str(rank), WORLD_SIZE=str(world_size), MASTER_ADDR="localhost", MASTER_PORT=str(dist_port))
+    cmd_path, state_path = f"{root}/{rank}_command.lmdb", f"{root}/{rank}_state.lmdb"
+
+    agent = TensorBusAgent(
+        rank=rank,
+        world_size=world_size,
+        store_host="localhost",
+        store_port=store_port,
+        lmdb_command_queue_path=cmd_path,
+        lmdb_state_path=state_path,
+    )
+    if rank == world_size - 1:
+        # This rank's completion polling is deferred until long after both
+        # pairs became ready everywhere: its FIRST poll then sees the full
+        # ready set, where a per-rank sorted() would order by NAME (aa before
+        # zz) against the order the other ranks complete in (zz first — it
+        # was ready first). The completion log must serialize everyone.
+        release = time.monotonic() + 3.0
+        orig_poll = agent._poll_pending_pairs
+
+        def deferred_poll():
+            if time.monotonic() < release:
+                return
+            agent._poll_pending_pairs = orig_poll
+            orig_poll()
+
+        agent._poll_pending_pairs = deferred_poll
+    stop = threading.Event()
+    thread = threading.Thread(target=_agent_loop, args=(agent, stop), daemon=True)
+    thread.start()
+    try:
+        # Name order OPPOSES readiness order: zz_* is ready first but sorts
+        # last. Mesh shapes (2,3) vs (3,2) create disjoint REAL mesh
+        # sub-groups — the only surface where per-rank group-creation order
+        # can actually diverge. A 2D mesh needs one placement per mesh dim:
+        # Shard(0) over dim 0 ((2,3) → 2 halves; (3,2) → 3 thirds).
+        pair_first, pair_second = "zz_ready_first", "aa_ready_second"
+        client_train = TensorBusClient(
+            agent_rank=rank, lmdb_command_queue_path=cmd_path, agent_state_lmdb_path=state_path
+        )
+        client_infer = TensorBusClient(
+            agent_rank=rank, lmdb_command_queue_path=cmd_path, agent_state_lmdb_path=state_path
+        )
+        for pair, mesh_shape in ((pair_first, (2, 3)), (pair_second, (3, 2))):
+            client_train.init_pair(
+                pair, TRAIN, INFER, world_size, _MeshSpec(mesh_shape), (Shard(0), Replicate()), blocking=False
+            )
+            client_infer.init_pair(
+                pair, INFER, TRAIN, world_size, _MeshSpec(mesh_shape), (Replicate(), Replicate()), blocking=False
+            )
+            if rank != world_size - 1:
+                time.sleep(0.5)  # pair_first's keys land well before pair_second's
+
+        deadline = time.monotonic() + 90
+        while not {pair_first, pair_second} <= set(agent.pairs):
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"rank {rank}: pairs never completed (pending={sorted(agent.pending_pairs)})")
+            time.sleep(0.05)
+        # dict insertion order == this rank's completion order
+        Path(f"{root}/order_rank{rank}.json").write_text(json.dumps(list(agent.pairs)))
+
+        # Both pairs must be USABLE, through ONE dual batch spanning them.
+        # Shard(0) over mesh dim 0: (2,3) → 2 row-halves; (3,2) → 3 row-thirds.
+        full_first = torch.arange(18, dtype=torch.float32).view(6, 3)
+        full_second = torch.arange(12, 24, dtype=torch.float32).view(6, 2)
+        train_local = [full_first.chunk(2, dim=0)[rank // 3].clone(), full_second.chunk(3, dim=0)[rank // 2].clone()]
+        infer_local = [torch.zeros(6, 3), torch.zeros(6, 2)]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [
+                pool.submit(
+                    client_train.register_tensors,
+                    batch_id="opp",
+                    tensors=[(train_local[0], pair_first), (train_local[1], pair_second)],
+                    role=TRAIN,
+                    timeout=90,
+                ),
+                pool.submit(
+                    client_infer.register_tensors,
+                    batch_id="opp",
+                    tensors=[(infer_local[0], pair_first), (infer_local[1], pair_second)],
+                    role=INFER,
+                    timeout=90,
+                ),
+            ]
+            handler_train = futs[0].result(timeout=120)
+            handler_infer = futs[1].result(timeout=120)
+        _round_transfer(handler_train, handler_infer, TRAIN, INFER, 0, send_first=(rank % 2 == 0))
+        assert torch.equal(infer_local[0], full_first), f"rank {rank}: (2,3)-mesh pair not delivered bitwise"
+        assert torch.equal(infer_local[1], full_second), f"rank {rank}: (3,2)-mesh pair not delivered bitwise"
+        handler_train.close()
+        handler_infer.close()
+        client_train.close()
+        client_infer.close()
+    finally:
+        stop.set()
+        thread.join(timeout=30)
+        agent.close(destroy=True)
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+@pytest.mark.timeout(600)
+def test_pair_completion_order_identical_across_ranks(tmp_path):
+    """Completion order must be one global sequence, identical on every rank.
+
+    Different ranks receive different pairs' InitPair commands at different
+    times, one rank only starts completing long after both pairs are ready,
+    and name order opposes readiness order — a per-rank sorted(ready-set)
+    could complete in opposite orders on different ranks, wiring different
+    memberships to the same process-group names. The store-backed
+    completion log must serialize every rank into the same sequence."""
+    store_port, dist_port = _free_port(), _free_port()
+    try:
+        torch.multiprocessing.spawn(
+            _opposed_order_worker, args=(6, str(tmp_path), store_port, dist_port), nprocs=6, join=True
+        )
+    except Exception as e:
+        pytest.fail(f"opposed-order pair completion failed: {e}")
+
+    orders = [json.loads(path.read_text()) for path in sorted(Path(str(tmp_path)).glob("order_rank*.json"))]
+    assert len(orders) == 6, f"missing completion-order records: {len(orders)}/6"
+    assert all(order == orders[0] for order in orders), f"completion order diverged across ranks: {orders}"
+    assert orders[0] == ["zz_ready_first", "aa_ready_second"], (
+        f"completion order must follow readiness (zz was ready first), got {orders[0]}"
+    )
