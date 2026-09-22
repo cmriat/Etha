@@ -56,6 +56,12 @@ COMMAND_ERROR_TTL = 30 * 60.0
 class _InvalidRegistrationError(ValueError):
     """Registration rejection that is safe to report without stopping the agent."""
 
+# Default coalescing threshold when the client doesn't specify one. 8MB coalesces
+# the many small non-Partial chunks (a clear win on small tensors, never worse than
+# per-chunk on large) while Partial chunks self-exclude via Chunk.no_coalesce. See
+# bench/BUCKET_TUNING.md.
+DEFAULT_COALESCE_BYTES = 8 * 1024 * 1024
+
 
 def _create_partial_groups(
     mesh_tensor: torch.Tensor,
@@ -716,10 +722,11 @@ class TensorBusAgent:
 
             logger.info(f"Agent {self.rank}: Batch {batch_id}: Completed registration for pair '{pair_name}'")
 
-        # Bucketize (cross-pair, by channel key) into BatchState. bucket_size
-        # unset means no coalescing: every chunk becomes its own single-entry
-        # bucket. Chunks are only an intermediate; only buckets are executed.
-        coalesce_bytes = bucket_size or 1
+        # Bucketize (cross-pair, by channel key) into BatchState. Chunks are only an
+        # intermediate; only buckets are executed. Partial chunks self-exclude from
+        # coalescing (Chunk.no_coalesce); everything else coalesces up to the bytes
+        # threshold.
+        coalesce_bytes = bucket_size or DEFAULT_COALESCE_BYTES
         batch_state.send_buckets = chunk_to_bucket_ops(chunks=all_send_chunks, bucket_size=coalesce_bytes)
         batch_state.recv_buckets = chunk_to_bucket_ops(chunks=all_recv_chunks, bucket_size=coalesce_bytes)
         logger.info(

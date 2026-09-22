@@ -82,6 +82,11 @@ class Chunk:
     # reaches the collective; reduce-only (NONE transport) chunks participate
     # without shipping.
     source_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = field(default=None)
+    # Set for every chunk of a Partial transfer (both send and recv ends, keyed off
+    # the M2MMap so it's symmetric). Partial chunks must not coalesce: their per-cell
+    # all_reduce must stay aligned across the reduce group, and a sender-only signal
+    # would desync send/recv bucketing. See chunk_to_bucket_ops.
+    no_coalesce: bool = False
     buffer: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
