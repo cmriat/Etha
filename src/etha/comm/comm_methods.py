@@ -58,7 +58,31 @@ def bucket_comm(
 
     Per channel key, at most ``max_in_flight`` buckets are prepared/in-flight at
     once, so buffer assembly overlaps with in-flight collectives.
+
+    LOCAL DIAGNOSTIC MODE (rl-glm, 2026-09-22, uncommitted worktree diff —
+    upstream decision is not mine): ARC2_TB_SEQUENTIAL=1 executes buckets in
+    the canonical list order with no overlap and no completion-timing-driven
+    reordering. The pipelined loop issues wire ops in an order that depends on
+    GPU event/completion timing and therefore differs per rank (local8 dual
+    transfer v10/v11: identical for ~33-36 launches, then rank-dependent
+    divergence); with this NCCL build giving every bucket its own fresh comm
+    (symmetric-VA clones), per-rank order divergence freezes all outstanding
+    collectives simultaneously (100% SM / 0% bandwidth spin). Sequential
+    order is rank-identical by construction — the discriminator between
+    "pairing is order-sensitive" and "concurrent-spinning exhaustion", and
+    the way to get gate-3 evidence today. Cost: no assembly/comms overlap
+    (~150MB buckets, ms-scale each).
     """
+    import os
+
+    if os.environ.get("ARC2_TB_SEQUENTIAL") == "1":
+        for bucket in buckets:
+            bucket.prepare()
+            bucket.launch()
+            bucket.finalize()  # waits on the work before writing back
+        torch.cuda.synchronize()
+        return
+
     rank = dist.get_rank()
 
     channels: defaultdict[tuple, dict[str, deque]] = defaultdict(

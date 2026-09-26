@@ -271,12 +271,22 @@ class Bucket:
     def launch(self) -> bool:
         """Issue the wire op once the assembled buffer is ready.
 
-        Returns False if the buffer-assembly event hasn't fired yet; otherwise
-        issues the transport (no-op for LOCAL/NONE) and returns True.
+        LOCAL DIAGNOSTIC FIX (rl-glm, 2026-09-22, uncommitted worktree diff —
+        upstream fix decision is not mine): waiting here instead of returning
+        False makes the launch order a pure function of the bucket list, so
+        every rank issues its wire ops in the identical sequence. The
+        skip-on-not-fired variant let GPU copy timing reorder launches
+        per-rank (v8/v9/v10 local8 dual transfer: sequences identical for
+        ~36 launches, then rank-dependent divergence), and with one comm per
+        bucket (this NCCL build's symmetric-VA clones, every op at opCount 0)
+        the ranks pair their buckets by sequence — divergent order paired
+        bucket A with bucket B across ranks (two distinct byte sizes make the
+        count mismatch certain) and the collectives spun forever at 100% SM /
+        0% bandwidth. Blocking costs the pipeline its assembly overlap; the
+        copies are intra-GPU (~150MB), i.e. milliseconds per bucket.
         """
         if self.buffer_ready_event is not None:
-            if not self.buffer_ready_event.query():
-                return False
+            self.buffer_ready_event.synchronize()
             self.buffer_ready_event = None
 
         match self.transport:
