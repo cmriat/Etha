@@ -484,9 +484,7 @@ class TensorBusAgent:
                 # Unreachable for a logged pair (readiness is monotonic and
                 # the leader logged it ready) — fail closed rather than leave
                 # the parked InitPair clients hanging on a popped entry.
-                error = RuntimeError(
-                    f"Agent {self.rank}: logged pair '{pair_name}' no longer ready at completion"
-                )
+                error = RuntimeError(f"Agent {self.rank}: logged pair '{pair_name}' no longer ready at completion")
                 for semaphore_name in pending.all_semaphores():
                     self._record_command_error(semaphore_name, error)
                     self._release_semaphore(semaphore_name)
@@ -893,9 +891,7 @@ class TensorBusAgent:
         )
         return True
 
-    def _publish_transfer_request(
-        self, batch_state: BatchState, direction: tuple[str, str], sync_round: int
-    ) -> None:
+    def _publish_transfer_request(self, batch_state: BatchState, direction: tuple[str, str], sync_round: int) -> None:
         """Publish a direction's REQUEST round — monotonic, never reset.
 
         Written when the direction-round's FIRST command arrives (before it

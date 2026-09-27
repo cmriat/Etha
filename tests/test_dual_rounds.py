@@ -41,8 +41,8 @@ Regressions for the round-handshake Criticals, all CPU:
    the same order); this test pins the invariant the log guarantees.
 """
 
-import json
 import os
+import json
 import time
 import socket
 import logging
@@ -451,7 +451,8 @@ def test_request_signal_drives_reactive_recv(tmp_path):
     query_transfer_request for the forward direction and issues the round's
     recv only once the request is published. Before the send: no request.
     After the send parks: the request IS visible, the completion signal is
-    NOT, and the send stays parked until the watcher's recv arrives."""
+    NOT, and the send stays parked until the watcher's recv arrives.
+    """
     root = str(tmp_path)
     store_port, dist_port = _free_port(), _free_port()
     if dist.is_initialized():  # main-process tests must not stack PGs
@@ -520,9 +521,7 @@ def test_request_signal_drives_reactive_recv(tmp_path):
                     "a later round must not look requested"
                 )
                 # The reactive side: only NOW does the engine issue the recv.
-                handler_infer.transfer(
-                    transfer_type="recv", role=INFER, blocking=True, timeout=60, sync_round=rnd
-                )
+                handler_infer.transfer(transfer_type="recv", role=INFER, blocking=True, timeout=60, sync_round=rnd)
                 fut.result(timeout=30)
             assert torch.equal(target, expected), f"round {rnd}: the reactive recv did not land the round's values"
             assert agent.batches["b"].dual_direction_done[(TRAIN, INFER)] == rnd
@@ -653,7 +652,8 @@ def test_pair_completion_order_identical_across_ranks(tmp_path):
     and name order opposes readiness order — a per-rank sorted(ready-set)
     could complete in opposite orders on different ranks, wiring different
     memberships to the same process-group names. The store-backed
-    completion log must serialize every rank into the same sequence."""
+    completion log must serialize every rank into the same sequence.
+    """
     store_port, dist_port = _free_port(), _free_port()
     try:
         torch.multiprocessing.spawn(
