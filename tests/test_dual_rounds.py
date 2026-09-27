@@ -66,15 +66,49 @@ logger = logging.getLogger(__name__)
 TRAIN, INFER = "train", "infer"
 
 
-@pytest.mark.parametrize(("role", "transfer_type"), [(INFER, "send"), (TRAIN, "recv")])
-def test_dual_reverse_transfer_fails_before_collectives(role, transfer_type):
-    agent = TensorBusAgent.__new__(TensorBusAgent)
-    agent.pairs = {"p": SimpleNamespace(role_ranks={TRAIN: [0], INFER: [0]}, pair_name="p")}
-    batch = BatchState(batch_id="b", pair_names=["p"], dual=True)
-    msg = SimpleNamespace(batch_id="b", role=role, transfer_type=transfer_type, sync_round=0)
+def _direction_store(values=None):
+    values = {} if values is None else values
 
-    with pytest.raises(ValueError, match="only train->infer"):
-        agent._execute_dual_transfer(msg, batch)
+    def get(key, *, component):
+        return values.get((component, key))
+
+    def set_value(key, value, *, component):
+        values[(component, key)] = value.encode()
+
+    def wait_for_key(key, *, timeout, component):
+        return values[(component, key)]
+
+    return SimpleNamespace(get=get, set=set_value, wait_for_key=wait_for_key)
+
+
+@pytest.mark.parametrize(("source", "target"), [(TRAIN, INFER), ("actor", "serve")])
+def test_dual_batch_pins_first_direction_with_configurable_roles(source, target):
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.store = _direction_store()
+    agent.pairs = {"p": SimpleNamespace(role_ranks={source: [0], target: [0]}, pair_name="p")}
+    agent._publish_transfer_request = lambda *_args: None
+    batch = BatchState(batch_id="b", pair_names=["p"], dual=True, local_leader=0)
+    first = SimpleNamespace(batch_id="b", role=source, transfer_type="send", sync_round=0, semaphore_name=None)
+    assert agent._execute_dual_transfer(first, batch) is False
+    assert batch.dual_direction == (source, target)
+
+    reverse = SimpleNamespace(batch_id="b", role=target, transfer_type="send", sync_round=0)
+    with pytest.raises(ValueError, match="one direction only"):
+        agent._execute_dual_transfer(reverse, batch)
+
+
+def test_dual_batch_uses_shared_direction_before_bucket_collectives(monkeypatch):
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 1
+    agent.pairs = {"p": SimpleNamespace(role_ranks={"actor": [0, 1], "serve": [0, 1]}, pair_name="p")}
+    key = "batch:b/state:dual_direction"
+    agent.store = _direction_store({("global", key): json.dumps(("actor", "serve")).encode()})
+    batch = BatchState(batch_id="b", pair_names=["p"], dual=True, local_leader=0)
+    monkeypatch.setattr(dist, "barrier", lambda _group: pytest.fail("collective reached after direction mismatch"))
+    reverse = SimpleNamespace(batch_id="b", role="serve", transfer_type="send", sync_round=0)
+    with pytest.raises(ValueError, match="one direction only"):
+        agent._execute_dual_transfer(reverse, batch)
 
 
 def _free_port() -> int:

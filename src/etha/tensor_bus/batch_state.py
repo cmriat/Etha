@@ -59,6 +59,8 @@ class BatchState:
     # (src_role, dst_role) -> last executed sync_round for that direction;
     # rounds <= it are acknowledged without re-execution (stale/duplicate)
     dual_direction_done: dict[tuple[str, str], int] = field(default_factory=dict)
+    # First requested direction; names are supplied by the clients, not Etha.
+    dual_direction: tuple[str, str] | None = None
     # ((src_role, dst_role), sync_round) -> {"roles": {arrived roles},
     # "semaphores": [parked command semaphores]}. A direction-round executes
     # only once both roles' Transfer commands arrived; until then the first

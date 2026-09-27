@@ -1,6 +1,7 @@
 """Tensor Bus Agent Process."""
 
 import os
+import json
 import time
 import uuid
 import logging
@@ -818,10 +819,15 @@ class TensorBusAgent:
         else:
             src_role, dst_role = other_role, msg.role
         direction = (src_role, dst_role)
-        if direction != ("train", "infer"):
+        if batch_state.dual_direction is None:
+            key = f"batch:{batch_id}/state:dual_direction"
+            if self.rank == batch_state.local_leader and self.store.get(key, component="global") is None:
+                self.store.set(key, json.dumps(direction), component="global")
+            batch_state.dual_direction = tuple(json.loads(self.store.wait_for_key(key, timeout=60, component="global")))
+        if direction != batch_state.dual_direction:
             raise ValueError(
-                f"Batch {batch_id}: dual-endpoint transfer currently supports only train->infer, got "
-                f"{src_role}->{dst_role}"
+                f"Batch {batch_id}: dual-endpoint batch supports one direction only "
+                f"({batch_state.dual_direction}), got {direction}"
             )
 
         done_round = batch_state.dual_direction_done.get(direction, -1)
