@@ -469,7 +469,7 @@ class TensorBusAgent:
                 # names it yet.
                 continue
             try:
-                completed = self._complete_pair(pending)
+                self._complete_pair(pending)
             except Exception as e:
                 logger.error(f"Agent {self.rank}: Pair '{pair_name}' completion failed: {e} {traceback.format_exc()}")
                 for semaphore_name in pending.all_semaphores():
@@ -480,32 +480,17 @@ class TensorBusAgent:
                     self._release_semaphore(semaphore_name)
                 self.pending_pairs.pop(pair_name, None)
                 raise
-            if not completed:
-                # Unreachable for a logged pair (readiness is monotonic and
-                # the leader logged it ready) — fail closed rather than leave
-                # the parked InitPair clients hanging on a popped entry.
-                error = RuntimeError(f"Agent {self.rank}: logged pair '{pair_name}' no longer ready at completion")
-                for semaphore_name in pending.all_semaphores():
-                    self._record_command_error(semaphore_name, error)
-                    self._release_semaphore(semaphore_name)
-                self.pending_pairs.pop(pair_name, None)
-                raise error
             for semaphore_name in pending.all_semaphores():
                 self._release_semaphore(semaphore_name)
             self.pending_pairs.pop(pair_name, None)
 
-    def _complete_pair(self, pending: _PendingPair) -> bool:
-        """Run the old blocking InitPair tail against the current store state.
-
-        Returns True when the pair was created (rendezvous complete), False
-        when either side is not yet fully registered.
-        """
+    def _complete_pair(self, pending: _PendingPair) -> None:
+        """Complete a pair named by the ordered ready-pair log."""
         pair_name = pending.pair_name
         sides: dict[str, list[int]] = {}
         for name in (pending.local_name, pending.remote_name):
             ready = self._check_side_ready(pair_name, name)
-            if ready is None:
-                return False
+            assert ready is not None
             sides[name] = ready[1]
 
         # Canonical ordering so all ranks call collectives in the same order;
@@ -697,7 +682,6 @@ class TensorBusAgent:
             f"Agent {self.rank}: Pair '{pair_name}' matched! "
             f"Local '{local_name}': {local_ranks}, Remote '{remote_name}': {remote_ranks}"
         )
-        return True
 
     def _handle_transfer(self, msg: Transfer) -> bool:
         """Handle Transfer command for batch tensor transfer.
@@ -834,6 +818,11 @@ class TensorBusAgent:
         else:
             src_role, dst_role = other_role, msg.role
         direction = (src_role, dst_role)
+        if direction != ("train", "infer"):
+            raise ValueError(
+                f"Batch {batch_id}: dual-endpoint transfer currently supports only train->infer, got "
+                f"{src_role}->{dst_role}"
+            )
 
         done_round = batch_state.dual_direction_done.get(direction, -1)
         if msg.sync_round <= done_round:
@@ -881,7 +870,8 @@ class TensorBusAgent:
         # releases: when a recv client's blocking call returns, the round is
         # already queryable, so derived tensors may refresh immediately.
         dist.barrier(batch_state.batch_group)
-        self._leader_set(f"batch:{batch_id}/state:transfer_signal_round", str(msg.sync_round), batch_state)
+        if self.rank == batch_state.local_leader:
+            self.store.set(f"batch:{batch_id}/state:transfer_signal_round", str(msg.sync_round), component="global")
         dist.barrier(batch_state.batch_group)
         for parked in pending["semaphores"]:
             self._release_semaphore(parked)
@@ -902,12 +892,14 @@ class TensorBusAgent:
         no-pulse-loss property on the start edge that the completion signal
         has on the finish edge.
         """
+        if self.rank != batch_state.local_leader:
+            return
         src_role, dst_role = direction
         key = f"batch:{batch_state.batch_id}/state:transfer_request_round:{src_role}->{dst_role}"
-        raw = self._leader_get(key, batch_state)
+        raw = self.store.get(key, component="global")
         current = int(raw.decode()) if raw is not None else -1
         if sync_round > current:
-            self._leader_set(key, str(sync_round), batch_state)
+            self.store.set(key, str(sync_round), component="global")
             logger.info(
                 f"Agent {self.rank}: Batch {batch_state.batch_id}: request round {sync_round} "
                 f"published for {src_role}->{dst_role} (was {current})"
@@ -923,17 +915,14 @@ class TensorBusAgent:
             logger.error(f"Agent {self.rank}: QueryStatus for unknown batch: {batch_id}")
             return
 
-        batch_state = self.batches[batch_id]
-
         if state_name == "transfer_signal":
-            # Leader reads from store, broadcasts to others
-            raw_value = self._leader_get(store_state_key, batch_state)
+            raw_value = self.store.get(store_state_key, component="global")
             state = raw_value == b"1"
             logger.info(f"Agent {self.rank}: Query {state_name} batch={batch_id}: raw={raw_value}, state={state}")
         elif state_name == "transfer_signal_round":
             # Versioned dual-endpoint completion: the store holds the last
             # completed round id (monotonic), published after execution.
-            raw_value = self._leader_get(store_state_key, batch_state)
+            raw_value = self.store.get(store_state_key, component="global")
             state = int(raw_value.decode()) if raw_value is not None else -1
             logger.info(f"Agent {self.rank}: Query {state_name} batch={batch_id}: raw={raw_value}, state={state}")
         elif state_name.startswith("transfer_request_round"):
@@ -941,7 +930,7 @@ class TensorBusAgent:
             # whose first command arrived — published before that command
             # parks, monotonic, never reset. Drives reactive recv issuers
             # (quiesce, then issue the matching round's recv).
-            raw_value = self._leader_get(store_state_key, batch_state)
+            raw_value = self.store.get(store_state_key, component="global")
             state = int(raw_value.decode()) if raw_value is not None else -1
             logger.info(f"Agent {self.rank}: Query {state_name} batch={batch_id}: raw={raw_value}, state={state}")
         else:
@@ -1055,11 +1044,8 @@ class TensorBusAgent:
             raise _InvalidRegistrationError(f"Inconsistent or invalid RegisterTensors layout across ranks: {layouts}")
 
         if batch_dual:
-            # A single gather sees a role-mixed set: agents may process the
-            # two roles' commands in different orders (rank 0 train first,
-            # rank 1 infer first), so every payload is filed under its OWN
-            # role and per-role layout equality is checked across both
-            # gathers, at completion.
+            # Role commands may arrive in either order; the layout signature
+            # excludes role and must agree across both gathers and all ranks.
             batch_state = self.batches.get(batch_id)
             if batch_state is None:
                 batch_state = BatchState(
@@ -1069,10 +1055,12 @@ class TensorBusAgent:
                     dual=True,
                 )
                 self.batches[batch_id] = batch_state
-            for idx, other in enumerate(layouts):
-                if other is None:
-                    continue
-                batch_state.dual_gathered_layouts.setdefault(other[4], {})[idx] = other[:4]
+            signature = layout[:4]
+            if any(other is None or other[:4] != signature for other in layouts):
+                raise _InvalidRegistrationError(f"Batch {batch_id}: inconsistent dual layout across ranks: {layouts}")
+            if batch_state.dual_layout_signature is not None and batch_state.dual_layout_signature != signature:
+                raise _InvalidRegistrationError(f"Batch {batch_id}: dual role layout changed between registrations")
+            batch_state.dual_layout_signature = signature
             return self._register_dual_role(batch_state, grouped, role, msg.semaphore_name)
 
         if any(other != layout for other in layouts):
@@ -1249,19 +1237,6 @@ class TensorBusAgent:
                     batch_state.pending_register_semaphores.append(semaphore_name)
                 return False
 
-        # Cross-gather layout equality, per role, now that both gathers ran.
-        for r, signatures in batch_state.dual_gathered_layouts.items():
-            if len(signatures) != self.world_size:
-                raise _InvalidRegistrationError(
-                    f"Batch {batch_id}: role '{r}' layout gathered from {len(signatures)}/{self.world_size} "
-                    f"agents — every agent must register every role of a dual batch"
-                )
-            reference = next(iter(signatures.values()))
-            if any(sig != reference for sig in signatures.values()):
-                raise _InvalidRegistrationError(
-                    f"Batch {batch_id}: inconsistent layout across ranks for role '{r}': {signatures}"
-                )
-
         self._generate_dual_buckets(batch_state)
         for parked in batch_state.pending_register_semaphores:
             self._release_semaphore(parked)
@@ -1418,21 +1393,6 @@ class TensorBusAgent:
         if self.rank == batch.local_leader:
             self.store.set(key, value, component=component)
         dist.barrier(batch.local_group)
-
-    def _leader_get(self, key: str, batch: BatchState, component: str = "global") -> bytes | None:
-        """Get key-value where only leader reads, then broadcasts.
-
-        Returns:
-            Value bytes from store (same for all ranks in local group)
-        """
-        if self.rank == batch.local_leader:
-            value = self.store.get(key, component=component)
-        else:
-            value = None
-
-        result = [value]
-        dist.broadcast_object_list(result, src=batch.local_leader, group=batch.local_group)
-        return result[0]
 
     def _record_command_error(self, semaphore_name: str, error: Exception) -> None:
         payload = f"{type(error).__name__}: {error}"

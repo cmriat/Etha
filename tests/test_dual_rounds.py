@@ -58,11 +58,23 @@ from torch.distributed.tensor.placement_types import Shard, Replicate
 
 from etha.pg_utils import _PROCESS_GROUP_CACHE
 from etha.tensor_bus import TensorBusAgent, TensorBusClient
+from etha.tensor_bus.batch_state import BatchState
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TRAIN, INFER = "train", "infer"
+
+
+@pytest.mark.parametrize(("role", "transfer_type"), [(INFER, "send"), (TRAIN, "recv")])
+def test_dual_reverse_transfer_fails_before_collectives(role, transfer_type):
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.pairs = {"p": SimpleNamespace(role_ranks={TRAIN: [0], INFER: [0]}, pair_name="p")}
+    batch = BatchState(batch_id="b", pair_names=["p"], dual=True)
+    msg = SimpleNamespace(batch_id="b", role=role, transfer_type=transfer_type, sync_round=0)
+
+    with pytest.raises(ValueError, match="only train->infer"):
+        agent._execute_dual_transfer(msg, batch)
 
 
 def _free_port() -> int:

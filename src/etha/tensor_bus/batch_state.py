@@ -64,10 +64,8 @@ class BatchState:
     # only once both roles' Transfer commands arrived; until then the first
     # command parks here. Cleared by execution or CleanupBatch.
     dual_round_pending: dict[tuple[tuple[str, str], int], dict] = field(default_factory=dict)
-    # role -> {agent_rank: layout signature} accumulated across this batch's
-    # registration gathers, so per-role layout equality can be checked once
-    # both roles have registered (a single gather sees a role-mixed set)
-    dual_gathered_layouts: dict[str, dict[int, tuple]] = field(default_factory=dict)
+    # Role-independent registration layout, shared by both gathers.
+    dual_layout_signature: tuple | None = None
     # Semaphores of RegisterTensors commands that returned while the batch was
     # still waiting for its other role; released when the second role completes
     # generation (or by CleanupBatch, so a failed batch cannot hang a client)
