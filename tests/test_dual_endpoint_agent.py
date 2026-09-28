@@ -37,7 +37,7 @@ from torch.distributed.tensor.placement_types import Shard, Replicate
 
 from etha.comm.ir import Transport
 from etha.pg_utils import _PROCESS_GROUP_CACHE
-from etha.tensor_bus import TensorBusAgent, TensorBusClient
+from etha.tensor_bus import BatchHandler, TensorBusAgent, TensorBusClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -75,6 +75,21 @@ def _cleanup_stale(command_queue_path: str, state_path: str) -> None:
 def _agent_loop(agent: TensorBusAgent, stop: threading.Event) -> None:
     while not stop.is_set():
         agent.step()
+
+
+def test_closed_batch_handler_does_not_clean_up_a_reused_batch_id():
+    calls = []
+
+    class Client:
+        def _execute_command_with_semaphore(self, command, *_args, **_kwargs):
+            calls.append(command.batch_id)
+
+    client = Client()
+    handler = BatchHandler(client, batch_id="reused", pair_names=["pair"])
+    handler.close()
+    handler.close()
+    handler.__del__()
+    assert calls == ["reused"]
 
 
 @pytest.mark.timeout(600)

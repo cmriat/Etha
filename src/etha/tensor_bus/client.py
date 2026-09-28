@@ -41,6 +41,7 @@ class BatchHandler:
         self._client_ref = weakref.ref(client)
         self.batch_id = batch_id
         self.pair_names = pair_names
+        self._closed = False
 
     @property
     def client(self) -> TensorBusClient:
@@ -135,10 +136,13 @@ class BatchHandler:
             blocking: If True, block until cleanup completes
             timeout: Timeout in seconds
         """
+        if self._closed:
+            return
         msg = CleanupBatch(batch_id=self.batch_id)
         self.client._execute_command_with_semaphore(
             msg, "cleanup_batch", context_id=f"batch_{self.batch_id}", blocking=blocking, timeout=timeout
         )
+        self._closed = True
 
     def __del__(self):
         """Best-effort cleanup on handler destruction."""
