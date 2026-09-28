@@ -454,7 +454,7 @@ class TensorBusAgent:
         """
         for pair_name in sorted(self.pending_pairs):
             marker = f"pair_completion:logged:{pair_name}"
-            if self.store.get(marker) is not None:
+            if self.store.get(marker) not in (None, b""):
                 continue
             if not self._pair_ready(self.pending_pairs[pair_name]):
                 continue
@@ -498,6 +498,7 @@ class TensorBusAgent:
                         logger.exception(f"Agent {self.rank}: Failed to record InitPair error")
                 # Stay in the service loop: a bad InitPair must not take down
                 # unrelated pairs already running on this agent.
+                self.store.set(f"pair_completion:logged:{pair_name}", "")
             finally:
                 # Both successful and failed InitPair waiters must wake up.
                 # On failure, the error record is written before the wakeup.
@@ -1079,6 +1080,11 @@ class TensorBusAgent:
         elif role is not None:
             role_ok = False
         local_ok = mix_ok and role_ok
+        role_dup = False
+        if batch_dual and role is not None:
+            existing_batch = self.batches.get(batch_id)
+            if existing_batch is not None:
+                role_dup = any((name, role) in existing_batch.pair_role_tensors for name in pair_names)
 
         pair_layout = []
         local_memberships = set()
@@ -1092,9 +1098,16 @@ class TensorBusAgent:
                 membership = tuple(sorted((local_ranks, remote_ranks)))
             pair_layout.append((name, len(grouped[name]), membership))
         local_membership_valid = len(local_memberships) == 1
-        layout = (batch_id, bucket_size, tuple(pair_layout), local_membership_valid, role, local_ok)
+        layout = (batch_id, bucket_size, tuple(pair_layout), local_membership_valid, role, local_ok, role_dup)
         layouts = [None] * self.world_size
         dist.all_gather_object(layouts, layout, group=dist.group.WORLD)
+        if any(other is not None and len(other) >= 7 and other[6] for other in layouts):
+            err = _InvalidRegistrationError(
+                f"Batch {batch_id}: role '{role}' already registered; dual-endpoint batches merge roles and never overwrite"
+            )
+            if batch_id in self.batches:
+                self._abort_dual_registration(self.batches[batch_id], err)
+            raise err
         if any(other is None or (len(other) >= 6 and not other[5]) for other in layouts):
             if batch_dual and role is None:
                 err = _InvalidRegistrationError(

@@ -261,7 +261,10 @@ def test_dual_batch_uses_shared_direction_before_bucket_collectives(monkeypatch)
 def test_failed_pair_completion_wakes_all_waiters():
     agent = TensorBusAgent.__new__(TensorBusAgent)
     agent.rank = 0
-    agent.store = SimpleNamespace(get=lambda key: b"pair" if key == "pair_completion:entry:1" else None)
+    agent.store = SimpleNamespace(
+        get=lambda key: b"pair" if key == "pair_completion:entry:1" else None,
+        set=lambda *_args, **_kwargs: None,
+    )
     agent._completion_cursor = 0
     agent.pending_pairs = {"pair": SimpleNamespace(all_semaphores=lambda: ["first", "second"])}
     recorded, released = [], []
