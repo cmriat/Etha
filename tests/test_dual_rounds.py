@@ -114,6 +114,23 @@ def test_partial_target_direction_fails_before_collectives(monkeypatch):
         agent._execute_dual_transfer(recv, batch)
 
 
+def test_init_pair_rejects_mismatched_remote_peer():
+    from etha.tensor_bus.commands import InitPair
+
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.pairs = {}
+    agent.pending_pairs = {}
+    agent._write_init_pair_keys = lambda _msg: None
+    first = InitPair(pair_name="p", local_name="A", remote_name="B", expected_world_size=1)
+    agent._handle_init_pair(first)
+    mismatch = InitPair(pair_name="p", local_name="B", remote_name="C", expected_world_size=1)
+    with pytest.raises(ValueError, match="known: A, B"):
+        agent._handle_init_pair(mismatch)
+    assert "p" in agent.pending_pairs
+    assert agent.pending_pairs["p"].remote_name == "B"
+
+
 def test_unknown_transfer_role_is_rejected_before_direction_pin():
     agent = TensorBusAgent.__new__(TensorBusAgent)
     agent.rank = 0

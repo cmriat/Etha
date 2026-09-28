@@ -263,7 +263,7 @@ class Bucket:
             else:
                 chunk.buffer = buffer_slice
 
-        if self.is_source:
+        if self.is_source and self.device is not None and self.device.type == "cuda":
             event = torch.cuda.Event()
             event.record()
             self.buffer_ready_event = event

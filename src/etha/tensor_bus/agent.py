@@ -338,10 +338,11 @@ class TensorBusAgent:
             )
             self.pending_pairs[pair_name] = pending
         else:
-            if pending.local_name != local_name and pending.remote_name != local_name:
+            peers = {pending.local_name, pending.remote_name}
+            if local_name not in peers or remote_name not in peers:
                 raise ValueError(
-                    f"Agent {self.rank}: InitPair for pair '{pair_name}' names unknown peer "
-                    f"'{local_name}' (known: {pending.local_name}, {pending.remote_name})"
+                    f"Agent {self.rank}: InitPair for pair '{pair_name}' names '{local_name}'->'{remote_name}' "
+                    f"(known: {pending.local_name}, {pending.remote_name})"
                 )
             pending.expected.setdefault(local_name, expected_local)
         pending.add_semaphore(local_name, msg.semaphore_name)
