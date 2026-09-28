@@ -725,7 +725,7 @@ class TensorBusAgent:
         logger.info(f"Agent {self.rank}: Handling transfer for batch '{batch_id}' ({transfer_type})")
 
         if batch_id not in self.batches:
-            raise ValueError(f"Transfer for unknown batch: {batch_id}")
+            raise _InvalidRegistrationError(f"Transfer for unknown batch: {batch_id}")
 
         batch_state = self.batches[batch_id]
         if msg.generation and batch_state.generation and msg.generation != batch_state.generation:
@@ -894,22 +894,37 @@ class TensorBusAgent:
             )
             return False
 
+        def _fail_round(err: BaseException) -> None:
+            parked_round = batch_state.dual_round_pending.pop((direction, msg.sync_round), None)
+            if parked_round:
+                for parked in parked_round["semaphores"]:
+                    if parked != msg.semaphore_name:
+                        self._record_command_error(parked, err)
+                        self._release_semaphore(parked)
+            raise err
+
         if direction not in batch_state.dual_direction_buckets:
-            raise ValueError(
-                f"Batch {batch_id}: no buckets for direction {src_role}->{dst_role}. "
-                f"Both roles must register before transferring."
+            _fail_round(
+                _InvalidRegistrationError(
+                    f"Batch {batch_id}: no buckets for direction {src_role}->{dst_role}. "
+                    f"Both roles must register before transferring."
+                )
             )
         buckets = batch_state.dual_direction_buckets[direction]
         if buckets is None:
-            raise _InvalidRegistrationError(
-                f"Batch {batch_id}: direction {src_role}->{dst_role} has a Partial target, which is not supported"
+            _fail_round(
+                _InvalidRegistrationError(
+                    f"Batch {batch_id}: direction {src_role}->{dst_role} has a Partial target, which is not supported"
+                )
             )
 
         seen_rounds = [None] * dist.get_world_size(batch_state.batch_group)
         dist.all_gather_object(seen_rounds, msg.sync_round, group=batch_state.batch_group)
         if any(round_id != msg.sync_round for round_id in seen_rounds):
-            raise _InvalidRegistrationError(
-                f"Batch {batch_id}: mixed sync_round {seen_rounds} for {src_role}->{dst_role}"
+            _fail_round(
+                _InvalidRegistrationError(
+                    f"Batch {batch_id}: mixed sync_round {seen_rounds} for {src_role}->{dst_role}"
+                )
             )
         dist.barrier(batch_state.batch_group)
         logger.info(
