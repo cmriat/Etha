@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 class BatchHandler:
     """Handler for batch tensor operations across multiple pairs."""
 
-    def __init__(self, client: TensorBusClient, batch_id: str, pair_names: list[str]):
+    def __init__(self, client: TensorBusClient, batch_id: str, pair_names: list[str], generation: int = 0):
         """Initialize BatchHandler.
 
         Args:
@@ -41,6 +41,7 @@ class BatchHandler:
         self._client_ref = weakref.ref(client)
         self.batch_id = batch_id
         self.pair_names = pair_names
+        self.generation = generation
         self._closed = False
 
     @property
@@ -138,7 +139,7 @@ class BatchHandler:
         """
         if self._closed:
             return
-        msg = CleanupBatch(batch_id=self.batch_id)
+        msg = CleanupBatch(batch_id=self.batch_id, generation=self.generation)
         self.client._execute_command_with_semaphore(
             msg, "cleanup_batch", context_id=f"batch_{self.batch_id}", blocking=blocking, timeout=timeout
         )
@@ -398,7 +399,13 @@ class TensorBusClient:
         )
 
         unique_pair_names = list(dict.fromkeys(pair_name for _, pair_name in tensors))
-        return BatchHandler(client=self, batch_id=batch_id, pair_names=unique_pair_names)
+        generation = 0
+        if self.state_env is not None:
+            with self.state_env.begin(db=self.state_db) as txn:
+                raw = txn.get(f"batch:{batch_id}/generation".encode())
+            if raw:
+                generation = msgspec.msgpack.Decoder(int).decode(raw)
+        return BatchHandler(client=self, batch_id=batch_id, pair_names=unique_pair_names, generation=generation)
 
     def _connect_agent(self, path: str, timeout: float):
         """Connect to Agent.

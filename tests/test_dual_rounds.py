@@ -250,11 +250,21 @@ def test_failed_pair_completion_wakes_all_waiters():
     agent._complete_pair = fail_pair
     agent._record_command_error = record
     agent._release_semaphore = released.append
-    with pytest.raises(ValueError, match="bad mesh"):
-        agent._consume_completion_log()
+    agent._consume_completion_log()
     assert recorded == [("first", "bad mesh"), ("second", "bad mesh")]
     assert released == ["first", "second"]
     assert agent.pending_pairs == {}
+
+
+def test_stale_cleanup_does_not_delete_a_reused_batch():
+    from etha.tensor_bus.commands import CleanupBatch
+
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    live = BatchState(batch_id="b", pair_names=["p"], dual=True, generation=2)
+    agent.batches = {"b": live}
+    agent._handle_cleanup_batch(CleanupBatch(batch_id="b", generation=1))
+    assert agent.batches["b"] is live
 
 
 def test_dual_pair_missing_mesh_fails_before_group_creation(monkeypatch):

@@ -193,6 +193,7 @@ class TensorBusAgent:
 
         self.pairs: dict[str, PairState] = {}
         self.batches: dict[str, BatchState] = {}
+        self._batch_generation: dict[str, int] = {}
         # Rendezvous state for pairs whose InitPair handshake is not yet
         # complete. InitPair never blocks (see _handle_init_pair); completion
         # is polled from the main loop so one agent can drive both roles of a
@@ -478,7 +479,8 @@ class TensorBusAgent:
                         self._record_command_error(semaphore_name, e)
                     except Exception:
                         logger.exception(f"Agent {self.rank}: Failed to record InitPair error")
-                raise
+                # Stay in the service loop: a bad InitPair must not take down
+                # unrelated pairs already running on this agent.
             finally:
                 # Both successful and failed InitPair waiters must wake up.
                 # On failure, the error record is written before the wakeup.
@@ -954,6 +956,13 @@ class TensorBusAgent:
         batch_id = msg.batch_id
 
         if batch_id in self.batches:
+            live = self.batches[batch_id]
+            if msg.generation and live.generation and msg.generation != live.generation:
+                logger.info(
+                    f"Agent {self.rank}: ignoring stale CleanupBatch for {batch_id} "
+                    f"gen {msg.generation} (live {live.generation})"
+                )
+                return
             # A dual batch that never reached its second role still parks the
             # first role's RegisterTensors semaphore — and a direction-round
             # whose peer command never arrived parks transfer semaphores.
@@ -1039,23 +1048,20 @@ class TensorBusAgent:
             name: (self.pairs[name].dual_endpoint if self.pairs.get(name) is not None else False) for name in pair_names
         }
         batch_dual = any(pair_dual.values())
-        if batch_dual and not all(pair_dual.values()):
-            raise _InvalidRegistrationError(f"Batch {batch_id} mixes dual-endpoint and split pairs: {pair_dual}")
-        if batch_dual and role is None:
-            raise _InvalidRegistrationError(
-                f"Batch {batch_id} registers a dual-endpoint pair; RegisterTensors.role is required"
-            )
-        if not batch_dual and role is not None:
-            raise _InvalidRegistrationError(
-                f"Batch {batch_id} has no dual-endpoint pair; RegisterTensors.role must be None"
-            )
+        mix_ok = (not batch_dual) or all(pair_dual.values())
+        role_ok = True
         if batch_dual:
-            for name in pair_names:
-                if role not in self.pairs[name].role_ranks:
-                    raise _InvalidRegistrationError(
-                        f"Batch {batch_id}: role '{role}' is not a peer of pair '{name}' "
-                        f"(peers: {sorted(self.pairs[name].role_ranks)})"
-                    )
+            if role is None:
+                role_ok = False
+            else:
+                for name in pair_names:
+                    pair = self.pairs.get(name)
+                    if pair is None or role not in pair.role_ranks:
+                        role_ok = False
+                        break
+        elif role is not None:
+            role_ok = False
+        local_ok = mix_ok and role_ok
 
         pair_layout = []
         local_memberships = set()
@@ -1069,9 +1075,23 @@ class TensorBusAgent:
                 membership = tuple(sorted((local_ranks, remote_ranks)))
             pair_layout.append((name, len(grouped[name]), membership))
         local_membership_valid = len(local_memberships) == 1
-        layout = (batch_id, bucket_size, tuple(pair_layout), local_membership_valid, role)
+        layout = (batch_id, bucket_size, tuple(pair_layout), local_membership_valid, role, local_ok)
         layouts = [None] * self.world_size
         dist.all_gather_object(layouts, layout, group=dist.group.WORLD)
+        if any(other is None or (len(other) >= 6 and not other[5]) for other in layouts):
+            if batch_dual and role is None:
+                err = _InvalidRegistrationError(
+                    f"Batch {batch_id} registers a dual-endpoint pair; RegisterTensors.role is required"
+                )
+            elif not batch_dual and role is not None:
+                err = _InvalidRegistrationError(
+                    f"Batch {batch_id} has no dual-endpoint pair; RegisterTensors.role must be None"
+                )
+            else:
+                err = _InvalidRegistrationError(f"Batch {batch_id}: invalid registration: {layouts}")
+            if batch_id in self.batches:
+                self._abort_dual_registration(self.batches[batch_id], err)
+            raise err
         memberships = {membership for _, _, membership in pair_layout}
         if not pair_names or None in memberships or len(memberships) != 1 or not local_membership_valid:
             raise _InvalidRegistrationError(f"Inconsistent or invalid RegisterTensors layout across ranks: {layouts}")
@@ -1086,6 +1106,7 @@ class TensorBusAgent:
                     pair_names=pair_names,
                     bucket_size=bucket_size,
                     dual=True,
+                    generation=self._next_batch_generation(batch_id),
                 )
                 self.batches[batch_id] = batch_state
             signature = layout[:4]
@@ -1107,6 +1128,7 @@ class TensorBusAgent:
             batch_id=batch_id,
             pair_names=pair_names,
             bucket_size=bucket_size,
+            generation=self._next_batch_generation(batch_id),
         )
         self.batches[batch_id] = batch_state
 
@@ -1283,6 +1305,17 @@ class TensorBusAgent:
             self._release_semaphore(parked)
         batch_state.pending_register_semaphores.clear()
         return True
+
+    def _next_batch_generation(self, batch_id: str) -> int:
+        gens = getattr(self, "_batch_generation", None)
+        if gens is None:
+            gens = self._batch_generation = {}
+        gen = gens.get(batch_id, 0) + 1
+        gens[batch_id] = gen
+        if getattr(self, "state_env", None) is not None:
+            with self.state_env.begin(write=True, db=self.state_db) as txn:
+                txn.put(f"batch:{batch_id}/generation".encode(), msgspec.msgpack.encode(gen))
+        return gen
 
     def _abort_dual_registration(self, batch: BatchState, error: BaseException) -> None:
         """Fail a dual batch: wake parked registers and drop the incomplete state."""

@@ -93,9 +93,15 @@ class QueryStatus(BaseCommand):
 
 
 class CleanupBatch(BaseCommand):
-    """Cleanup a batch's state in the agent."""
+    """Cleanup a batch's state in the agent.
+
+    ``generation`` is the registration token the client received. 0 means
+    unspecified (always matches). A stale sibling handler after batch-id reuse
+    carries an older generation and is ignored.
+    """
 
     batch_id: str
+    generation: int = 0
 
 
 Message = Transfer | RegisterTensors | InitPair | QueryStatus | CleanupBatch

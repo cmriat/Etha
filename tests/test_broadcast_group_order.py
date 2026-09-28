@@ -73,6 +73,7 @@ def test_agent_validates_layout_and_prewarms_before_chunks(monkeypatch):
         rank=0,
         world_size=2,
         batches={},
+        _next_batch_generation=lambda _batch_id: 1,
         pairs={
             name: SimpleNamespace(
                 local_ranks=[0],
