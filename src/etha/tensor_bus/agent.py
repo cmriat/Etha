@@ -229,6 +229,9 @@ class TensorBusAgent:
         # Update heartbeat (for connection validation)
         self._update_heartbeat()
 
+        if self.pending_pairs:
+            self._poll_pending_pairs()
+
         msg = self.command_queue.dequeue(block=True, timeout=TIME_INTERVAL)
         handled = msg is not None
         if msg is not None:
@@ -342,11 +345,21 @@ class TensorBusAgent:
                 self._release_semaphore(msg.semaphore_name)
             return
 
-        # Steps 1-3: write this side's keys (idempotent across retries)
-        self._write_init_pair_keys(msg)
-
         # Step 4: record pending state; the main loop completes the pair
         pending = self.pending_pairs.get(pair_name)
+        if pending is not None:
+            peers = {pending.local_name, pending.remote_name}
+            if local_name not in peers or remote_name not in peers:
+                raise _InvalidRegistrationError(
+                    f"Agent {self.rank}: InitPair for pair '{pair_name}' names '{local_name}'->'{remote_name}' "
+                    f"(known: {pending.local_name}, {pending.remote_name})"
+                )
+            if local_name in pending.expected and pending.expected[local_name] != expected_local:
+                raise _InvalidRegistrationError(
+                    f"Agent {self.rank}: InitPair for pair '{pair_name}' expected_world_size "
+                    f"{expected_local} != {pending.expected[local_name]}"
+                )
+        self._write_init_pair_keys(msg)
         if pending is None:
             pending = _PendingPair(
                 pair_name=pair_name,
@@ -356,13 +369,8 @@ class TensorBusAgent:
             )
             self.pending_pairs[pair_name] = pending
         else:
-            peers = {pending.local_name, pending.remote_name}
-            if local_name not in peers or remote_name not in peers:
-                raise _InvalidRegistrationError(
-                    f"Agent {self.rank}: InitPair for pair '{pair_name}' names '{local_name}'->'{remote_name}' "
-                    f"(known: {pending.local_name}, {pending.remote_name})"
-                )
             pending.expected.setdefault(local_name, expected_local)
+            self.store.set(f"pair_completion:logged:{pair_name}", "")
         pending.add_semaphore(local_name, msg.semaphore_name)
         logger.info(
             f"Agent {self.rank}: Pair '{pair_name}' pending; waiting for store rendezvous "
@@ -496,12 +504,11 @@ class TensorBusAgent:
                         self._record_command_error(semaphore_name, e)
                     except Exception:
                         logger.exception(f"Agent {self.rank}: Failed to record InitPair error")
-                # Stay in the service loop: a bad InitPair must not take down
-                # unrelated pairs already running on this agent.
-                self.store.set(f"pair_completion:logged:{pair_name}", "")
-            finally:
-                # Both successful and failed InitPair waiters must wake up.
-                # On failure, the error record is written before the wakeup.
+                    self._release_semaphore(semaphore_name)
+                pending.semaphores.clear()
+                # Keep pending so a corrected InitPair retry can attach; the
+                # retry clears the log marker and is re-queued.
+            else:
                 for semaphore_name in pending.all_semaphores():
                     self._release_semaphore(semaphore_name)
                 self.pending_pairs.pop(pair_name, None)

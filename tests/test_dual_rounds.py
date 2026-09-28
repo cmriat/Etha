@@ -266,7 +266,16 @@ def test_failed_pair_completion_wakes_all_waiters():
         set=lambda *_args, **_kwargs: None,
     )
     agent._completion_cursor = 0
-    agent.pending_pairs = {"pair": SimpleNamespace(all_semaphores=lambda: ["first", "second"])}
+
+    class Pending:
+        def __init__(self):
+            self.semaphores = {"a": ["first", "second"]}
+
+        def all_semaphores(self):
+            return [s for names in self.semaphores.values() for s in names if s]
+
+    pending = Pending()
+    agent.pending_pairs = {"pair": pending}
     recorded, released = [], []
 
     def fail_pair(_pending):
@@ -283,7 +292,8 @@ def test_failed_pair_completion_wakes_all_waiters():
     agent._consume_completion_log()
     assert recorded == [("first", "bad mesh"), ("second", "bad mesh")]
     assert released == ["first", "second"]
-    assert agent.pending_pairs == {}
+    assert agent.pending_pairs["pair"] is pending
+    assert pending.all_semaphores() == []
 
 
 def test_stale_cleanup_does_not_delete_a_reused_batch():

@@ -494,12 +494,12 @@ class TensorBusClient:
         """Has the (src -> dst) direction of a dual batch requested round r?
 
         The agent publishes the request when the direction-round's FIRST
-        command arrives — before that command parks. True once the requested
-        round is ``sync_round`` or later; the value is monotonic and never
-        resets, so a polling watcher cannot miss it. A reactive recv issuer
-        (engine service) polls this, quiesces, and only then issues the
-        matching ``sync_round`` recv — the completion signal must never drive
-        the START of a recv.
+        command arrives — before that command parks. True only when the
+        published request id equals ``sync_round``: a later round must not
+        satisfy an earlier recv. A reactive recv issuer (engine service)
+        polls this, quiesces, and only then issues the matching
+        ``sync_round`` recv — the completion signal must never drive the
+        START of a recv.
         """
         state_name = f"transfer_request_round:{direction[0]}->{direction[1]}"
         query_msg = QueryStatus(batch_id=batch_id, state_name=state_name)
@@ -514,7 +514,7 @@ class TensorBusClient:
         with self.state_env.begin(db=self.state_db) as txn:
             state_bytes = txn.get(state_key)
         requested = msgspec.msgpack.Decoder(int).decode(state_bytes) if state_bytes else -1
-        return requested >= sync_round
+        return requested == sync_round
 
     def close(self):
         """Cleanup resources."""
