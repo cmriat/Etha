@@ -504,8 +504,9 @@ class TensorBusClient:
         state_name = f"transfer_request_round:{direction[0]}->{direction[1]}"
         query_msg = QueryStatus(batch_id=batch_id, state_name=state_name)
         logger.debug(f"TensorBusClient[{self.agent_rank}]: Query {state_name} for batch '{batch_id}'")
+        del blocking  # result is read below; the query must complete first
         self._execute_command_with_semaphore(
-            query_msg, "query", context_id=f"batch_{batch_id}", blocking=blocking, timeout=timeout
+            query_msg, "query", context_id=f"batch_{batch_id}", blocking=True, timeout=timeout
         )
 
         if self.state_env is None:

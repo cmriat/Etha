@@ -103,7 +103,7 @@ def m2m_to_chunks(
             # rank itself needs no wire op — the LOCAL chunk emitted below covers
             # it in-process, and an isend to self would never match.
             self_p2p = transport == Transport.P2P and dst_ranks == (rank,)
-            if not self_p2p:
+            if source_tensor is not None and not (self_p2p and target_tensor is not None):
                 chunks.append(
                     Chunk(
                         chunk_shape=calculate_chunk_shape(source_num_slicers_extended, source_tensor_shape),
@@ -129,7 +129,7 @@ def m2m_to_chunks(
                 dst_slice_tuples = get_slice_from_multi_index(
                     dst_idx, target_num_slicers_extended, target_slicer_tuples
                 )
-            if src_rank == rank:
+            if src_rank == rank and source_tensor is not None and target_tensor is not None:
                 # dst landed on the source rank: read source, write target locally.
                 # Colocated meshes make this the common case — the source and
                 # target are two different tensors on the same rank, so the chunk
@@ -151,7 +151,7 @@ def m2m_to_chunks(
                         src_tensor=source_tensor,
                     )
                 )
-            else:
+            elif target_tensor is not None:
                 chunks.append(
                     Chunk(
                         chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),

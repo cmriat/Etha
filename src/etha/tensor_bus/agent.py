@@ -1112,8 +1112,9 @@ class TensorBusAgent:
             err = _InvalidRegistrationError(
                 f"Batch {batch_id}: role '{role}' already registered; dual-endpoint batches merge roles and never overwrite"
             )
-            if batch_id in self.batches:
-                self._abort_dual_registration(self.batches[batch_id], err)
+            existing = self.batches.get(batch_id)
+            if existing is not None and existing.pending_register_semaphores:
+                self._abort_dual_registration(existing, err)
             raise err
         if any(other is None or (len(other) >= 6 and not other[5]) for other in layouts):
             if batch_dual and role is None:
