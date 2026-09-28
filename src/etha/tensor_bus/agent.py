@@ -394,8 +394,7 @@ class TensorBusAgent:
         existing = self.store.get(expected_key)
         if existing not in (None, b"", want.encode()) and existing.decode() != want:
             raise _InvalidRegistrationError(
-                f"Agent {self.rank}: InitPair for pair '{pair_name}' expected_world_size "
-                f"{want} != {existing.decode()}"
+                f"Agent {self.rank}: InitPair for pair '{pair_name}' expected_world_size {want} != {existing.decode()}"
             )
         self.store.set(expected_key, want)
 
