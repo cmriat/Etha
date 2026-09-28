@@ -98,6 +98,78 @@ def test_dual_batch_pins_first_direction_with_configurable_roles(source, target)
         agent._execute_dual_transfer(reverse, batch)
 
 
+def test_partial_target_direction_fails_before_collectives(monkeypatch):
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.store = _direction_store()
+    agent.pairs = {"p": SimpleNamespace(role_ranks={TRAIN: [0], INFER: [0]}, pair_name="p")}
+    agent._publish_transfer_request = lambda *_args: None
+    batch = BatchState(batch_id="b", pair_names=["p"], dual=True, local_leader=0)
+    batch.dual_direction_buckets[(TRAIN, INFER)] = None
+    send = SimpleNamespace(batch_id="b", role=TRAIN, transfer_type="send", sync_round=0, semaphore_name=None)
+    recv = SimpleNamespace(batch_id="b", role=INFER, transfer_type="recv", sync_round=0, semaphore_name=None)
+    assert agent._execute_dual_transfer(send, batch) is False
+    monkeypatch.setattr(dist, "barrier", lambda _group: pytest.fail("collective reached for Partial target"))
+    with pytest.raises(ValueError, match="Partial target"):
+        agent._execute_dual_transfer(recv, batch)
+
+
+def test_unknown_transfer_role_is_rejected_before_direction_pin():
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.store = _direction_store()
+    agent.pairs = {"p": SimpleNamespace(role_ranks={TRAIN: [0], INFER: [0]}, pair_name="p")}
+    agent._publish_transfer_request = lambda *_args: None
+    batch = BatchState(batch_id="b", pair_names=["p"], dual=True, local_leader=0)
+    bogus = SimpleNamespace(batch_id="b", role="other", transfer_type="send", sync_round=0, semaphore_name=None)
+    with pytest.raises(ValueError, match="is not a peer"):
+        agent._execute_dual_transfer(bogus, batch)
+    assert batch.dual_direction is None
+
+
+def test_stale_round_ack_releases_a_parked_peer():
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.store = _direction_store()
+    agent.pairs = {"p": SimpleNamespace(role_ranks={TRAIN: [0], INFER: [0]}, pair_name="p")}
+    released = []
+    agent._release_semaphore = released.append
+    batch = BatchState(batch_id="b", pair_names=["p"], dual=True, local_leader=0, dual_direction=(TRAIN, INFER))
+    batch.dual_direction_done[(TRAIN, INFER)] = 2
+    batch.dual_round_pending[((TRAIN, INFER), 1)] = {"roles": {TRAIN}, "semaphores": ["/parked"]}
+    late = SimpleNamespace(batch_id="b", role=INFER, transfer_type="recv", sync_round=1, semaphore_name="/late")
+    assert agent._execute_dual_transfer(late, batch) is True
+    assert released == ["/parked"]
+    assert ((TRAIN, INFER), 1) not in batch.dual_round_pending
+
+
+def test_failed_dual_generation_wakes_the_parked_register():
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.pairs = {
+        "p": SimpleNamespace(
+            role_ranks={TRAIN: [0], INFER: [0]},
+            role_groups={TRAIN: object(), INFER: object()},
+            pair_group=object(),
+            pair_name="p",
+        )
+    }
+    batch = BatchState(batch_id="b", pair_names=["p"], dual=True, local_leader=0)
+    batch.pair_role_tensors[("p", TRAIN)] = [torch.zeros(2)]
+    batch.pair_role_dtypes[("p", TRAIN)] = [torch.float32]
+    batch.pending_register_semaphores = ["/sem-train"]
+    agent.batches = {"b": batch}
+    released, recorded = [], []
+    agent._release_semaphore = released.append
+    agent._record_command_error = lambda name, _error: recorded.append(name)
+    agent._generate_dual_buckets = lambda _batch: (_ for _ in ()).throw(ValueError("bad layout"))
+    with pytest.raises(ValueError, match="bad layout"):
+        agent._register_dual_role(batch, {"p": []}, INFER, None)
+    assert released == ["/sem-train"]
+    assert recorded == ["/sem-train"]
+    assert "b" not in agent.batches
+
+
 def test_dual_batch_uses_shared_direction_before_bucket_collectives(monkeypatch):
     agent = TensorBusAgent.__new__(TensorBusAgent)
     agent.rank = 1
@@ -290,7 +362,7 @@ def test_multi_round_same_batch_updates_every_round(tmp_path):
 
         handler_train.close()
         # A new temporary sink reuses this batch ID after the old handlers
-        # close. Its higher round must execute once, not inherit stale state.
+        # close. Round 0 must not inherit the previous completion signal.
         new_target = torch.zeros_like(target)
         with ThreadPoolExecutor(max_workers=2) as pool:
             new_train = pool.submit(
@@ -301,10 +373,11 @@ def test_multi_round_same_batch_updates_every_round(tmp_path):
             )
             handler_train = new_train.result(timeout=90)
             handler_infer = new_infer.result(timeout=90)
+        assert handler_infer.query_transfer_signal(sync_round=0) is False
         master.fill_(42)
-        _round_transfer(handler_train, handler_infer, TRAIN, INFER, 4)
+        _round_transfer(handler_train, handler_infer, TRAIN, INFER, 0)
         assert torch.equal(new_target, master)
-        assert handler_infer.query_transfer_signal(sync_round=4) is True
+        assert handler_infer.query_transfer_signal(sync_round=0) is True
         handler_train.close()
         handler_infer.close()
         client_train.close()

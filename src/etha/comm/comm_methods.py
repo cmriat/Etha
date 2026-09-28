@@ -70,7 +70,8 @@ def bucket_comm(
             bucket.prepare()
             bucket.launch()
             bucket.finalize()  # waits on the work before writing back
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         return
 
     rank = dist.get_rank()

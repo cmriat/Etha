@@ -123,7 +123,7 @@ class Chunk:
                 # source tensor isn't mutated. Storage-level alias check —
                 # ``tensor.data_ptr()`` accounts for ``storage_offset`` and
                 # would miss non-zero-offset slices that still alias.
-                if buffer.untyped_storage().data_ptr() == self.tensor.untyped_storage().data_ptr():
+                if buffer.untyped_storage().data_ptr() == read_tensor.untyped_storage().data_ptr():
                     buffer = buffer.contiguous().clone()
                 for group, op_str in self.source_partial_groups:
                     dist.all_reduce(buffer, op=_REDUCE_OP_MAP[op_str], group=group)

@@ -801,6 +801,8 @@ class TensorBusAgent:
                 f"Batch {batch_id}: dual-endpoint transfer requires the issuing role (Transfer.role); got None"
             )
         first_pair = self.pairs[batch_state.pair_names[0]]
+        if msg.role not in first_pair.role_ranks:
+            raise ValueError(f"Batch {batch_id}: role '{msg.role}' is not a peer of pair '{first_pair.pair_name}'")
         other_roles = [name for name in first_pair.role_ranks if name != msg.role]
         if not other_roles:
             raise ValueError(f"Batch {batch_id}: role '{msg.role}' is not a peer of pair '{first_pair.pair_name}'")
@@ -828,6 +830,10 @@ class TensorBusAgent:
                 f"Agent {self.rank}: Batch {batch_id}: direction {src_role}->{dst_role} round {msg.sync_round} "
                 f"already executed (done={done_round}); acknowledging without re-execution"
             )
+            pending = batch_state.dual_round_pending.pop((direction, msg.sync_round), None)
+            if pending:
+                for parked in pending["semaphores"]:
+                    self._release_semaphore(parked)
             return True
 
         pending = batch_state.dual_round_pending.setdefault(
@@ -849,11 +855,15 @@ class TensorBusAgent:
             )
             return False
 
-        buckets = batch_state.dual_direction_buckets.get(direction)
-        if buckets is None:
+        if direction not in batch_state.dual_direction_buckets:
             raise ValueError(
                 f"Batch {batch_id}: no buckets for direction {src_role}->{dst_role}. "
                 f"Both roles must register before transferring."
+            )
+        buckets = batch_state.dual_direction_buckets[direction]
+        if buckets is None:
+            raise ValueError(
+                f"Batch {batch_id}: direction {src_role}->{dst_role} has a Partial target, which is not supported"
             )
 
         dist.barrier(batch_state.batch_group)
@@ -960,10 +970,34 @@ class TensorBusAgent:
                         parked, RuntimeError(f"Batch {batch_id}: cleaned up before direction-round executed")
                     )
                     self._release_semaphore(parked)
+            batch = self.batches[batch_id]
+            if batch.dual and self.rank == batch.local_leader:
+                self._reset_dual_store_signals(batch)
             del self.batches[batch_id]
             logger.info(f"Agent {self.rank}: Cleaned up batch {batch_id}")
         else:
             logger.warning(f"Agent {self.rank}: Cleanup requested for unknown batch {batch_id}")
+
+    def _reset_dual_store_signals(self, batch: BatchState) -> None:
+        """Drop store-backed round signals so a reused batch id cannot inherit them.
+
+        TCPStore cannot delete keys, so write ``-1`` (the same missing-round
+        sentinel the query path uses). Do not clear ``dual_direction``: a stale
+        empty value would make ``wait_for_key`` return immediately on reuse.
+        Same-direction reuse keeps the pin; a opposite-direction reuse still
+        fails closed.
+        """
+        batch_id = batch.batch_id
+        self.store.set(f"batch:{batch_id}/state:transfer_signal_round", "-1", component="global")
+        directions = set(batch.dual_direction_buckets)
+        if batch.dual_direction:
+            directions.add(batch.dual_direction)
+        for src_role, dst_role in directions:
+            self.store.set(
+                f"batch:{batch_id}/state:transfer_request_round:{src_role}->{dst_role}",
+                "-1",
+                component="global",
+            )
 
     def _handle_register_tensors(self, msg: RegisterTensors):
         """Handle RegisterTensors command for batch tensor registration.
@@ -1235,7 +1269,15 @@ class TensorBusAgent:
                     batch_state.pending_register_semaphores.append(semaphore_name)
                 return False
 
-        self._generate_dual_buckets(batch_state)
+        try:
+            self._generate_dual_buckets(batch_state)
+        except Exception as e:
+            for parked in batch_state.pending_register_semaphores:
+                self._record_command_error(parked, e)
+                self._release_semaphore(parked)
+            batch_state.pending_register_semaphores.clear()
+            self.batches.pop(batch_state.batch_id, None)
+            raise
         for parked in batch_state.pending_register_semaphores:
             self._release_semaphore(parked)
         batch_state.pending_register_semaphores.clear()
@@ -1276,12 +1318,14 @@ class TensorBusAgent:
                     raise ValueError(f"Pair '{pair_name}' has a single peer name; not dual")
                 dst_role = dst_roles[0]
                 m2m = pair.m2m_by_source_role[src_role]
-                if m2m is None:
+                if m2m is None or (
+                    (src_role, dst_role) in chunks_by_direction and chunks_by_direction[(src_role, dst_role)] is None
+                ):
                     logger.info(
                         f"Agent {self.rank}: Batch {batch_id}: pair '{pair_name}' has no map for direction "
-                        f"{src_role}->{dst_role} (Partial target unsupported); contributes no chunks"
+                        f"{src_role}->{dst_role} (Partial target unsupported)"
                     )
-                    chunks_by_direction.setdefault((src_role, dst_role), [])
+                    chunks_by_direction[(src_role, dst_role)] = None
                     continue
                 partials = (pair.partial_by_source_role or {}).get(src_role)
                 src_tensors = batch_state.pair_role_tensors[(pair_name, src_role)]
@@ -1317,13 +1361,17 @@ class TensorBusAgent:
                 )
 
         for direction in sorted(chunks_by_direction):
+            chunks = chunks_by_direction[direction]
+            if chunks is None:
+                batch_state.dual_direction_buckets[direction] = None
+                continue
             batch_state.dual_direction_buckets[direction] = chunk_to_bucket_ops(
-                chunks=chunks_by_direction[direction], bucket_size=coalesce_bytes
+                chunks=chunks, bucket_size=coalesce_bytes
             )
             logger.info(
                 f"Agent {self.rank}: Batch {batch_id}: direction {direction[0]}->{direction[1]}: "
                 f"{len(batch_state.dual_direction_buckets[direction])} buckets "
-                f"({len(chunks_by_direction[direction])} chunks across {len(batch_state.pair_names)} pairs)"
+                f"({len(chunks)} chunks across {len(batch_state.pair_names)} pairs)"
             )
 
         logger.info(
