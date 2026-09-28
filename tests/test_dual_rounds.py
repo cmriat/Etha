@@ -313,6 +313,12 @@ def test_dual_pair_missing_mesh_fails_before_group_creation(monkeypatch):
     agent = TensorBusAgent.__new__(TensorBusAgent)
     agent.rank = 0
     agent.pairs = {}
+    box = {}
+    agent.store = SimpleNamespace(
+        get=lambda key, **_k: box.get(key),
+        set=lambda key, value, **_k: box.__setitem__(key, value.encode() if isinstance(value, str) else value),
+        wait_for_key=lambda key, **_k: box[key],
+    )
     agent._check_side_ready = lambda _pair, _name: (1, [0])
     agent._collect_mesh_placement_info = lambda _pair, _ranks, _name: []
     monkeypatch.setattr(

@@ -389,7 +389,14 @@ class TensorBusAgent:
 
         # Step 2: Write expected_world_size (all ranks write the same value, idempotent)
         expected_key = f"pair:{pair_name}/{local_name}/expected_world_size"
-        self.store.set(expected_key, str(msg.expected_world_size))
+        want = str(msg.expected_world_size)
+        existing = self.store.get(expected_key)
+        if existing not in (None, b"", want.encode()) and existing.decode() != want:
+            raise _InvalidRegistrationError(
+                f"Agent {self.rank}: InitPair for pair '{pair_name}' expected_world_size "
+                f"{want} != {existing.decode()}"
+            )
+        self.store.set(expected_key, want)
 
         # Step 3: Write device mesh and placement info to store. The peer name
         # is part of the key: a dual-endpoint agent writes two different meshes
@@ -517,6 +524,15 @@ class TensorBusAgent:
     def _complete_pair(self, pending: _PendingPair) -> None:
         """Complete a pair named by the ordered ready-pair log."""
         pair_name = pending.pair_name
+        peers_key = f"pair:{pair_name}/canonical_peers"
+        payload = json.dumps(sorted((pending.local_name, pending.remote_name)))
+        if self.store.get(peers_key) is None:
+            self.store.set(peers_key, payload)
+        got = self.store.wait_for_key(peers_key, timeout=60)
+        if json.loads(got) != json.loads(payload):
+            raise _InvalidRegistrationError(
+                f"Agent {self.rank}: Pair '{pair_name}' peer names {payload} != {got.decode()}"
+            )
         sides: dict[str, list[int]] = {}
         for name in (pending.local_name, pending.remote_name):
             ready = self._check_side_ready(pair_name, name)
@@ -901,6 +917,14 @@ class TensorBusAgent:
                     if parked != msg.semaphore_name:
                         self._record_command_error(parked, err)
                         self._release_semaphore(parked)
+            if self.rank == batch_state.local_leader:
+                prev = batch_state.dual_direction_done.get(direction, -1)
+                src_role, dst_role = direction
+                self.store.set(
+                    f"batch:{batch_id}/state:transfer_request_round:{src_role}->{dst_role}",
+                    str(prev),
+                    component="global",
+                )
             raise err
 
         if direction not in batch_state.dual_direction_buckets:
