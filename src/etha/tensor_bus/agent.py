@@ -388,8 +388,9 @@ class TensorBusAgent:
         self.store.set(local_key, "1")
 
         # Step 2: Write expected_world_size (all ranks write the same value, idempotent)
-        expected_key = f"pair:{pair_name}/{local_name}/expected_world_size"
         want = str(msg.expected_world_size)
+        self.store.set(f"pair:{pair_name}/{local_name}/rank:{self.rank}/expected_world_size", want)
+        expected_key = f"pair:{pair_name}/{local_name}/expected_world_size"
         existing = self.store.get(expected_key)
         if existing not in (None, b"", want.encode()) and existing.decode() != want:
             raise _InvalidRegistrationError(
@@ -411,15 +412,18 @@ class TensorBusAgent:
 
     def _check_side_ready(self, pair_name: str, name: str) -> tuple[int, list[int]] | None:
         """Non-blocking readiness of one side: (expected, ranks) or None."""
-        expected_bytes = self.store.get(f"pair:{pair_name}/{name}/expected_world_size")
-        if expected_bytes is None:
-            return None
-        expected = int(expected_bytes.decode())
-
         present = []
+        sizes = []
         for r in range(self.world_size):
             if self.store.get(f"pair:{pair_name}/rank:{r}/{name}") == b"1":
                 present.append(r)
+                size_bytes = self.store.get(f"pair:{pair_name}/{name}/rank:{r}/expected_world_size")
+                if size_bytes in (None, b""):
+                    return None
+                sizes.append(int(size_bytes.decode()))
+        if not sizes or len(set(sizes)) != 1:
+            return None
+        expected = sizes[0]
         if len(present) < expected:
             return None
         return expected, sorted(present)[:expected]
@@ -524,20 +528,21 @@ class TensorBusAgent:
     def _complete_pair(self, pending: _PendingPair) -> None:
         """Complete a pair named by the ordered ready-pair log."""
         pair_name = pending.pair_name
+        sides: dict[str, list[int]] = {}
+        for name in (pending.local_name, pending.remote_name):
+            ready = self._check_side_ready(pair_name, name)
+            assert ready is not None
+            sides[name] = ready[1]
         peers_key = f"pair:{pair_name}/canonical_peers"
         payload = json.dumps(sorted((pending.local_name, pending.remote_name)))
-        if self.store.get(peers_key) is None:
+        publisher = min(rank for ranks in sides.values() for rank in ranks)
+        if self.rank == publisher:
             self.store.set(peers_key, payload)
         got = self.store.wait_for_key(peers_key, timeout=60)
         if json.loads(got) != json.loads(payload):
             raise _InvalidRegistrationError(
                 f"Agent {self.rank}: Pair '{pair_name}' peer names {payload} != {got.decode()}"
             )
-        sides: dict[str, list[int]] = {}
-        for name in (pending.local_name, pending.remote_name):
-            ready = self._check_side_ready(pair_name, name)
-            assert ready is not None
-            sides[name] = ready[1]
 
         # Canonical ordering so all ranks call collectives in the same order;
         # the first-registered local/remote perspective is kept for the split
