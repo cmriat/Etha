@@ -249,7 +249,7 @@ def test_dual_batch_uses_shared_direction_before_bucket_collectives(monkeypatch)
     agent = TensorBusAgent.__new__(TensorBusAgent)
     agent.rank = 1
     agent.pairs = {"p": SimpleNamespace(role_ranks={"actor": [0, 1], "serve": [0, 1]}, pair_name="p")}
-    key = "batch:b/state:dual_direction"
+    key = "batch:b/g0/state:dual_direction"
     agent.store = _direction_store({("global", key): json.dumps(("actor", "serve")).encode()})
     batch = BatchState(batch_id="b", pair_names=["p"], dual=True, local_leader=0)
     monkeypatch.setattr(dist, "barrier", lambda _group: pytest.fail("collective reached after direction mismatch"))

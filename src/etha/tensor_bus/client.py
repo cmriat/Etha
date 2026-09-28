@@ -377,10 +377,8 @@ class TensorBusClient:
 
         if self.state_env is None:
             raise RuntimeError("State environment not initialized")
-        # Get the status from LMDB
-        state_key = f"batch:{batch_id}/state:{state_name}".encode()
         with self.state_env.begin(db=self.state_db) as txn:
-            state_bytes = txn.get(state_key)
+            state_bytes = txn.get(command_result_key(query_msg.semaphore_name))
             if sync_round is None:
                 if not state_bytes:
                     return False
@@ -537,9 +535,8 @@ class TensorBusClient:
 
         if self.state_env is None:
             raise RuntimeError("State environment is not initialized")
-        state_key = f"batch:{batch_id}/state:{state_name}".encode()
         with self.state_env.begin(db=self.state_db) as txn:
-            state_bytes = txn.get(state_key)
+            state_bytes = txn.get(command_result_key(query_msg.semaphore_name))
         requested = msgspec.msgpack.Decoder(int).decode(state_bytes) if state_bytes else -1
         return requested == sync_round
 

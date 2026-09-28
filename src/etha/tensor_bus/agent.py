@@ -846,8 +846,10 @@ class TensorBusAgent:
         else:
             src_role, dst_role = other_role, msg.role
         direction = (src_role, dst_role)
+        if msg.sync_round < 0:
+            raise _InvalidRegistrationError(f"Batch {batch_id}: sync_round must be >= 0, got {msg.sync_round}")
         if batch_state.dual_direction is None:
-            key = f"batch:{batch_id}/state:dual_direction"
+            key = f"batch:{batch_id}/g{batch_state.generation}/state:dual_direction"
             if self.rank == batch_state.local_leader and self.store.get(key, component="global") is None:
                 self.store.set(key, json.dumps(direction), component="global")
             batch_state.dual_direction = tuple(json.loads(self.store.wait_for_key(key, timeout=60, component="global")))
@@ -959,8 +961,11 @@ class TensorBusAgent:
         batch = self.batches[batch_id]
         if msg.generation and batch.generation and msg.generation != batch.generation:
             state = False if state_name == "transfer_signal" else -1
-            with self.state_env.begin(write=True, db=self.state_db) as txn:
-                txn.put(statedb_key, msgspec.msgpack.encode(state))
+            if msg.semaphore_name:
+                self._write_command_result(msg.semaphore_name, state)
+            else:
+                with self.state_env.begin(write=True, db=self.state_db) as txn:
+                    txn.put(statedb_key, msgspec.msgpack.encode(state))
             return
 
         if state_name == "transfer_signal":
@@ -985,8 +990,11 @@ class TensorBusAgent:
             logger.error(f"Agent {self.rank}: Invalid state name: {state_name}")
             return
 
-        with self.state_env.begin(write=True, db=self.state_db) as txn:
-            txn.put(statedb_key, msgspec.msgpack.encode(state))
+        if msg.semaphore_name:
+            self._write_command_result(msg.semaphore_name, state)
+        else:
+            with self.state_env.begin(write=True, db=self.state_db) as txn:
+                txn.put(statedb_key, msgspec.msgpack.encode(state))
 
     def _handle_cleanup_batch(self, msg: CleanupBatch):
         """Handle CleanupBatch command to free batch state resources."""
@@ -1538,9 +1546,19 @@ class TensorBusAgent:
             self.store.set(key, value, component=component)
         dist.barrier(batch.local_group)
 
-    def _write_command_result(self, semaphore_name: str, value: int) -> None:
+    def _write_command_result(self, semaphore_name: str, value: int | bool) -> None:
+        now = time.monotonic()
+        expired = [
+            name for name, written_at in self._command_error_times.items() if now - written_at > COMMAND_ERROR_TTL
+        ]
         with self.state_env.begin(write=True, db=self.state_db) as txn:
+            for name in expired:
+                txn.delete(command_error_key(name))
+                txn.delete(command_result_key(name))
             txn.put(command_result_key(semaphore_name), msgspec.msgpack.encode(value))
+        for name in expired:
+            del self._command_error_times[name]
+        self._command_error_times[semaphore_name] = now
 
     def _record_command_error(self, semaphore_name: str, error: Exception) -> None:
         payload = f"{type(error).__name__}: {error}"
