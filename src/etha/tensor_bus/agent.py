@@ -830,15 +830,19 @@ class TensorBusAgent:
         """
         batch_id = msg.batch_id
         if msg.role is None:
-            raise ValueError(
+            raise _InvalidRegistrationError(
                 f"Batch {batch_id}: dual-endpoint transfer requires the issuing role (Transfer.role); got None"
             )
         first_pair = self.pairs[batch_state.pair_names[0]]
         if msg.role not in first_pair.role_ranks:
-            raise ValueError(f"Batch {batch_id}: role '{msg.role}' is not a peer of pair '{first_pair.pair_name}'")
+            raise _InvalidRegistrationError(
+                f"Batch {batch_id}: role '{msg.role}' is not a peer of pair '{first_pair.pair_name}'"
+            )
         other_roles = [name for name in first_pair.role_ranks if name != msg.role]
         if not other_roles:
-            raise ValueError(f"Batch {batch_id}: role '{msg.role}' is not a peer of pair '{first_pair.pair_name}'")
+            raise _InvalidRegistrationError(
+                f"Batch {batch_id}: role '{msg.role}' is not a peer of pair '{first_pair.pair_name}'"
+            )
         other_role = other_roles[0]
 
         if msg.transfer_type == "send":
@@ -854,7 +858,7 @@ class TensorBusAgent:
                 self.store.set(key, json.dumps(direction), component="global")
             batch_state.dual_direction = tuple(json.loads(self.store.wait_for_key(key, timeout=60, component="global")))
         if direction != batch_state.dual_direction:
-            raise ValueError(
+            raise _InvalidRegistrationError(
                 f"Batch {batch_id}: dual-endpoint batch supports one direction only "
                 f"({batch_state.dual_direction}), got {direction}"
             )
@@ -897,10 +901,16 @@ class TensorBusAgent:
             )
         buckets = batch_state.dual_direction_buckets[direction]
         if buckets is None:
-            raise ValueError(
+            raise _InvalidRegistrationError(
                 f"Batch {batch_id}: direction {src_role}->{dst_role} has a Partial target, which is not supported"
             )
 
+        seen_rounds = [None] * dist.get_world_size(batch_state.batch_group)
+        dist.all_gather_object(seen_rounds, msg.sync_round, group=batch_state.batch_group)
+        if any(round_id != msg.sync_round for round_id in seen_rounds):
+            raise _InvalidRegistrationError(
+                f"Batch {batch_id}: mixed sync_round {seen_rounds} for {src_role}->{dst_role}"
+            )
         dist.barrier(batch_state.batch_group)
         logger.info(
             f"Agent {self.rank}: Batch {batch_id}: Executing dual transfer {src_role}->{dst_role} "
