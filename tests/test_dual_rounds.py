@@ -111,6 +111,50 @@ def test_dual_batch_uses_shared_direction_before_bucket_collectives(monkeypatch)
         agent._execute_dual_transfer(reverse, batch)
 
 
+def test_failed_pair_completion_wakes_all_waiters():
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.store = SimpleNamespace(get=lambda key: b"pair" if key == "pair_completion:entry:1" else None)
+    agent._completion_cursor = 0
+    agent.pending_pairs = {"pair": SimpleNamespace(all_semaphores=lambda: ["first", "second"])}
+    recorded, released = [], []
+
+    def fail_pair(_pending):
+        raise ValueError("bad mesh")
+
+    def record(name, error):
+        recorded.append((name, str(error)))
+        if name == "first":
+            raise OSError("LMDB unavailable")
+
+    agent._complete_pair = fail_pair
+    agent._record_command_error = record
+    agent._release_semaphore = released.append
+    with pytest.raises(ValueError, match="bad mesh"):
+        agent._consume_completion_log()
+    assert recorded == [("first", "bad mesh"), ("second", "bad mesh")]
+    assert released == ["first", "second"]
+    assert agent.pending_pairs == {}
+
+
+def test_dual_pair_missing_mesh_fails_before_group_creation(monkeypatch):
+    import etha.tensor_bus.agent as agent_module
+
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.pairs = {}
+    agent._check_side_ready = lambda _pair, _name: (1, [0])
+    agent._collect_mesh_placement_info = lambda _pair, _ranks, _name: []
+    monkeypatch.setattr(
+        agent_module, "get_or_create_process_group", lambda _ranks: pytest.fail("created group for invalid pair")
+    )
+    pending = SimpleNamespace(pair_name="pair", local_name="actor", remote_name="serve")
+
+    with pytest.raises(ValueError, match="requires mesh/placement"):
+        agent._complete_pair(pending)
+    assert agent.pairs == {}
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
@@ -168,6 +212,7 @@ def test_multi_round_same_batch_updates_every_round(tmp_path):
         store_port=store_port,
         lmdb_command_queue_path=cmd_path,
         lmdb_state_path=state_path,
+        dist_backend="cpu:gloo",
     )
     stop = threading.Event()
     thread = threading.Thread(target=_agent_loop, args=(agent, stop), daemon=True)
@@ -269,6 +314,7 @@ def _multi_pair_worker(rank: int, world_size: int, root: str, store_port: int, d
         store_port=store_port,
         lmdb_command_queue_path=cmd_path,
         lmdb_state_path=state_path,
+        dist_backend="cpu:gloo",
     )
     stop = threading.Event()
     thread = threading.Thread(target=_agent_loop, args=(agent, stop), daemon=True)
@@ -406,6 +452,7 @@ def _out_of_order_worker(rank: int, world_size: int, root: str, store_port: int,
         store_port=store_port,
         lmdb_command_queue_path=cmd_path,
         lmdb_state_path=state_path,
+        dist_backend="cpu:gloo",
     )
     stop = threading.Event()
     thread = threading.Thread(target=_agent_loop, args=(agent, stop), daemon=True)
@@ -514,6 +561,7 @@ def test_request_signal_drives_reactive_recv(tmp_path):
         store_port=store_port,
         lmdb_command_queue_path=cmd_path,
         lmdb_state_path=state_path,
+        dist_backend="cpu:gloo",
     )
     stop = threading.Event()
     thread = threading.Thread(target=_agent_loop, args=(agent, stop), daemon=True)
@@ -598,6 +646,7 @@ def _opposed_order_worker(rank: int, world_size: int, root: str, store_port: int
         store_port=store_port,
         lmdb_command_queue_path=cmd_path,
         lmdb_state_path=state_path,
+        dist_backend="cpu:gloo",
     )
     if rank == world_size - 1:
         # This rank's completion polling is deferred until long after both

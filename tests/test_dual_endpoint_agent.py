@@ -78,8 +78,19 @@ def _agent_loop(agent: TensorBusAgent, stop: threading.Event) -> None:
 
 
 @pytest.mark.timeout(600)
-def test_dual_endpoint_agent_flow(tmp_path):
+def test_dual_endpoint_agent_flow(tmp_path, monkeypatch):
     """One agent, two in-process clients: rendezvous, merge, dedup transfer."""
+    import etha.tensor_bus.agent as agent_module
+
+    real_bucket_comm = agent_module.bucket_comm
+
+    def checked_bucket_comm(*, buckets, sequential=False):
+        assert sequential, "dual batches must preserve bucket order without an environment variable"
+        return real_bucket_comm(buckets=buckets, sequential=sequential)
+
+    monkeypatch.delenv("ARC2_TB_SEQUENTIAL", raising=False)
+    monkeypatch.setattr(agent_module, "bucket_comm", checked_bucket_comm)
+
     env = {
         "RANK": "0",
         "WORLD_SIZE": "1",

@@ -1,6 +1,5 @@
 """Communication utilities for Etha."""
 
-import os
 import logging
 from collections import deque, defaultdict
 
@@ -54,18 +53,19 @@ def gather_broadcast_comm(
 def bucket_comm(
     buckets: list[Bucket],
     max_in_flight: int = 2,
+    *,
+    sequential: bool = False,
 ) -> None:
     """Run the bucket pipeline: prepare -> launch -> complete -> finalize.
 
     Per channel key, at most ``max_in_flight`` buckets are prepared/in-flight at
     once, so buffer assembly overlaps with in-flight collectives.
 
-    ARC2_TB_SEQUENTIAL=1 disables cross-channel overlap and executes the
-    canonical bucket list in order. Bucket.launch always waits for each
-    buffer to be ready; the sequential mode additionally prevents channel
-    completion timing from changing the collective order across ranks.
+    ``sequential`` disables cross-channel overlap and executes the canonical
+    bucket list in order. Dual-endpoint batches require this because channel
+    completion timing may differ across ranks sharing a process group.
     """
-    if os.environ.get("ARC2_TB_SEQUENTIAL") == "1":
+    if sequential:
         for bucket in buckets:
             bucket.prepare()
             bucket.launch()

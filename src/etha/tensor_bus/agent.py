@@ -145,13 +145,12 @@ class TensorBusAgent:
         self.rank = rank
         self.world_size = world_size
 
-        if torch.cuda.is_available():
-            torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
-
         # Initialize torch.distributed first (needed for namespace broadcast)
         logger.debug(f"Agent {rank}: Initializing torch.distributed")
         if dist_backend is None:
             dist_backend = "cuda:nccl,cpu:gloo" if torch.cuda.is_available() else "cpu:gloo"
+        if "nccl" in dist_backend:
+            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
         dist.init_process_group(backend=dist_backend, rank=rank, world_size=world_size)
 
         if store_namespace is None:
@@ -472,18 +471,19 @@ class TensorBusAgent:
             try:
                 self._complete_pair(pending)
             except Exception as e:
-                logger.error(f"Agent {self.rank}: Pair '{pair_name}' completion failed: {e} {traceback.format_exc()}")
+                logger.exception(f"Agent {self.rank}: Pair '{pair_name}' completion failed")
                 for semaphore_name in pending.all_semaphores():
                     try:
                         self._record_command_error(semaphore_name, e)
                     except Exception:
-                        logger.error(f"Agent {self.rank}: Failed to record InitPair error: {traceback.format_exc()}")
+                        logger.exception(f"Agent {self.rank}: Failed to record InitPair error")
+                raise
+            finally:
+                # Both successful and failed InitPair waiters must wake up.
+                # On failure, the error record is written before the wakeup.
+                for semaphore_name in pending.all_semaphores():
                     self._release_semaphore(semaphore_name)
                 self.pending_pairs.pop(pair_name, None)
-                raise
-            for semaphore_name in pending.all_semaphores():
-                self._release_semaphore(semaphore_name)
-            self.pending_pairs.pop(pair_name, None)
 
     def _complete_pair(self, pending: _PendingPair) -> None:
         """Complete a pair named by the ordered ready-pair log."""
@@ -507,8 +507,6 @@ class TensorBusAgent:
             f"{local_name}={local_ranks}, {remote_name}={remote_ranks}"
         )
 
-        pair_group = get_or_create_process_group(local_ranks + remote_ranks)
-
         # Collect device mesh and placement info from all ranks (per side)
         local_mesh_info = self._collect_mesh_placement_info(pair_name, local_ranks, local_name)
         remote_mesh_info = self._collect_mesh_placement_info(pair_name, remote_ranks, remote_name)
@@ -518,6 +516,15 @@ class TensorBusAgent:
             self._validate_mesh_placement_consistency(local_mesh_info)
         if remote_mesh_info:
             self._validate_mesh_placement_consistency(remote_mesh_info)
+
+        dual_endpoint = set(first_ranks) == set(second_ranks)
+        if dual_endpoint and not (local_mesh_info and remote_mesh_info):
+            raise ValueError(
+                f"Agent {self.rank}: Dual-endpoint pair '{pair_name}' requires mesh/placement "
+                f"payloads from both roles (no-mesh fallback is single-role only)"
+            )
+
+        pair_group = get_or_create_process_group(local_ranks + remote_ranks)
 
         # Generate P2P maps if validation passed. All ranks take the same
         # branch: the collected info is store-derived and identical everywhere.
@@ -637,7 +644,6 @@ class TensorBusAgent:
                     f"for pair '{pair_name}'"
                 )
 
-        dual_endpoint = set(first_ranks) == set(second_ranks)
         state = PairState(
             pair_name=pair_name,
             local_name=local_name,
@@ -666,11 +672,6 @@ class TensorBusAgent:
         )
         self.pairs[pair_name] = state
         if dual_endpoint:
-            if not (local_mesh_info and remote_mesh_info):
-                raise ValueError(
-                    f"Agent {self.rank}: Dual-endpoint pair '{pair_name}' requires mesh/placement "
-                    f"payloads from both roles (no-mesh fallback is single-role only)"
-                )
             logger.info(f"Agent {self.rank}: Pair '{pair_name}' is dual-endpoint (both roles on ranks {first_ranks})")
 
         # Write PairState to State LMDB (for Worker verification)
@@ -713,11 +714,7 @@ class TensorBusAgent:
         dist.barrier(batch_state.batch_group)
         logger.debug(f"Agent {self.rank}: Batch {batch_id}: All ranks synchronized")
 
-        cuda_timing = torch.cuda.is_available()
-        if cuda_timing:
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
+        transfer_started = time.perf_counter()
 
         # Execute transfer using the flattened buckets
         if batch_state.send_buckets or batch_state.recv_buckets:
@@ -755,17 +752,12 @@ class TensorBusAgent:
                         torch.distributed.recv(tensor, pair_state.remote_ranks[pair_state.local_ranks.index(self.rank)])
                     logger.debug(f"Agent {self.rank}: Batch {batch_id}: Transfered tensor {i}")
 
-        if cuda_timing:
-            end_event.record()
-            torch.cuda.synchronize()
-            transfer_time_ms = start_event.elapsed_time(end_event)
-        else:
-            transfer_time_ms = 0.0
+        transfer_time_ms = (time.perf_counter() - transfer_started) * 1000
 
         dist.barrier(batch_state.batch_group)
         if transfer_type == "recv":
             self._leader_set(transfer_signal_key, "0", batch_state)
-        logger.info(f"Agent {self.rank}: Batch {batch_id}: Transfer complete in {transfer_time_ms:.2f} ms")
+        logger.info(f"Agent {self.rank}: Batch {batch_id}: Transfer complete in {transfer_time_ms:.2f} ms wall time")
         return True
 
     def _execute_dual_transfer(self, msg: Transfer, batch_state: BatchState) -> bool:
@@ -869,7 +861,7 @@ class TensorBusAgent:
             f"Agent {self.rank}: Batch {batch_id}: Executing dual transfer {src_role}->{dst_role} "
             f"round {msg.sync_round} with {len(buckets)} buckets"
         )
-        bucket_comm(buckets=buckets)
+        bucket_comm(buckets=buckets, sequential=True)
         batch_state.dual_direction_done[direction] = msg.sync_round
 
         # Publish the versioned completion signal before any parked semaphore
