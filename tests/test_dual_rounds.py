@@ -289,6 +289,23 @@ def test_multi_round_same_batch_updates_every_round(tmp_path):
                 fut.result(timeout=30)
 
         handler_train.close()
+        # A new temporary sink reuses this batch ID after the old handlers
+        # close. Its higher round must execute once, not inherit stale state.
+        new_target = torch.zeros_like(target)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            new_train = pool.submit(
+                client_train.register_tensors, batch_id="b", tensors=[(master, pair)], role=TRAIN, timeout=60
+            )
+            new_infer = pool.submit(
+                client_infer.register_tensors, batch_id="b", tensors=[(new_target, pair)], role=INFER, timeout=60
+            )
+            handler_train = new_train.result(timeout=90)
+            handler_infer = new_infer.result(timeout=90)
+        master.fill_(42)
+        _round_transfer(handler_train, handler_infer, TRAIN, INFER, 4)
+        assert torch.equal(new_target, master)
+        assert handler_infer.query_transfer_signal(sync_round=4) is True
+        handler_train.close()
         handler_infer.close()
         client_train.close()
         client_infer.close()
