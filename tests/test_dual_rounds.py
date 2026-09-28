@@ -143,6 +143,37 @@ def test_stale_round_ack_releases_a_parked_peer():
     assert ((TRAIN, INFER), 1) not in batch.dual_round_pending
 
 
+def test_dual_layout_change_aborts_parked_register(monkeypatch):
+    from etha.tensor_bus.commands import RegisterTensors
+
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.world_size = 1
+    agent.pairs = {
+        "p": SimpleNamespace(role_ranks={TRAIN: [0], INFER: [0]}, local_ranks=[0], remote_ranks=[0], dual_endpoint=True)
+    }
+    membership = tuple(sorted(((0,), (0,))))
+    batch = BatchState(batch_id="b", pair_names=["p"], dual=True, bucket_size=1)
+    batch.dual_layout_signature = ("b", 1, (("p", 1, membership),), True)
+    batch.pending_register_semaphores = ["/sem-train"]
+    agent.batches = {"b": batch}
+    released, recorded = [], []
+    agent._release_semaphore = released.append
+    agent._record_command_error = lambda name, _error: recorded.append(name)
+
+    def gather(out, obj, group=None):
+        del group
+        out[0] = obj
+
+    monkeypatch.setattr(dist, "all_gather_object", gather)
+    msg = RegisterTensors(batch_id="b", tensors=[("p", memoryview(b"x"))], bucket_size=2, role=INFER)
+    with pytest.raises(ValueError, match="layout changed"):
+        agent._handle_register_tensors(msg)
+    assert released == ["/sem-train"]
+    assert recorded == ["/sem-train"]
+    assert "b" not in agent.batches
+
+
 def test_failed_dual_generation_wakes_the_parked_register():
     agent = TensorBusAgent.__new__(TensorBusAgent)
     agent.rank = 0

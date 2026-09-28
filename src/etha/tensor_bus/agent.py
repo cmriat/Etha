@@ -1089,9 +1089,13 @@ class TensorBusAgent:
                 self.batches[batch_id] = batch_state
             signature = layout[:4]
             if any(other is None or other[:4] != signature for other in layouts):
-                raise _InvalidRegistrationError(f"Batch {batch_id}: inconsistent dual layout across ranks: {layouts}")
+                err = _InvalidRegistrationError(f"Batch {batch_id}: inconsistent dual layout across ranks: {layouts}")
+                self._abort_dual_registration(batch_state, err)
+                raise err
             if batch_state.dual_layout_signature is not None and batch_state.dual_layout_signature != signature:
-                raise _InvalidRegistrationError(f"Batch {batch_id}: dual role layout changed between registrations")
+                err = _InvalidRegistrationError(f"Batch {batch_id}: dual role layout changed between registrations")
+                self._abort_dual_registration(batch_state, err)
+                raise err
             batch_state.dual_layout_signature = signature
             return self._register_dual_role(batch_state, grouped, role, msg.semaphore_name)
 
@@ -1272,16 +1276,20 @@ class TensorBusAgent:
         try:
             self._generate_dual_buckets(batch_state)
         except Exception as e:
-            for parked in batch_state.pending_register_semaphores:
-                self._record_command_error(parked, e)
-                self._release_semaphore(parked)
-            batch_state.pending_register_semaphores.clear()
-            self.batches.pop(batch_state.batch_id, None)
+            self._abort_dual_registration(batch_state, e)
             raise
         for parked in batch_state.pending_register_semaphores:
             self._release_semaphore(parked)
         batch_state.pending_register_semaphores.clear()
         return True
+
+    def _abort_dual_registration(self, batch: BatchState, error: BaseException) -> None:
+        """Fail a dual batch: wake parked registers and drop the incomplete state."""
+        for parked in batch.pending_register_semaphores:
+            self._record_command_error(parked, error)
+            self._release_semaphore(parked)
+        batch.pending_register_semaphores.clear()
+        self.batches.pop(batch.batch_id, None)
 
     def _generate_dual_buckets(self, batch_state: BatchState):
         """Generate per-direction buckets for a fully-registered dual batch.

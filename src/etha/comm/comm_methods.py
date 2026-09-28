@@ -131,4 +131,5 @@ def bucket_comm(
                     in_flight.popleft().finalize()
                     made_progress = True
 
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
