@@ -131,6 +131,33 @@ def test_init_pair_rejects_mismatched_remote_peer():
     assert agent.pending_pairs["p"].remote_name == "B"
 
 
+def test_duplicate_init_pair_rejects_conflicting_peers():
+    from etha.tensor_bus.commands import InitPair
+    from etha.tensor_bus.pair_state import PairState
+
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.pairs = {
+        "p": PairState(
+            pair_name="p",
+            local_name="A",
+            local_ranks=[0],
+            remote_name="B",
+            remote_ranks=[0],
+            pair_size=1,
+            local_group=object(),
+            pair_group=object(),
+            local_is_first=True,
+            dual_endpoint=True,
+            role_ranks={"A": [0], "B": [0]},
+        )
+    }
+    agent._write_init_pair_keys = lambda _msg: None
+    mismatch = InitPair(pair_name="p", local_name="B", remote_name="C", expected_world_size=1)
+    with pytest.raises(ValueError, match="known: A, B"):
+        agent._handle_init_pair(mismatch)
+
+
 def test_unknown_transfer_role_is_rejected_before_direction_pin():
     agent = TensorBusAgent.__new__(TensorBusAgent)
     agent.rank = 0

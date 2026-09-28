@@ -288,8 +288,8 @@ class TensorBusAgent:
                         f" {traceback.format_exc()}"
                     )
                 self._release_semaphore(command.semaphore_name)
-                if isinstance(e, _InvalidRegistrationError):
-                    return
+            if isinstance(e, _InvalidRegistrationError):
+                return
             raise
 
     def _handle_init_pair(self, msg: InitPair):
@@ -319,6 +319,23 @@ class TensorBusAgent:
             # Duplicate InitPair for an already-matched pair (e.g. client
             # retry): keys are rewritten idempotently and the caller is
             # released immediately — the pair is already usable.
+            existing = self.pairs[pair_name]
+            peers = set(existing.role_ranks or ()) or {existing.local_name, existing.remote_name}
+            if local_name not in peers or remote_name not in peers:
+                raise _InvalidRegistrationError(
+                    f"Agent {self.rank}: InitPair for pair '{pair_name}' names '{local_name}'->'{remote_name}' "
+                    f"(known: {', '.join(sorted(peers))})"
+                )
+            known_size = (
+                len(existing.role_ranks[local_name])
+                if existing.role_ranks and local_name in existing.role_ranks
+                else (len(existing.local_ranks) if local_name == existing.local_name else len(existing.remote_ranks))
+            )
+            if expected_local != known_size:
+                raise _InvalidRegistrationError(
+                    f"Agent {self.rank}: InitPair for pair '{pair_name}' expected_world_size "
+                    f"{expected_local} != {known_size}"
+                )
             logger.info(f"Agent {self.rank}: Pair '{pair_name}' already matched; InitPair is idempotent")
             self._write_init_pair_keys(msg)
             if msg.semaphore_name:
@@ -341,7 +358,7 @@ class TensorBusAgent:
         else:
             peers = {pending.local_name, pending.remote_name}
             if local_name not in peers or remote_name not in peers:
-                raise ValueError(
+                raise _InvalidRegistrationError(
                     f"Agent {self.rank}: InitPair for pair '{pair_name}' names '{local_name}'->'{remote_name}' "
                     f"(known: {pending.local_name}, {pending.remote_name})"
                 )
