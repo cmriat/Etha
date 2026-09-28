@@ -149,6 +149,8 @@ def m2m_to_chunks(
                         dst_slice=dst_slice_tuples,
                         tensor=target_tensor,
                         src_tensor=source_tensor,
+                        source_partial_groups=source_partial_groups if self_p2p else None,
+                        transfer_dtype=transfer_dtype,
                     )
                 )
             elif target_tensor is not None:

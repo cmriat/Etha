@@ -665,8 +665,8 @@ class TensorBusAgent:
                 second_mesh_tensor, partial_red_2, self.rank, second_ranks, second_group
             )
 
+            first_partial_groups, second_partial_groups = mesh_1_partial_groups, mesh_2_partial_groups
             local_partial_groups, _ = _order(mesh_1_partial_groups, mesh_2_partial_groups)
-            first_partial_groups, second_partial_groups = _order(mesh_1_partial_groups, mesh_2_partial_groups)
             if local_partial_groups:
                 logger.info(
                     f"Agent {self.rank}: Created {len(local_partial_groups)} source Partial sub-group(s) "
