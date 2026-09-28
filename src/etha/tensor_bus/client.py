@@ -21,7 +21,15 @@ import posix_ipc
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Placement
 
-from .commands import InitPair, Transfer, QueryStatus, CleanupBatch, RegisterTensors, command_error_key
+from .commands import (
+    InitPair,
+    Transfer,
+    QueryStatus,
+    CleanupBatch,
+    RegisterTensors,
+    command_error_key,
+    command_result_key,
+)
 from .command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
@@ -115,7 +123,7 @@ class BatchHandler:
             as bool.
         """
         return self.client.query_transfer_signal(
-            self.batch_id, blocking=blocking, timeout=timeout, sync_round=sync_round
+            self.batch_id, blocking=blocking, timeout=timeout, sync_round=sync_round, generation=self.generation
         )
 
     def query_transfer_request(
@@ -132,7 +140,12 @@ class BatchHandler:
         matching ``sync_round`` recv); see ``TensorBusClient.query_transfer_request``.
         """
         return self.client.query_transfer_request(
-            self.batch_id, direction=direction, blocking=blocking, timeout=timeout, sync_round=sync_round
+            self.batch_id,
+            direction=direction,
+            blocking=blocking,
+            timeout=timeout,
+            sync_round=sync_round,
+            generation=self.generation,
         )
 
     def close(self, blocking: bool = True, timeout: float = 30.0):
@@ -337,7 +350,12 @@ class TensorBusClient:
         )
 
     def query_transfer_signal(
-        self, batch_id: str, blocking: bool = True, timeout: float = 30.0, sync_round: int | None = None
+        self,
+        batch_id: str,
+        blocking: bool = True,
+        timeout: float = 30.0,
+        sync_round: int | None = None,
+        generation: int = 0,
     ) -> bool | int:
         """Legacy boolean signal (split) or versioned dual completion.
 
@@ -350,7 +368,7 @@ class TensorBusClient:
             state_name = "transfer_signal"
         else:
             state_name = "transfer_signal_round"
-        query_msg = QueryStatus(batch_id=batch_id, state_name=state_name)
+        query_msg = QueryStatus(batch_id=batch_id, state_name=state_name, generation=generation)
         logger.debug(f"TensorBusClient[{self.agent_rank}]: Query {state_name} for batch '{batch_id}'")
         del blocking  # result is read below; the query must complete first
         self._execute_command_with_semaphore(
@@ -359,7 +377,6 @@ class TensorBusClient:
 
         if self.state_env is None:
             raise RuntimeError("State environment not initialized")
-
         # Get the status from LMDB
         state_key = f"batch:{batch_id}/state:{state_name}".encode()
         with self.state_env.begin(db=self.state_db) as txn:
@@ -408,9 +425,9 @@ class TensorBusClient:
 
         unique_pair_names = list(dict.fromkeys(pair_name for _, pair_name in tensors))
         generation = 0
-        if self.state_env is not None:
+        if msg.semaphore_name and self.state_env is not None:
             with self.state_env.begin(db=self.state_db) as txn:
-                raw = txn.get(f"batch:{batch_id}/generation".encode())
+                raw = txn.get(command_result_key(msg.semaphore_name))
             if raw:
                 generation = msgspec.msgpack.Decoder(int).decode(raw)
         return BatchHandler(client=self, batch_id=batch_id, pair_names=unique_pair_names, generation=generation)
@@ -498,6 +515,7 @@ class TensorBusClient:
         blocking: bool = True,
         timeout: float = 30.0,
         sync_round: int = 0,
+        generation: int = 0,
     ) -> bool:
         """Has the (src -> dst) direction of a dual batch requested round r?
 
@@ -510,7 +528,7 @@ class TensorBusClient:
         START of a recv.
         """
         state_name = f"transfer_request_round:{direction[0]}->{direction[1]}"
-        query_msg = QueryStatus(batch_id=batch_id, state_name=state_name)
+        query_msg = QueryStatus(batch_id=batch_id, state_name=state_name, generation=generation)
         logger.debug(f"TensorBusClient[{self.agent_rank}]: Query {state_name} for batch '{batch_id}'")
         del blocking  # result is read below; the query must complete first
         self._execute_command_with_semaphore(

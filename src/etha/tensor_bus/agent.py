@@ -42,6 +42,7 @@ from .commands import (
     CleanupBatch,
     RegisterTensors,
     command_error_key,
+    command_result_key,
 )
 from .pair_state import PairState
 from .batch_state import BatchState
@@ -729,8 +730,7 @@ class TensorBusAgent:
         batch_state = self.batches[batch_id]
         if msg.generation and batch_state.generation and msg.generation != batch_state.generation:
             raise _InvalidRegistrationError(
-                f"Transfer for stale generation {msg.generation} of batch {batch_id} "
-                f"(live {batch_state.generation})"
+                f"Transfer for stale generation {msg.generation} of batch {batch_id} (live {batch_state.generation})"
             )
 
         if batch_state.dual:
@@ -954,6 +954,13 @@ class TensorBusAgent:
 
         if batch_id not in self.batches:
             logger.error(f"Agent {self.rank}: QueryStatus for unknown batch: {batch_id}")
+            return
+
+        batch = self.batches[batch_id]
+        if msg.generation and batch.generation and msg.generation != batch.generation:
+            state = False if state_name == "transfer_signal" else -1
+            with self.state_env.begin(write=True, db=self.state_db) as txn:
+                txn.put(statedb_key, msgspec.msgpack.encode(state))
             return
 
         if state_name == "transfer_signal":
@@ -1293,6 +1300,8 @@ class TensorBusAgent:
             f"Agent {self.rank}: Batch {batch_id}: Registration complete - "
             f"{len(tensors)} tensors across {len(grouped)} pairs"
         )
+        if msg.semaphore_name:
+            self._write_command_result(msg.semaphore_name, batch_state.generation)
         return True
 
     def _register_dual_role(
@@ -1346,8 +1355,11 @@ class TensorBusAgent:
             self._abort_dual_registration(batch_state, e)
             raise
         for parked in batch_state.pending_register_semaphores:
+            self._write_command_result(parked, batch_state.generation)
             self._release_semaphore(parked)
         batch_state.pending_register_semaphores.clear()
+        if semaphore_name:
+            self._write_command_result(semaphore_name, batch_state.generation)
         return True
 
     def _next_batch_generation(self, batch_id: str) -> int:
@@ -1525,6 +1537,10 @@ class TensorBusAgent:
         if self.rank == batch.local_leader:
             self.store.set(key, value, component=component)
         dist.barrier(batch.local_group)
+
+    def _write_command_result(self, semaphore_name: str, value: int) -> None:
+        with self.state_env.begin(write=True, db=self.state_db) as txn:
+            txn.put(command_result_key(semaphore_name), msgspec.msgpack.encode(value))
 
     def _record_command_error(self, semaphore_name: str, error: Exception) -> None:
         payload = f"{type(error).__name__}: {error}"

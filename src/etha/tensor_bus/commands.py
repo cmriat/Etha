@@ -10,6 +10,11 @@ def command_error_key(semaphore_name: str) -> bytes:
     return f"command:{semaphore_name}:error".encode()
 
 
+def command_result_key(semaphore_name: str) -> bytes:
+    """LMDB key used to return a scalar result (e.g. batch generation)."""
+    return f"command:{semaphore_name}:result".encode()
+
+
 class BaseCommand(msgspec.Struct, tag=True, kw_only=True):
     """Base class for all Tensor Bus commands.
 
@@ -91,6 +96,7 @@ class QueryStatus(BaseCommand):
 
     batch_id: str
     state_name: str
+    generation: int = 0
 
 
 class CleanupBatch(BaseCommand):
