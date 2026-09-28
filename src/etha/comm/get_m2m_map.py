@@ -194,10 +194,9 @@ def get_m2m_map(
         source_idx = source_mesh_ranks.index(rank)
         for target_idx in range(source_idx, len(target_mesh_ranks), len(source_mesh_ranks)):
             target_rank = target_mesh_ranks[target_idx]
-            if target_rank == rank:
-                # Colocated meshes: this rank is also its own trace target. The
-                # restored full tensor is already local (computed above), so the
-                # trace needs no wire op — an isend to self would hang.
+            if target_rank in source_mesh_ranks:
+                # Any overlapping source rank already holds full_tensor_restored.
+                # Sending to it hangs because that rank never posts a matching recv.
                 continue
             logger.debug(f"[P2P Map rank={rank}] Sending to target rank: {target_rank}")
             reqs.append(dist.isend(full_tensor_restored, dst=target_rank))

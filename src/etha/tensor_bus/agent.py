@@ -424,9 +424,9 @@ class TensorBusAgent:
         if not sizes or len(set(sizes)) != 1:
             return None
         expected = sizes[0]
-        if len(present) < expected:
+        if len(present) != expected:
             return None
-        return expected, sorted(present)[:expected]
+        return expected, sorted(present)
 
     def _poll_pending_pairs(self):
         """Complete pending pairs in one globally-serialized order.
@@ -1207,7 +1207,11 @@ class TensorBusAgent:
             raise err
         memberships = {membership for _, _, membership in pair_layout}
         if not pair_names or None in memberships or len(memberships) != 1 or not local_membership_valid:
-            raise _InvalidRegistrationError(f"Inconsistent or invalid RegisterTensors layout across ranks: {layouts}")
+            err = _InvalidRegistrationError(f"Inconsistent or invalid RegisterTensors layout across ranks: {layouts}")
+            existing = self.batches.get(batch_id)
+            if existing is not None and existing.pending_register_semaphores:
+                self._abort_dual_registration(existing, err)
+            raise err
 
         if batch_dual:
             # Role commands may arrive in either order; the layout signature
@@ -1621,8 +1625,12 @@ class TensorBusAgent:
             name for name, written_at in self._command_error_times.items() if now - written_at > COMMAND_ERROR_TTL
         ]
         with self.state_env.begin(write=True, db=self.state_db) as txn:
-            for name in expired:
-                txn.delete(command_error_key(name))
+            deleter = getattr(txn, "delete", None)
+            if deleter is not None:
+                for name in expired:
+                    deleter(command_error_key(name))
+                    deleter(command_result_key(name))
+                deleter(command_result_key(semaphore_name))
             txn.put(command_error_key(semaphore_name), msgspec.msgpack.encode(payload))
         for name in expired:
             del self._command_error_times[name]
