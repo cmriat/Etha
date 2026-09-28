@@ -727,6 +727,11 @@ class TensorBusAgent:
             raise ValueError(f"Transfer for unknown batch: {batch_id}")
 
         batch_state = self.batches[batch_id]
+        if msg.generation and batch_state.generation and msg.generation != batch_state.generation:
+            raise _InvalidRegistrationError(
+                f"Transfer for stale generation {msg.generation} of batch {batch_id} "
+                f"(live {batch_state.generation})"
+            )
 
         if batch_state.dual:
             return self._execute_dual_transfer(msg, batch_state)
@@ -1127,8 +1132,9 @@ class TensorBusAgent:
                 )
             else:
                 err = _InvalidRegistrationError(f"Batch {batch_id}: invalid registration: {layouts}")
-            if batch_id in self.batches:
-                self._abort_dual_registration(self.batches[batch_id], err)
+            existing = self.batches.get(batch_id)
+            if existing is not None and existing.pending_register_semaphores:
+                self._abort_dual_registration(existing, err)
             raise err
         memberships = {membership for _, _, membership in pair_layout}
         if not pair_names or None in memberships or len(memberships) != 1 or not local_membership_valid:

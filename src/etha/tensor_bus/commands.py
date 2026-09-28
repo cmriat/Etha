@@ -44,6 +44,7 @@ class Transfer(BaseCommand):
     transfer_type: Literal["send", "recv"]
     role: str | None = None
     sync_round: int = 0
+    generation: int = 0
 
 
 class RegisterTensors(BaseCommand):

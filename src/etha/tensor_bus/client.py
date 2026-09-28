@@ -84,7 +84,15 @@ class BatchHandler:
         Returns:
             Semaphore for operation completion
         """
-        msg = Transfer(batch_id=self.batch_id, transfer_type=transfer_type, role=role, sync_round=sync_round)
+        if self._closed:
+            raise RuntimeError(f"Batch {self.batch_id} is closed")
+        msg = Transfer(
+            batch_id=self.batch_id,
+            transfer_type=transfer_type,
+            role=role,
+            sync_round=sync_round,
+            generation=self.generation,
+        )
         return self.client._execute_command_with_semaphore(
             msg, "transfer", context_id=f"batch_{self.batch_id}_{transfer_type}", blocking=blocking, timeout=timeout
         )
@@ -344,9 +352,9 @@ class TensorBusClient:
             state_name = "transfer_signal_round"
         query_msg = QueryStatus(batch_id=batch_id, state_name=state_name)
         logger.debug(f"TensorBusClient[{self.agent_rank}]: Query {state_name} for batch '{batch_id}'")
-        # Execute with semaphore synchronization (blocking)
+        del blocking  # result is read below; the query must complete first
         self._execute_command_with_semaphore(
-            query_msg, "query", context_id=f"batch_{batch_id}", blocking=blocking, timeout=timeout
+            query_msg, "query", context_id=f"batch_{batch_id}", blocking=True, timeout=timeout
         )
 
         if self.state_env is None:
