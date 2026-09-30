@@ -321,8 +321,8 @@ class TensorBusAgent:
 
         if pair_name in self.pairs:
             # Duplicate InitPair for an already-matched pair (e.g. client
-            # retry): keys are rewritten idempotently and the caller is
-            # released immediately — the pair is already usable.
+            # retry): only an identical layout is accepted, without rewriting
+            # metadata that backs the existing M2M maps.
             existing = self.pairs[pair_name]
             peers = set(existing.role_ranks or ()) or {existing.local_name, existing.remote_name}
             if local_name not in peers or remote_name not in peers:
@@ -340,8 +340,20 @@ class TensorBusAgent:
                     f"Agent {self.rank}: InitPair for pair '{pair_name}' expected_world_size "
                     f"{expected_local} != {known_size}"
                 )
+            for field, payload in (("mesh_shape", msg.mesh_shape_payload), ("placements", msg.placements_payload)):
+                stored = self.store.get_bytes(f"pair:{pair_name}/rank:{self.rank}/{local_name}/{field}")
+                try:
+                    previous = ForkingPickler.loads(stored) if stored is not None else None
+                    requested = ForkingPickler.loads(payload) if payload is not None else None
+                except Exception as e:
+                    raise _InvalidRegistrationError(
+                        f"Agent {self.rank}: InitPair for pair '{pair_name}' has invalid {field} payload"
+                    ) from e
+                if requested != previous:
+                    raise _InvalidRegistrationError(
+                        f"Agent {self.rank}: InitPair for pair '{pair_name}' layout changed: {field}"
+                    )
             logger.info(f"Agent {self.rank}: Pair '{pair_name}' already matched; InitPair is idempotent")
-            self._write_init_pair_keys(msg)
             if msg.semaphore_name:
                 self._release_semaphore(msg.semaphore_name)
             return

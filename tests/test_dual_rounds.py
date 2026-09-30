@@ -50,6 +50,7 @@ import threading
 from types import SimpleNamespace
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing.reduction import ForkingPickler
 
 import torch
 import pytest
@@ -156,6 +157,48 @@ def test_duplicate_init_pair_rejects_conflicting_peers():
     mismatch = InitPair(pair_name="p", local_name="B", remote_name="C", expected_world_size=1)
     with pytest.raises(ValueError, match="known: A, B"):
         agent._handle_init_pair(mismatch)
+
+
+@pytest.mark.parametrize(
+    "mesh_shape, placements, changed",
+    [
+        ((2,), (Shard(0),), False),
+        ((1, 2), (Replicate(), Shard(1)), True),
+        ((2,), (Replicate(),), True),
+        (None, None, True),
+    ],
+)
+def test_matched_pair_retry_preserves_layout(mesh_shape, placements, changed):
+    from etha.tensor_bus.commands import InitPair
+
+    agent = TensorBusAgent.__new__(TensorBusAgent)
+    agent.rank = 0
+    agent.pairs = {"p": SimpleNamespace(role_ranks={TRAIN: [0, 1], INFER: [0, 1]})}
+    metadata = {
+        f"pair:p/rank:0/{INFER}/mesh_shape": ForkingPickler.dumps((2,)),
+        f"pair:p/rank:0/{INFER}/placements": ForkingPickler.dumps((Shard(0),)),
+    }
+    agent.store = SimpleNamespace(get_bytes=metadata.get)
+    writes, released = [], []
+    agent._write_init_pair_keys = writes.append
+    agent._release_semaphore = released.append
+    retry = InitPair(
+        pair_name="p",
+        local_name=INFER,
+        remote_name=TRAIN,
+        expected_world_size=2,
+        mesh_shape_payload=ForkingPickler.dumps(mesh_shape) if mesh_shape is not None else None,
+        placements_payload=ForkingPickler.dumps(placements) if placements is not None else None,
+        semaphore_name="/retry",
+    )
+    if changed:
+        with pytest.raises(ValueError, match="layout changed"):
+            agent._handle_init_pair(retry)
+        assert released == []
+    else:
+        agent._handle_init_pair(retry)
+        assert released == ["/retry"]
+    assert writes == [], "matched-pair retries must not overwrite registered metadata"
 
 
 def test_unknown_transfer_role_is_rejected_before_direction_pin():
