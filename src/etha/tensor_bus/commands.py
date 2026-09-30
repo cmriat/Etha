@@ -10,6 +10,11 @@ def command_error_key(semaphore_name: str) -> bytes:
     return f"command:{semaphore_name}:error".encode()
 
 
+def command_result_key(semaphore_name: str) -> bytes:
+    """LMDB key used to return a scalar result (e.g. batch generation)."""
+    return f"command:{semaphore_name}:result".encode()
+
+
 class BaseCommand(msgspec.Struct, tag=True, kw_only=True):
     """Base class for all Tensor Bus commands.
 
@@ -24,10 +29,27 @@ class BaseCommand(msgspec.Struct, tag=True, kw_only=True):
 
 
 class Transfer(BaseCommand):
-    """Transfer tensor command for a specific batch."""
+    """Transfer tensor command for a specific batch.
+
+    On a dual-endpoint (colocated) batch the agent hosts both sides of the
+    pair, so the command alone cannot tell which side issued it: ``role`` names
+    the issuing client's side (its ``init_pair`` ``local_name``). ``send`` from
+    role R executes the R→other direction; ``recv`` from role R executes the
+    other→R direction. Split (single-role) agents leave it None.
+
+    ``sync_round`` identifies the weight-sync round within one batch: a
+    direction-round executes exactly once, only after BOTH roles' commands
+    for that round arrived (source-ready and dest-ready), and re-issues of an
+    already-executed or older round are acknowledged without re-execution.
+    Monotonic per (batch, direction); round 0 is the first sync. Split
+    batches ignore it.
+    """
 
     batch_id: str
     transfer_type: Literal["send", "recv"]
+    role: str | None = None
+    sync_round: int = 0
+    generation: int = 0
 
 
 class RegisterTensors(BaseCommand):
@@ -36,11 +58,17 @@ class RegisterTensors(BaseCommand):
     Creates a new batch with a unique batch_id. Multiple tensors can be
     registered across different pairs in a single batch, enabling efficient
     cross-pair execution via flattened chunks/buckets.
+
+    ``role`` is required when a pair of the batch is dual-endpoint (colocated):
+    both sides of the pair register into the same batch on the same agent, and
+    the role names which side this registration's tensors belong to. It must
+    match one of the pair's peer names. Split pairs leave it None.
     """
 
     batch_id: str
     tensors: list[tuple[str, memoryview]]  # (pair_name, tensor_payload)
     bucket_size: int | None = None  # Optional bucket size in bytes
+    role: str | None = None
 
 
 class InitPair(BaseCommand):
@@ -68,12 +96,19 @@ class QueryStatus(BaseCommand):
 
     batch_id: str
     state_name: str
+    generation: int = 0
 
 
 class CleanupBatch(BaseCommand):
-    """Cleanup a batch's state in the agent."""
+    """Cleanup a batch's state in the agent.
+
+    ``generation`` is the registration token the client received. 0 means
+    unspecified (always matches). A stale sibling handler after batch-id reuse
+    carries an older generation and is ignored.
+    """
 
     batch_id: str
+    generation: int = 0
 
 
 Message = Transfer | RegisterTensors | InitPair | QueryStatus | CleanupBatch

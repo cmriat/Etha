@@ -35,3 +35,18 @@ class PairState:
     # populated only on the sender side of the pair. The send pipeline runs
     # an in-place all-reduce on these groups before the actual P2P send.
     source_partial_groups: list[tuple[dist.ProcessGroup, str]] | None = None
+
+    # --- Dual-endpoint (colocated) views -------------------------------------
+    # When both sides of the pair live on the same set of agent ranks (one
+    # agent hosts a train-role and an infer-role client), the local/remote
+    # perspective above is only one agent's arbitrary viewpoint. The
+    # role-keyed dicts below are canonical (same on every agent) and drive
+    # registration/transfer on dual batches. Split pairs leave them None.
+    dual_endpoint: bool = False  # True when both sides span the same rank set
+    role_ranks: dict[str, list[int]] | None = None  # peer name -> its ranks
+    role_groups: dict[str, dist.ProcessGroup] | None = None  # peer name -> its side group
+    role_mesh_shapes: dict[str, tuple[int, ...]] | None = None  # peer name -> its mesh shape
+    # peer name -> map with that peer as source (both directions, canonical)
+    m2m_by_source_role: dict[str, M2MMap | None] | None = None
+    # peer name -> Partial sub-groups for that peer's source-side map
+    partial_by_source_role: dict[str, list[tuple[dist.ProcessGroup, str]] | None] | None = None

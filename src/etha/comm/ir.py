@@ -72,6 +72,10 @@ class Chunk:
     dst_ranks: tuple[int, ...]
     chunk_shape: tuple[int, ...]
     tensor: torch.Tensor | None = None
+    # LOCAL chunks on colocated meshes read a *different* tensor than they write
+    # (source and target are two registrations on the same rank). None keeps the
+    # single-tensor self-copy semantics: read and write ``tensor``.
+    src_tensor: torch.Tensor | None = None
     src_slice: tuple[slice, ...] = ()  # read here when is_source
     dst_slice: tuple[slice, ...] = ()  # written here when is_target
     transfer_dtype: torch.dtype | None = None  # Wire dtype (None = use tensor.dtype, set in __post_init__)
@@ -110,7 +114,8 @@ class Chunk:
         op lands directly in the target.
         """
         if self.is_source:
-            buffer = self.tensor[self.src_slice]
+            read_tensor = self.src_tensor if self.src_tensor is not None else self.tensor
+            buffer = read_tensor[self.src_slice]
             if contiguous:
                 buffer = buffer.contiguous()
             if self.source_partial_groups:
@@ -118,7 +123,7 @@ class Chunk:
                 # source tensor isn't mutated. Storage-level alias check —
                 # ``tensor.data_ptr()`` accounts for ``storage_offset`` and
                 # would miss non-zero-offset slices that still alias.
-                if buffer.untyped_storage().data_ptr() == self.tensor.untyped_storage().data_ptr():
+                if buffer.untyped_storage().data_ptr() == read_tensor.untyped_storage().data_ptr():
                     buffer = buffer.contiguous().clone()
                 for group, op_str in self.source_partial_groups:
                     dist.all_reduce(buffer, op=_REDUCE_OP_MAP[op_str], group=group)
@@ -258,7 +263,7 @@ class Bucket:
             else:
                 chunk.buffer = buffer_slice
 
-        if self.is_source:
+        if self.is_source and self.device is not None and self.device.type == "cuda":
             event = torch.cuda.Event()
             event.record()
             self.buffer_ready_event = event
@@ -266,12 +271,12 @@ class Bucket:
     def launch(self) -> bool:
         """Issue the wire op once the assembled buffer is ready.
 
-        Returns False if the buffer-assembly event hasn't fired yet; otherwise
-        issues the transport (no-op for LOCAL/NONE) and returns True.
+        Waiting here avoids rank-dependent launch order when GPU buffer
+        assembly finishes at different times. The sequential bucket mode also
+        fixes order across channels.
         """
         if self.buffer_ready_event is not None:
-            if not self.buffer_ready_event.query():
-                return False
+            self.buffer_ready_event.synchronize()
             self.buffer_ready_event = None
 
         match self.transport:

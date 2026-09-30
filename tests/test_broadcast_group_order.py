@@ -73,6 +73,7 @@ def test_agent_validates_layout_and_prewarms_before_chunks(monkeypatch):
         rank=0,
         world_size=2,
         batches={},
+        _next_batch_generation=lambda _batch_id: 1,
         pairs={
             name: SimpleNamespace(
                 local_ranks=[0],
@@ -80,6 +81,7 @@ def test_agent_validates_layout_and_prewarms_before_chunks(monkeypatch):
                 local_group=group,
                 pair_group=group,
                 local_is_first=True,
+                dual_endpoint=False,
                 m2m_send=pair_maps[0],
                 m2m_recv=pair_maps[1],
                 source_partial_groups=None,
@@ -300,7 +302,7 @@ def _run_bidirectional_broadcast(rank: int):
         rank=rank,
         world_size=world_size,
         batches={},
-        pairs={"pair": SimpleNamespace(local_ranks=local_ranks, remote_ranks=remote_ranks)},
+        pairs={"pair": SimpleNamespace(local_ranks=local_ranks, remote_ranks=remote_ranks, dual_endpoint=False)},
     )
     invalid_tensors = [] if rank == 0 else [("pair", memoryview(b"tensor"))]
     invalid_message = agent_module.RegisterTensors(batch_id="invalid", tensors=invalid_tensors)

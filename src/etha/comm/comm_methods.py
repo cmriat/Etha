@@ -53,12 +53,27 @@ def gather_broadcast_comm(
 def bucket_comm(
     buckets: list[Bucket],
     max_in_flight: int = 2,
+    *,
+    sequential: bool = False,
 ) -> None:
     """Run the bucket pipeline: prepare -> launch -> complete -> finalize.
 
     Per channel key, at most ``max_in_flight`` buckets are prepared/in-flight at
     once, so buffer assembly overlaps with in-flight collectives.
+
+    ``sequential`` disables cross-channel overlap and executes the canonical
+    bucket list in order. Dual-endpoint batches require this because channel
+    completion timing may differ across ranks sharing a process group.
     """
+    if sequential:
+        for bucket in buckets:
+            bucket.prepare()
+            bucket.launch()
+            bucket.finalize()  # waits on the work before writing back
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return
+
     rank = dist.get_rank()
 
     channels: defaultdict[tuple, dict[str, deque]] = defaultdict(
@@ -116,4 +131,5 @@ def bucket_comm(
                     in_flight.popleft().finalize()
                     made_progress = True
 
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()

@@ -99,21 +99,27 @@ def m2m_to_chunks(
                     src_idx, source_num_slicers_extended, source_slicer_tuples
                 )
 
-            chunks.append(
-                Chunk(
-                    chunk_shape=calculate_chunk_shape(source_num_slicers_extended, source_tensor_shape),
-                    transport=transport,
-                    is_source=True,
-                    is_target=False,
-                    src_rank=rank,
-                    src_idx=src_idx,
-                    dst_ranks=dst_ranks,
-                    src_slice=src_slice_tuples,
-                    tensor=source_tensor,
-                    transfer_dtype=transfer_dtype,
-                    source_partial_groups=source_partial_groups,
+            # Colocated refinement: a P2P route whose only destination is this
+            # rank itself needs no wire op — the LOCAL chunk emitted below covers
+            # it in-process, and an isend to self would never match.
+            self_p2p = transport == Transport.P2P and dst_ranks == (rank,)
+            if source_tensor is not None and not (self_p2p and target_tensor is not None):
+                chunks.append(
+                    Chunk(
+                        chunk_shape=calculate_chunk_shape(source_num_slicers_extended, source_tensor_shape),
+                        transport=transport,
+                        is_source=True,
+                        is_target=False,
+                        src_rank=rank,
+                        src_idx=src_idx,
+                        dst_ranks=dst_ranks,
+                        src_slice=src_slice_tuples,
+                        tensor=source_tensor,
+                        transfer_dtype=transfer_dtype,
+                        source_partial_groups=source_partial_groups,
+                    )
                 )
-            )
+                source_chunk = chunks[-1]
         for dst in route.dsts:
             dst_rank = dst.rank
             dst_idx = dst.cell
@@ -124,8 +130,22 @@ def m2m_to_chunks(
                 dst_slice_tuples = get_slice_from_multi_index(
                     dst_idx, target_num_slicers_extended, target_slicer_tuples
                 )
-            if src_rank == rank:
+            if src_rank == rank and source_tensor is not None and target_tensor is not None:
+                if source_partial_groups and not self_p2p:
+                    # Write the local target from the broadcast's reduced buffer.
+                    # A separate LOCAL chunk would read unreduced values or
+                    # issue an extra all_reduce without matching peer calls.
+                    source_chunk.is_target = True
+                    source_chunk.src_tensor = source_tensor
+                    source_chunk.tensor = target_tensor
+                    source_chunk.dst_idx = dst_idx
+                    source_chunk.dst_slice = dst_slice_tuples
+                    continue
                 # dst landed on the source rank: read source, write target locally.
+                # Colocated meshes make this the common case — the source and
+                # target are two different tensors on the same rank, so the chunk
+                # carries both (src_tensor); single-tensor self-copy keeps
+                # src_tensor=None and reads/writes ``tensor``.
                 chunks.append(
                     Chunk(
                         chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
@@ -139,9 +159,12 @@ def m2m_to_chunks(
                         src_slice=src_slice_tuples,
                         dst_slice=dst_slice_tuples,
                         tensor=target_tensor,
+                        src_tensor=source_tensor,
+                        source_partial_groups=source_partial_groups if self_p2p else None,
+                        transfer_dtype=transfer_dtype,
                     )
                 )
-            else:
+            elif target_tensor is not None:
                 chunks.append(
                     Chunk(
                         chunk_shape=calculate_chunk_shape(target_num_slicers_extended, target_tensor_shape),
