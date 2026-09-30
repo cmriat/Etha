@@ -23,7 +23,7 @@ import torch
 import pytest
 import torch.distributed as dist
 from torch.distributed._tensor import DeviceMesh, distribute_tensor
-from torch.distributed.tensor.placement_types import Shard, Replicate
+from torch.distributed.tensor.placement_types import Shard, Partial, Replicate
 
 from etha.comm import (
     bucket_comm,
@@ -97,6 +97,38 @@ def run_colocated_worker(rank: int, world_size: int, device: str) -> None:
 
     assert torch.equal(infer16_dt.full_tensor(), master.to(torch.bfloat16)), f"rank {rank}: cast reshard mismatch"
     assert torch.equal(train_local, train_snapshot), f"rank {rank}: cast transfer mutated the FP32 master"
+
+    # Partial broadcast has both local and remote targets. Every target must
+    # consume the reduced value, including in coalesced, reused buckets.
+    mesh = DeviceMesh(device, torch.arange(world_size).view(2, 2))
+    partial_map = get_m2m_map(
+        mesh, (Partial(), Shard(0)), mesh, (Shard(0), Replicate()), group=dist.group.WORLD, device=device
+    )
+    sources = [torch.full((2, 2), rank + 1.0 + offset, device=device) for offset in (0, 10)]
+    snapshots = [source.clone() for source in sources]
+    for bucket_size in (1, 256 * 1024):
+        targets = [torch.zeros((2, 2), dtype=torch.bfloat16, device=device) for _ in sources]
+        chunks = []
+        for source, target in zip(sources, targets, strict=True):
+            chunks.extend(
+                m2m_to_chunks(
+                    partial_map,
+                    rank=rank,
+                    source_tensor=source,
+                    target_tensor=target,
+                    transfer_dtype=torch.bfloat16,
+                    source_partial_groups=[(mesh.get_group(0), "sum")],
+                )
+            )
+        buckets = chunk_to_bucket_ops(chunks, bucket_size=bucket_size)
+        if bucket_size > 1:
+            assert any(len(bucket.chunks) > 1 for bucket in buckets)
+        for _ in range(2):
+            bucket_comm(buckets, sequential=True)
+            for offset, source, snapshot, target in zip((0, 10), sources, snapshots, targets, strict=True):
+                expected = (4.0 if rank < 2 else 6.0) + 2 * offset
+                assert torch.equal(target, torch.full_like(target, expected)), f"rank {rank}: local Partial mismatch"
+                assert torch.equal(source, snapshot), f"rank {rank}: Partial transfer mutated the source"
 
     dist.destroy_process_group()
 

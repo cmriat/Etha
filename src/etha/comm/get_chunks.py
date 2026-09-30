@@ -119,6 +119,7 @@ def m2m_to_chunks(
                         source_partial_groups=source_partial_groups,
                     )
                 )
+                source_chunk = chunks[-1]
         for dst in route.dsts:
             dst_rank = dst.rank
             dst_idx = dst.cell
@@ -130,6 +131,16 @@ def m2m_to_chunks(
                     dst_idx, target_num_slicers_extended, target_slicer_tuples
                 )
             if src_rank == rank and source_tensor is not None and target_tensor is not None:
+                if source_partial_groups and not self_p2p:
+                    # Write the local target from the broadcast's reduced buffer.
+                    # A separate LOCAL chunk would read unreduced values or
+                    # issue an extra all_reduce without matching peer calls.
+                    source_chunk.is_target = True
+                    source_chunk.src_tensor = source_tensor
+                    source_chunk.tensor = target_tensor
+                    source_chunk.dst_idx = dst_idx
+                    source_chunk.dst_slice = dst_slice_tuples
+                    continue
                 # dst landed on the source rank: read source, write target locally.
                 # Colocated meshes make this the common case — the source and
                 # target are two different tensors on the same rank, so the chunk
